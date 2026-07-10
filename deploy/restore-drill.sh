@@ -16,10 +16,13 @@ if [ -r "$checksum_file" ]; then
   (cd "$(dirname -- "$backup_file")" && sha256sum -c "$(basename -- "$checksum_file")")
 fi
 
-if docker compose version >/dev/null 2>&1; then
+if docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   use_sudo=false
-else
+elif sudo -n docker info >/dev/null 2>&1 && sudo -n docker compose version >/dev/null 2>&1; then
   use_sudo=true
+else
+  echo "Docker daemon is unavailable to the current user and passwordless sudo." >&2
+  exit 1
 fi
 
 dc() {

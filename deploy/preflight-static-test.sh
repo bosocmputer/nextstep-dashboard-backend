@@ -9,6 +9,13 @@ env_file="$temporary/production.env"
 bad_env_file="$temporary/production-bad.env"
 raw_hash_env_file="$temporary/production-raw-hash.env"
 
+for runtime_script in backup.sh restore-drill.sh; do
+  if ! grep -q 'docker info' "$script_dir/$runtime_script"; then
+    echo "$runtime_script must verify Docker daemon access before omitting sudo" >&2
+    exit 1
+  fi
+done
+
 chmod_line=$(awk '/chmod 600 .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
 chown_line=$(awk '/chown .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
 if [ -z "$chmod_line" ] || [ -z "$chown_line" ] || [ "$chmod_line" -ge "$chown_line" ]; then
