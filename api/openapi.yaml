@@ -539,6 +539,57 @@ paths:
                 properties:
                   data: {type: array, items: {$ref: '#/components/schemas/ReportDefinition'}}
         '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/viewer/tenants/{tenantId}/executive-overview:
+    get:
+      tags: [Viewer]
+      operationId: getViewerExecutiveOverview
+      security: [{ViewerSession: []}]
+      parameters: [{$ref: '#/components/parameters/TenantID'}]
+      responses:
+        '200':
+          description: Latest compact dashboards for reports authorized to the verified viewer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutiveOverview'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes:
+    post:
+      tags: [Viewer]
+      operationId: createViewerDashboardRefresh
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202':
+          description: A bounded refresh of all authorized reports was queued.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DashboardRefresh'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes/{refreshId}:
+    get:
+      tags: [Viewer]
+      operationId: getViewerDashboardRefresh
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - name: refreshId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Current bundle progress derived from its report runs.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DashboardRefresh'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs:
     post:
       tags: [Viewer]
@@ -1080,6 +1131,49 @@ components:
           maxItems: 4
           items: {$ref: '#/components/schemas/DashboardVisualization'}
         quality: {$ref: '#/components/schemas/DashboardQuality'}
+    DashboardSnapshot:
+      type: object
+      additionalProperties: false
+      required: [runId, dashboard]
+      properties:
+        runId: {type: string, format: uuid}
+        dashboard: {$ref: '#/components/schemas/ReportDashboard'}
+    ExecutiveOverview:
+      type: object
+      additionalProperties: false
+      required: [tenantId, timezone, items]
+      properties:
+        tenantId: {type: string, format: uuid}
+        timezone: {type: string, enum: [Asia/Bangkok]}
+        items:
+          type: array
+          maxItems: 10
+          items: {$ref: '#/components/schemas/DashboardSnapshot'}
+    DashboardRefreshRun:
+      type: object
+      additionalProperties: false
+      required: [reportKey, runId, status]
+      properties:
+        reportKey: {$ref: '#/components/schemas/ReportKey'}
+        runId: {type: string, format: uuid}
+        status: {$ref: '#/components/schemas/ReportRunStatus'}
+    DashboardRefresh:
+      type: object
+      additionalProperties: false
+      required: [id, tenantId, status, total, completed, failed, runs, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid}
+        status: {type: string, enum: [QUEUED, RUNNING, PARTIAL, SUCCEEDED, FAILED]}
+        total: {type: integer, minimum: 1, maximum: 10}
+        completed: {type: integer, minimum: 0, maximum: 10}
+        failed: {type: integer, minimum: 0, maximum: 10}
+        runs:
+          type: array
+          maxItems: 10
+          items: {$ref: '#/components/schemas/DashboardRefreshRun'}
+        createdAt: {type: string, format: date-time}
+        finishedAt: {type: string, format: date-time, nullable: true}
     LineSessionInput:
       type: object
       additionalProperties: false

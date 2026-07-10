@@ -186,6 +186,9 @@ type ViewerReportAPI interface {
 	Create(context.Context, uuid.UUID, uuid.UUID, report.Key, string, viewer.CreateReportRunInput) (report.Run, error)
 	Get(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error)
 	GetDashboard(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Dashboard, error)
+	ExecutiveOverview(context.Context, uuid.UUID, uuid.UUID) (viewer.ExecutiveOverview, error)
+	CreateDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, string) (viewer.DashboardRefresh, error)
+	GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefresh, error)
 	ListRows(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID, string, int) (viewer.ReportRows, error)
 	Cancel(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error)
 }

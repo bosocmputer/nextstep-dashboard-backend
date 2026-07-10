@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/viewer"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -345,6 +346,234 @@ func (store *ReportStore) GetDashboard(ctx context.Context, tenantID, runID uuid
 		return report.Dashboard{}, fmt.Errorf("decode report dashboard: %w", err)
 	}
 	return dashboard, nil
+}
+
+func (store *ReportStore) ListLatestDashboards(ctx context.Context, tenantID uuid.UUID, reportKeys []report.Key) ([]viewer.DashboardSnapshot, error) {
+	if len(reportKeys) == 0 || len(reportKeys) > len(report.Keys()) {
+		return []viewer.DashboardSnapshot{}, nil
+	}
+	keys := make([]string, len(reportKeys))
+	for index, key := range reportKeys {
+		if _, ok := report.DefinitionFor(key); !ok {
+			return nil, report.ErrRunForbidden
+		}
+		keys[index] = string(key)
+	}
+	rows, err := store.pool.Query(ctx, `
+		select distinct on (report_key) id, report_key, dashboard_json
+		from report_runs
+		where tenant_id = $1 and report_key = any($2::text[])
+		  and status = 'SUCCEEDED' and dashboard_json <> '{}'::jsonb
+		order by report_key, finished_at desc nulls last, id desc`, tenantID, keys)
+	if err != nil {
+		return nil, fmt.Errorf("list latest report dashboards: %w", err)
+	}
+	defer rows.Close()
+	items := make([]viewer.DashboardSnapshot, 0, len(reportKeys))
+	for rows.Next() {
+		var item viewer.DashboardSnapshot
+		var reportKey report.Key
+		var dashboardJSON []byte
+		if err := rows.Scan(&item.RunID, &reportKey, &dashboardJSON); err != nil {
+			return nil, fmt.Errorf("scan latest report dashboard: %w", err)
+		}
+		if err := json.Unmarshal(dashboardJSON, &item.Dashboard); err != nil {
+			return nil, fmt.Errorf("decode latest report dashboard: %w", err)
+		}
+		if item.Dashboard.ReportKey != reportKey {
+			return nil, fmt.Errorf("stored dashboard report key does not match run")
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate latest report dashboards: %w", err)
+	}
+	return items, nil
+}
+
+func (store *ReportStore) CreateDashboardRefresh(ctx context.Context, recipientID, tenantID uuid.UUID, idempotencyKey string, inputs []report.EnqueueInput, now time.Time) (viewer.DashboardRefresh, error) {
+	if len(idempotencyKey) < 8 || len(idempotencyKey) > 200 || len(inputs) < 1 || len(inputs) > len(report.Keys()) {
+		return viewer.DashboardRefresh{}, viewer.ErrReportInputInvalid
+	}
+	keys := make([]string, 0, len(inputs))
+	seen := make(map[report.Key]struct{}, len(inputs))
+	for _, input := range inputs {
+		if input.TenantID != tenantID || input.Source != report.SourceDashboard || input.RequestedByRecipient == nil || *input.RequestedByRecipient != recipientID {
+			return viewer.DashboardRefresh{}, report.ErrRunForbidden
+		}
+		if _, ok := report.DefinitionFor(input.ReportKey); !ok || input.Period.DateFrom == "" || input.Period.DateTo == "" {
+			return viewer.DashboardRefresh{}, viewer.ErrReportInputInvalid
+		}
+		if _, duplicate := seen[input.ReportKey]; duplicate {
+			return viewer.DashboardRefresh{}, viewer.ErrReportInputInvalid
+		}
+		seen[input.ReportKey] = struct{}{}
+		keys = append(keys, string(input.ReportKey))
+	}
+
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("begin dashboard refresh: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "dashboard-refresh:"+tenantID.String()); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("lock dashboard refresh: %w", err)
+	}
+
+	var existingID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		select id from dashboard_refreshes
+		where tenant_id = $1 and requested_by_recipient_id = $2 and idempotency_key = $3`, tenantID, recipientID, idempotencyKey).Scan(&existingID)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("commit dashboard refresh replay: %w", err)
+		}
+		return store.GetDashboardRefresh(ctx, recipientID, tenantID, existingID, now)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return viewer.DashboardRefresh{}, fmt.Errorf("find dashboard refresh replay: %w", err)
+	}
+
+	var tenantAllowed bool
+	if err := tx.QueryRow(ctx, `
+		select exists (
+		  select 1 from tenants t
+		  join tenant_memberships m on m.tenant_id = t.id and m.recipient_id = $2 and m.status = 'ACTIVE'
+		  join line_recipients r on r.id = m.recipient_id and r.status = 'ACTIVE'
+		  where t.id = $1 and t.status = 'ACTIVE' and t.access_ends_at > $3
+		)`, tenantID, recipientID, now).Scan(&tenantAllowed); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("validate dashboard refresh tenant: %w", err)
+	}
+	if !tenantAllowed {
+		return viewer.DashboardRefresh{}, report.ErrRunForbidden
+	}
+	var permissionCount int
+	if err := tx.QueryRow(ctx, `
+		select count(*) from recipient_report_permissions
+		where tenant_id = $1 and recipient_id = $2 and report_key = any($3::text[])`, tenantID, recipientID, keys).Scan(&permissionCount); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("validate dashboard refresh reports: %w", err)
+	}
+	if permissionCount != len(keys) {
+		return viewer.DashboardRefresh{}, report.ErrRunForbidden
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `
+		select exists (
+		  select 1 from dashboard_refreshes refresh
+		  join dashboard_refresh_runs linked on linked.refresh_id = refresh.id
+		  join report_runs run on run.id = linked.report_run_id
+		  where refresh.tenant_id = $1 and run.status in ('QUEUED', 'CLAIMED', 'RUNNING')
+		)`, tenantID).Scan(&active); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("check active dashboard refresh: %w", err)
+	}
+	if active {
+		return viewer.DashboardRefresh{}, report.ErrRunConcurrencyLimit
+	}
+
+	refreshID := uuid.New()
+	if _, err := tx.Exec(ctx, `
+		insert into dashboard_refreshes (id, tenant_id, requested_by_recipient_id, idempotency_key, total, created_at, updated_at)
+		values ($1, $2, $3, $4, $5, $6, $6)`, refreshID, tenantID, recipientID, idempotencyKey, len(inputs), now); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("insert dashboard refresh: %w", err)
+	}
+	for _, input := range inputs {
+		runID := uuid.New()
+		paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": input.Period.DateFrom, "dateTo": input.Period.DateTo})
+		runIdempotency := "overview:" + refreshID.String() + ":" + string(input.ReportKey)
+		if _, err := tx.Exec(ctx, `
+			insert into report_runs (
+			  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
+			  period_from, period_to, params_json, requested_by_recipient_id,
+			  queued_at, expires_at, created_at, updated_at
+			) values ($1, $2, $3, 'DASHBOARD', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9, $10, $11, $10, $10)`,
+			runID, tenantID, input.ReportKey, runIdempotency, input.Period.Preset, input.Period.DateFrom, input.Period.DateTo,
+			paramsJSON, recipientID, now, now.Add(24*time.Hour)); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("insert dashboard refresh report run: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into dashboard_refresh_runs (refresh_id, report_key, report_run_id)
+			values ($1, $2, $3)`, refreshID, input.ReportKey, runID); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("link dashboard refresh report run: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("commit dashboard refresh: %w", err)
+	}
+	return store.GetDashboardRefresh(ctx, recipientID, tenantID, refreshID, now)
+}
+
+func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, tenantID, refreshID uuid.UUID, now time.Time) (viewer.DashboardRefresh, error) {
+	var refresh viewer.DashboardRefresh
+	err := store.pool.QueryRow(ctx, `
+		select id, tenant_id, total, created_at, finished_at
+		from dashboard_refreshes
+		where id = $1 and tenant_id = $2 and requested_by_recipient_id = $3`, refreshID, tenantID, recipientID).Scan(
+		&refresh.ID, &refresh.TenantID, &refresh.Total, &refresh.CreatedAt, &refresh.FinishedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return viewer.DashboardRefresh{}, report.ErrRunNotFound
+	}
+	if err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("get dashboard refresh: %w", err)
+	}
+	rows, err := store.pool.Query(ctx, `
+		select linked.report_key, linked.report_run_id, run.status
+		from dashboard_refresh_runs linked
+		join report_runs run on run.id = linked.report_run_id
+		where linked.refresh_id = $1
+		order by linked.report_key`, refreshID)
+	if err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("list dashboard refresh runs: %w", err)
+	}
+	defer rows.Close()
+	queued, running := 0, 0
+	refresh.Runs = make([]viewer.DashboardRefreshRun, 0, refresh.Total)
+	for rows.Next() {
+		var item viewer.DashboardRefreshRun
+		if err := rows.Scan(&item.ReportKey, &item.RunID, &item.Status); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("scan dashboard refresh run: %w", err)
+		}
+		switch item.Status {
+		case report.StatusQueued:
+			queued++
+		case report.StatusClaimed, report.StatusRunning:
+			running++
+		case report.StatusSucceeded:
+			refresh.Completed++
+		case report.StatusFailed, report.StatusCancelled, report.StatusExpired:
+			refresh.Failed++
+		}
+		refresh.Runs = append(refresh.Runs, item)
+	}
+	if err := rows.Err(); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("iterate dashboard refresh runs: %w", err)
+	}
+	switch {
+	case running > 0:
+		refresh.Status = viewer.DashboardRefreshRunning
+	case queued > 0:
+		refresh.Status = viewer.DashboardRefreshQueued
+	case refresh.Completed == refresh.Total:
+		refresh.Status = viewer.DashboardRefreshSucceeded
+	case refresh.Completed > 0 && refresh.Failed > 0:
+		refresh.Status = viewer.DashboardRefreshPartial
+	default:
+		refresh.Status = viewer.DashboardRefreshFailed
+	}
+	terminal := refresh.Status == viewer.DashboardRefreshSucceeded || refresh.Status == viewer.DashboardRefreshPartial || refresh.Status == viewer.DashboardRefreshFailed
+	if terminal && refresh.FinishedAt == nil {
+		finished := now
+		refresh.FinishedAt = &finished
+	}
+	if _, err := store.pool.Exec(ctx, `
+		update dashboard_refreshes
+		set status = $2, completed = $3, failed = $4,
+		    finished_at = case when $5 then coalesce(finished_at, $6) else null end,
+		    updated_at = $6
+		where id = $1`, refresh.ID, refresh.Status, refresh.Completed, refresh.Failed, terminal, now); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("update dashboard refresh status: %w", err)
+	}
+	return refresh, nil
 }
 
 func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID, safeCode, safeMessage string, now time.Time) error {

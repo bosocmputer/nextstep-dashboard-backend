@@ -24,11 +24,15 @@ func (fake *fakeReportAccess) CanAccessReport(context.Context, uuid.UUID, uuid.U
 }
 
 type fakeViewerRunStore struct {
-	enqueued  report.EnqueueInput
-	run       report.Run
-	rows      report.RowsPage
-	dashboard report.Dashboard
-	cancelled bool
+	enqueued         report.EnqueueInput
+	run              report.Run
+	rows             report.RowsPage
+	dashboard        report.Dashboard
+	latest           []DashboardSnapshot
+	refresh          DashboardRefresh
+	refreshInputs    []report.EnqueueInput
+	refreshRecipient uuid.UUID
+	cancelled        bool
 }
 
 func (fake *fakeViewerRunStore) Enqueue(_ context.Context, input report.EnqueueInput, _ time.Time) (report.Run, error) {
@@ -52,6 +56,20 @@ func (fake *fakeViewerRunStore) ListRows(context.Context, uuid.UUID, int, int, t
 
 func (fake *fakeViewerRunStore) GetDashboard(context.Context, uuid.UUID, uuid.UUID) (report.Dashboard, error) {
 	return fake.dashboard, nil
+}
+
+func (fake *fakeViewerRunStore) ListLatestDashboards(context.Context, uuid.UUID, []report.Key) ([]DashboardSnapshot, error) {
+	return fake.latest, nil
+}
+
+func (fake *fakeViewerRunStore) CreateDashboardRefresh(_ context.Context, recipientID, _ uuid.UUID, _ string, inputs []report.EnqueueInput, _ time.Time) (DashboardRefresh, error) {
+	fake.refreshRecipient = recipientID
+	fake.refreshInputs = inputs
+	return fake.refresh, nil
+}
+
+func (fake *fakeViewerRunStore) GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) (DashboardRefresh, error) {
+	return fake.refresh, nil
 }
 
 func (fake *fakeViewerRunStore) Cancel(context.Context, uuid.UUID, time.Time) (report.Run, error) {
@@ -134,5 +152,35 @@ func TestReportServiceBindsRunReadsAndCancellationToRequestingRecipient(t *testi
 	}
 	if _, err := service.GetDashboard(context.Background(), otherRecipient, tenantID, report.StockBalance, runID); !errors.Is(err, ErrReportForbidden) {
 		t.Fatalf("cross-recipient GetDashboard() error = %v", err)
+	}
+}
+
+func TestReportServiceBuildsPermissionFilteredExecutiveOverviewAndRefresh(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	recipientID, tenantID, refreshID := uuid.New(), uuid.New(), uuid.New()
+	access := &fakeReportAccess{allowed: true, tenants: []TenantAccess{{
+		ID: tenantID, Name: "วาวา", Timezone: "Asia/Bangkok",
+		ReportKeys: []report.Key{report.SalesGoodsServices, report.StockBalance},
+	}}}
+	store := &fakeViewerRunStore{
+		latest:  []DashboardSnapshot{{RunID: uuid.New(), Dashboard: report.Dashboard{ReportKey: report.SalesGoodsServices, Version: "1.0.0"}}},
+		refresh: DashboardRefresh{ID: refreshID, TenantID: tenantID, Status: DashboardRefreshQueued, Total: 2},
+	}
+	service := NewReportService(access, store, func() time.Time { return now })
+
+	overview, err := service.ExecutiveOverview(context.Background(), recipientID, tenantID)
+	if err != nil || overview.TenantID != tenantID || overview.Timezone != "Asia/Bangkok" || len(overview.Items) != 1 {
+		t.Fatalf("ExecutiveOverview() = %+v, %v", overview, err)
+	}
+	refresh, err := service.CreateDashboardRefresh(context.Background(), recipientID, tenantID, "overview-refresh-001")
+	if err != nil || refresh.ID != refreshID || store.refreshRecipient != recipientID || len(store.refreshInputs) != 2 {
+		t.Fatalf("CreateDashboardRefresh() = %+v, %v inputs=%+v", refresh, err, store.refreshInputs)
+	}
+	if store.refreshInputs[0].Period.Preset != report.MonthToDate || store.refreshInputs[1].Period.Preset != report.AsOfRun {
+		t.Fatalf("refresh periods = %+v", store.refreshInputs)
+	}
+	got, err := service.GetDashboardRefresh(context.Background(), recipientID, tenantID, refreshID)
+	if err != nil || got.ID != refreshID {
+		t.Fatalf("GetDashboardRefresh() = %+v, %v", got, err)
 	}
 }

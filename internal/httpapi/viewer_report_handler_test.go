@@ -22,6 +22,10 @@ type fakeViewerReportAPI struct {
 	rowsErr      error
 	dashboard    report.Dashboard
 	dashboardErr error
+	overview     viewer.ExecutiveOverview
+	overviewErr  error
+	refresh      viewer.DashboardRefresh
+	refreshErr   error
 	cancelled    report.Run
 	cancelErr    error
 	createCall   int
@@ -42,6 +46,18 @@ func (fake *fakeViewerReportAPI) ListRows(context.Context, uuid.UUID, uuid.UUID,
 
 func (fake *fakeViewerReportAPI) GetDashboard(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Dashboard, error) {
 	return fake.dashboard, fake.dashboardErr
+}
+
+func (fake *fakeViewerReportAPI) ExecutiveOverview(context.Context, uuid.UUID, uuid.UUID) (viewer.ExecutiveOverview, error) {
+	return fake.overview, fake.overviewErr
+}
+
+func (fake *fakeViewerReportAPI) CreateDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, string) (viewer.DashboardRefresh, error) {
+	return fake.refresh, fake.refreshErr
+}
+
+func (fake *fakeViewerReportAPI) GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefresh, error) {
+	return fake.refresh, fake.refreshErr
 }
 
 func (fake *fakeViewerReportAPI) Cancel(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error) {
@@ -126,6 +142,42 @@ func TestViewerReturnsAuthorizedExecutiveDashboard(t *testing.T) {
 
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"reportKey":"stock_balance"`) || !strings.Contains(response.Body.String(), `"balance_amount"`) {
 		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestViewerExecutiveOverviewAndRefreshEndpoints(t *testing.T) {
+	tenantID, refreshID := uuid.New(), uuid.New()
+	authAPI := &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: uuid.New()}}
+	reportAPI := &fakeViewerReportAPI{
+		overview: viewer.ExecutiveOverview{TenantID: tenantID, Timezone: "Asia/Bangkok", Items: []viewer.DashboardSnapshot{}},
+		refresh:  viewer.DashboardRefresh{ID: refreshID, TenantID: tenantID, Status: viewer.DashboardRefreshQueued, Total: 10},
+	}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), ViewerAuth: authAPI, ViewerReports: reportAPI})
+
+	overviewRequest := httptest.NewRequest(http.MethodGet, "/api/v1/viewer/tenants/"+tenantID.String()+"/executive-overview", nil)
+	overviewRequest.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	overviewResponse := httptest.NewRecorder()
+	handler.ServeHTTP(overviewResponse, overviewRequest)
+	if overviewResponse.Code != http.StatusOK || !strings.Contains(overviewResponse.Body.String(), `"timezone":"Asia/Bangkok"`) {
+		t.Fatalf("overview status=%d body=%s", overviewResponse.Code, overviewResponse.Body.String())
+	}
+
+	refreshRequest := httptest.NewRequest(http.MethodPost, "/api/v1/viewer/tenants/"+tenantID.String()+"/executive-overview/refreshes", nil)
+	refreshRequest.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	refreshRequest.Header.Set("X-CSRF-Token", "viewer-csrf")
+	refreshRequest.Header.Set("Idempotency-Key", "overview-refresh-001")
+	refreshResponse := httptest.NewRecorder()
+	handler.ServeHTTP(refreshResponse, refreshRequest)
+	if refreshResponse.Code != http.StatusAccepted || !strings.Contains(refreshResponse.Body.String(), refreshID.String()) {
+		t.Fatalf("refresh status=%d body=%s", refreshResponse.Code, refreshResponse.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/viewer/tenants/"+tenantID.String()+"/executive-overview/refreshes/"+refreshID.String(), nil)
+	statusRequest.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"total":10`) {
+		t.Fatalf("status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
 	}
 }
 

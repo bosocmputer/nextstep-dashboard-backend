@@ -77,6 +77,7 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 		"report_run_rows",
 		"notification_schedules",
 		"line_delivery_outbox",
+		"dashboard_refreshes",
 		"recipient_invitations",
 		"audit_logs",
 	} {

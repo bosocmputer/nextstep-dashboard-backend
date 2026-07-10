@@ -55,6 +55,9 @@ func BuildDashboard(key Key, period, comparisonPeriod Period, currentSteps, prev
 	if err != nil {
 		return Dashboard{}, err
 	}
+	if visualizations == nil {
+		visualizations = []DashboardVisualization{}
+	}
 	dashboard.Visualizations = visualizations
 	return dashboard, nil
 }

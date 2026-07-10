@@ -13,6 +13,59 @@ import (
 )
 
 func registerViewerReportRoutes(router chi.Router, viewerAuth ViewerAPI, viewerReports ViewerReportAPI) {
+	router.Get("/api/v1/viewer/tenants/{tenantId}/executive-overview", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		overview, err := viewerReports.ExecutiveOverview(request.Context(), authenticated.RecipientID, tenantID)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, overview)
+	})
+
+	router.Post("/api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewerMutation(response, request, viewerAuth)
+		if !ok || !validIdempotencyHeader(response, request) {
+			return
+		}
+		tenantID, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		refresh, err := viewerReports.CreateDashboardRefresh(request.Context(), authenticated.RecipientID, tenantID, request.Header.Get("Idempotency-Key"))
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusAccepted, refresh)
+	})
+
+	router.Get("/api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes/{refreshId}", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		refreshID, err := uuid.Parse(chi.URLParam(request, "refreshId"))
+		if err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Dashboard refresh ID must be a UUID.", false)
+			return
+		}
+		refresh, err := viewerReports.GetDashboardRefresh(request.Context(), authenticated.RecipientID, tenantID, refreshID)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, refresh)
+	})
+
 	router.Post("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs", func(response http.ResponseWriter, request *http.Request) {
 		authenticated, ok := authenticateViewerMutation(response, request, viewerAuth)
 		if !ok || !validIdempotencyHeader(response, request) {

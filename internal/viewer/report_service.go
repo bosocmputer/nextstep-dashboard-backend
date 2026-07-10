@@ -23,6 +23,9 @@ type ViewerRunStore interface {
 	Enqueue(context.Context, report.EnqueueInput, time.Time) (report.Run, error)
 	Get(context.Context, uuid.UUID, time.Time) (report.Run, error)
 	GetDashboard(context.Context, uuid.UUID, uuid.UUID) (report.Dashboard, error)
+	ListLatestDashboards(context.Context, uuid.UUID, []report.Key) ([]DashboardSnapshot, error)
+	CreateDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, string, []report.EnqueueInput, time.Time) (DashboardRefresh, error)
+	GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) (DashboardRefresh, error)
 	ListRows(context.Context, uuid.UUID, int, int, time.Time) (report.RowsPage, error)
 	Cancel(context.Context, uuid.UUID, time.Time) (report.Run, error)
 }
@@ -145,6 +148,70 @@ func (service *ReportService) GetDashboard(ctx context.Context, recipientID, ten
 	return dashboard, nil
 }
 
+func (service *ReportService) ExecutiveOverview(ctx context.Context, recipientID, tenantID uuid.UUID) (ExecutiveOverview, error) {
+	tenant, err := service.authorizedTenant(ctx, recipientID, tenantID)
+	if err != nil {
+		return ExecutiveOverview{}, err
+	}
+	items, err := service.store.ListLatestDashboards(ctx, tenantID, tenant.ReportKeys)
+	if err != nil {
+		return ExecutiveOverview{}, err
+	}
+	allowed := make(map[report.Key]struct{}, len(tenant.ReportKeys))
+	for _, key := range tenant.ReportKeys {
+		allowed[key] = struct{}{}
+	}
+	for _, item := range items {
+		if _, ok := allowed[item.Dashboard.ReportKey]; !ok {
+			return ExecutiveOverview{}, ErrReportForbidden
+		}
+	}
+	return ExecutiveOverview{TenantID: tenantID, Timezone: tenant.Timezone, Items: items}, nil
+}
+
+func (service *ReportService) CreateDashboardRefresh(ctx context.Context, recipientID, tenantID uuid.UUID, idempotencyKey string) (DashboardRefresh, error) {
+	if len(idempotencyKey) < 8 || len(idempotencyKey) > 200 {
+		return DashboardRefresh{}, ErrReportInputInvalid
+	}
+	tenant, err := service.authorizedTenant(ctx, recipientID, tenantID)
+	if err != nil {
+		return DashboardRefresh{}, err
+	}
+	location, err := time.LoadLocation(tenant.Timezone)
+	if err != nil {
+		return DashboardRefresh{}, ErrReportInputInvalid
+	}
+	now := service.now().UTC()
+	inputs := make([]report.EnqueueInput, 0, len(tenant.ReportKeys))
+	for _, key := range tenant.ReportKeys {
+		definition, ok := report.DefinitionFor(key)
+		if !ok {
+			return DashboardRefresh{}, ErrReportForbidden
+		}
+		preset := report.MonthToDate
+		if definition.ParameterKind == report.AsOfDate {
+			preset = report.AsOfRun
+		}
+		period, resolveErr := report.ResolvePeriod(preset, location, now, nil, nil)
+		if resolveErr != nil {
+			return DashboardRefresh{}, ErrReportInputInvalid
+		}
+		requestedBy := recipientID
+		inputs = append(inputs, report.EnqueueInput{
+			TenantID: tenantID, ReportKey: key, Source: report.SourceDashboard,
+			Period: period, RequestedByRecipient: &requestedBy,
+		})
+	}
+	return service.store.CreateDashboardRefresh(ctx, recipientID, tenantID, idempotencyKey, inputs, now)
+}
+
+func (service *ReportService) GetDashboardRefresh(ctx context.Context, recipientID, tenantID, refreshID uuid.UUID) (DashboardRefresh, error) {
+	if _, err := service.authorizedTenant(ctx, recipientID, tenantID); err != nil {
+		return DashboardRefresh{}, err
+	}
+	return service.store.GetDashboardRefresh(ctx, recipientID, tenantID, refreshID, service.now().UTC())
+}
+
 func (service *ReportService) Cancel(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID) (report.Run, error) {
 	if _, err := service.Get(ctx, recipientID, tenantID, reportKey, runID); err != nil {
 		return report.Run{}, err
@@ -153,21 +220,28 @@ func (service *ReportService) Cancel(ctx context.Context, recipientID, tenantID 
 }
 
 func (service *ReportService) authorizedTimezone(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key) (string, error) {
-	tenants, err := service.access.ListTenants(ctx, recipientID)
+	tenant, err := service.authorizedTenant(ctx, recipientID, tenantID)
 	if err != nil {
 		return "", err
 	}
-	for _, item := range tenants {
-		if item.ID == tenantID {
-			if err := service.authorizeReport(ctx, recipientID, tenantID, reportKey); err != nil {
-				return "", err
-			}
-			return item.Timezone, nil
-		}
+	if err := service.authorizeReport(ctx, recipientID, tenantID, reportKey); err != nil {
+		return "", err
 	}
-	return "", ErrReportForbidden
+	return tenant.Timezone, nil
 }
 
+func (service *ReportService) authorizedTenant(ctx context.Context, recipientID, tenantID uuid.UUID) (TenantAccess, error) {
+	tenants, err := service.access.ListTenants(ctx, recipientID)
+	if err != nil {
+		return TenantAccess{}, err
+	}
+	for _, item := range tenants {
+		if item.ID == tenantID {
+			return item, nil
+		}
+	}
+	return TenantAccess{}, ErrReportForbidden
+}
 func (service *ReportService) authorizeReport(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key) error {
 	if _, ok := report.DefinitionFor(reportKey); !ok {
 		return ErrReportForbidden

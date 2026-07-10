@@ -113,6 +113,39 @@ func TestReportWorkerRetriesRetryableSMLFailureWithoutPublishingRows(t *testing.
 	}
 }
 
+func TestReportWorkerKeepsCurrentDashboardWhenComparisonQueryFails(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	store := &fakeRunStore{run: report.Run{
+		ID: uuid.New(), TenantID: uuid.New(), ReportKey: report.SalesGoodsServices,
+		Source: report.SourceDashboard, Status: report.StatusClaimed, Attempt: 1,
+		Period: report.Period{Preset: report.Yesterday, DateFrom: "2026-07-09", DateTo: "2026-07-09"},
+	}}
+	queries := 0
+	worker := NewReportWorker(store, connectionProviderFunc(func(context.Context, uuid.UUID) (sml.Connection, error) {
+		return sml.Connection{}, nil
+	}), queryClientFunc(func(context.Context, sml.Connection, string) ([]map[string]string, error) {
+		queries++
+		switch queries {
+		case 1:
+			return []map[string]string{{"doc_date": "2026-07-09", "doc_no": "S1", "total_amount": "30.00"}}, nil
+		case 2:
+			return []map[string]string{{"doc_date": "2026-07-09", "doc_no": "S1", "item_code": "I1", "item_name": "สินค้า 1", "sum_amount": "30.00"}}, nil
+		default:
+			return nil, &sml.SafeError{Code: "SML_TIMEOUT", Retryable: true}
+		}
+	}), "worker-a", func() time.Time { return now })
+
+	if err := worker.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("ProcessOne() error = %v", err)
+	}
+	if store.completed == nil || store.failedCode != "" || store.retriedCode != "" || queries != 3 {
+		t.Fatalf("completed=%+v failed=%q retried=%q queries=%d", store.completed, store.failedCode, store.retriedCode, queries)
+	}
+	if store.completed.Dashboard == nil || store.completed.Dashboard.Quality.Status != "WARNING" || store.completed.Dashboard.KPIs[0].Comparison.Availability != report.ComparisonUnavailable {
+		t.Fatalf("dashboard = %+v", store.completed.Dashboard)
+	}
+}
+
 func TestReportWorkerFailsMalformedOutputAndSurfacesEmptyQueue(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	store := &fakeRunStore{run: report.Run{
