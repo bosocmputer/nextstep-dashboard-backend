@@ -14,15 +14,17 @@ import (
 )
 
 type fakeViewerReportAPI struct {
-	created    report.Run
-	createErr  error
-	got        report.Run
-	getErr     error
-	rows       viewer.ReportRows
-	rowsErr    error
-	cancelled  report.Run
-	cancelErr  error
-	createCall int
+	created      report.Run
+	createErr    error
+	got          report.Run
+	getErr       error
+	rows         viewer.ReportRows
+	rowsErr      error
+	dashboard    report.Dashboard
+	dashboardErr error
+	cancelled    report.Run
+	cancelErr    error
+	createCall   int
 }
 
 func (fake *fakeViewerReportAPI) Create(context.Context, uuid.UUID, uuid.UUID, report.Key, string, viewer.CreateReportRunInput) (report.Run, error) {
@@ -36,6 +38,10 @@ func (fake *fakeViewerReportAPI) Get(context.Context, uuid.UUID, uuid.UUID, repo
 
 func (fake *fakeViewerReportAPI) ListRows(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID, string, int) (viewer.ReportRows, error) {
 	return fake.rows, fake.rowsErr
+}
+
+func (fake *fakeViewerReportAPI) GetDashboard(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Dashboard, error) {
+	return fake.dashboard, fake.dashboardErr
 }
 
 func (fake *fakeViewerReportAPI) Cancel(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error) {
@@ -99,6 +105,26 @@ func TestViewerReportRowsMapExpiredDataToGone(t *testing.T) {
 	handler.ServeHTTP(response, request)
 
 	if response.Code != http.StatusGone || !strings.Contains(response.Body.String(), `"code":"REPORT_ROWS_EXPIRED"`) {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestViewerReturnsAuthorizedExecutiveDashboard(t *testing.T) {
+	tenantID, runID := uuid.New(), uuid.New()
+	authAPI := &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: uuid.New()}}
+	reportAPI := &fakeViewerReportAPI{dashboard: report.Dashboard{
+		ReportKey: report.StockBalance, Version: "1.0.0", Timezone: "Asia/Bangkok",
+		KPIs: []report.DashboardMetric{{Key: "balance_amount", Label: "มูลค่าสต็อก", Value: "500.00", Unit: report.UnitTHB}},
+	}}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), ViewerAuth: authAPI, ViewerReports: reportAPI})
+	path := "/api/v1/viewer/tenants/" + tenantID.String() + "/reports/stock_balance/runs/" + runID.String() + "/dashboard"
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"reportKey":"stock_balance"`) || !strings.Contains(response.Body.String(), `"balance_amount"`) {
 		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
 	}
 }

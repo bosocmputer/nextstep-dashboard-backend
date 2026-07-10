@@ -53,6 +53,14 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 	if reportCount != 10 {
 		t.Fatalf("report definition count = %d, want 10", reportCount)
 	}
+	var hasDashboardJSON bool
+	if err := pool.QueryRow(ctx, `
+		select exists (
+		  select 1 from information_schema.columns
+		  where table_name = 'report_runs' and column_name = 'dashboard_json'
+		)`).Scan(&hasDashboardJSON); err != nil || !hasDashboardJSON {
+		t.Fatalf("report_runs.dashboard_json missing: exists=%v err=%v", hasDashboardJSON, err)
+	}
 	var hasConfigFileName bool
 	if err := pool.QueryRow(ctx, `
 		select exists (

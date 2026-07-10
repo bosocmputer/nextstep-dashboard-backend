@@ -22,6 +22,7 @@ type ReportAccessControl interface {
 type ViewerRunStore interface {
 	Enqueue(context.Context, report.EnqueueInput, time.Time) (report.Run, error)
 	Get(context.Context, uuid.UUID, time.Time) (report.Run, error)
+	GetDashboard(context.Context, uuid.UUID, uuid.UUID) (report.Dashboard, error)
 	ListRows(context.Context, uuid.UUID, int, int, time.Time) (report.RowsPage, error)
 	Cancel(context.Context, uuid.UUID, time.Time) (report.Run, error)
 }
@@ -128,6 +129,20 @@ func (service *ReportService) ListRows(ctx context.Context, recipientID, tenantI
 		nextCursor = encodeReportCursor(page.NextOrdinal)
 	}
 	return ReportRows{RunID: runID, Columns: orderedColumns, Rows: page.Rows, NextCursor: nextCursor, HasMore: page.HasMore}, nil
+}
+
+func (service *ReportService) GetDashboard(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID) (report.Dashboard, error) {
+	if _, err := service.Get(ctx, recipientID, tenantID, reportKey, runID); err != nil {
+		return report.Dashboard{}, err
+	}
+	dashboard, err := service.store.GetDashboard(ctx, tenantID, runID)
+	if err != nil {
+		return report.Dashboard{}, err
+	}
+	if dashboard.ReportKey != reportKey {
+		return report.Dashboard{}, ErrReportForbidden
+	}
+	return dashboard, nil
 }
 
 func (service *ReportService) Cancel(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID) (report.Run, error) {

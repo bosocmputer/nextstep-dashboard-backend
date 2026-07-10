@@ -36,11 +36,11 @@ func TestRetentionStoreApplies24Hour90DayAnd365DayBoundaries(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		insert into report_runs (
 		  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
-		  period_from, period_to, summary_json, reconciliation_json, queued_at, finished_at,
+		  period_from, period_to, summary_json, reconciliation_json, dashboard_version, dashboard_json, queued_at, finished_at,
 		  expires_at, created_at, updated_at
 		) values
-		($1, $3, 'sales_goods_services', 'DASHBOARD', 'retention-dashboard-001', 'SUCCEEDED', 'CUSTOM', '2026-01-01', '2026-01-01', '{"total":"1"}', '{"status":"OK"}', $4, $4, $4, $4, $4),
-		($2, $3, 'stock_balance', 'SCHEDULE', 'retention-schedule-001', 'SUCCEEDED', 'AS_OF_RUN', '2026-01-01', '2026-01-01', '{"total":"2"}', '{"status":"OK"}', $4, $4, $4, $4, $4)`,
+		($1, $3, 'sales_goods_services', 'DASHBOARD', 'retention-dashboard-001', 'SUCCEEDED', 'CUSTOM', '2026-01-01', '2026-01-01', '{"total":"1"}', '{"status":"OK"}', '1.0.0', '{"reportKey":"sales_goods_services"}', $4, $4, $4, $4, $4),
+		($2, $3, 'stock_balance', 'SCHEDULE', 'retention-schedule-001', 'SUCCEEDED', 'AS_OF_RUN', '2026-01-01', '2026-01-01', '{"total":"2"}', '{"status":"OK"}', '1.0.0', '{"reportKey":"stock_balance"}', $4, $4, $4, $4, $4)`,
 		dashboardRunID, scheduledRunID, tenantID, oldSnapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -71,11 +71,12 @@ func TestRetentionStoreApplies24Hour90DayAnd365DayBoundaries(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select exists(select 1 from report_runs where id = $1)`, dashboardRunID).Scan(&dashboardExists); err != nil {
 		t.Fatal(err)
 	}
-	var scheduledSummary string
-	if err := pool.QueryRow(ctx, `select summary_json::text from report_runs where id = $1`, scheduledRunID).Scan(&scheduledSummary); err != nil {
+	var scheduledSummary, scheduledDashboard string
+	var scheduledDashboardVersion *string
+	if err := pool.QueryRow(ctx, `select summary_json::text, dashboard_json::text, dashboard_version from report_runs where id = $1`, scheduledRunID).Scan(&scheduledSummary, &scheduledDashboard, &scheduledDashboardVersion); err != nil {
 		t.Fatal(err)
 	}
-	if dashboardExists || scheduledSummary != "{}" {
-		t.Fatalf("dashboardExists=%v scheduledSummary=%s", dashboardExists, scheduledSummary)
+	if dashboardExists || scheduledSummary != "{}" || scheduledDashboard != "{}" || scheduledDashboardVersion != nil {
+		t.Fatalf("dashboardExists=%v scheduledSummary=%s scheduledDashboard=%s version=%v", dashboardExists, scheduledSummary, scheduledDashboard, scheduledDashboardVersion)
 	}
 }

@@ -15,6 +15,7 @@ type SummaryResult struct {
 	Rows           []map[string]string
 	RowCount       int
 	Reconciliation map[string]any
+	Dashboard      *Dashboard
 }
 
 func Summarize(key Key, steps map[string][]map[string]string) (SummaryResult, error) {

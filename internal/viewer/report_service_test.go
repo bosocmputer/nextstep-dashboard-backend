@@ -27,6 +27,7 @@ type fakeViewerRunStore struct {
 	enqueued  report.EnqueueInput
 	run       report.Run
 	rows      report.RowsPage
+	dashboard report.Dashboard
 	cancelled bool
 }
 
@@ -47,6 +48,10 @@ func (fake *fakeViewerRunStore) Get(context.Context, uuid.UUID, time.Time) (repo
 
 func (fake *fakeViewerRunStore) ListRows(context.Context, uuid.UUID, int, int, time.Time) (report.RowsPage, error) {
 	return fake.rows, nil
+}
+
+func (fake *fakeViewerRunStore) GetDashboard(context.Context, uuid.UUID, uuid.UUID) (report.Dashboard, error) {
+	return fake.dashboard, nil
 }
 
 func (fake *fakeViewerRunStore) Cancel(context.Context, uuid.UUID, time.Time) (report.Run, error) {
@@ -102,13 +107,18 @@ func TestReportServiceBindsRunReadsAndCancellationToRequestingRecipient(t *testi
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	recipientID, tenantID, runID := uuid.New(), uuid.New(), uuid.New()
 	store := &fakeViewerRunStore{
-		run:  report.Run{ID: runID, TenantID: tenantID, ReportKey: report.StockBalance, Source: report.SourceDashboard, RequestedByRecipient: &recipientID, Status: report.StatusSucceeded},
-		rows: report.RowsPage{Rows: []map[string]string{{"z": "2", "a": "1"}}, NextOrdinal: 1},
+		run:       report.Run{ID: runID, TenantID: tenantID, ReportKey: report.StockBalance, Source: report.SourceDashboard, RequestedByRecipient: &recipientID, Status: report.StatusSucceeded},
+		rows:      report.RowsPage{Rows: []map[string]string{{"z": "2", "a": "1"}}, NextOrdinal: 1},
+		dashboard: report.Dashboard{ReportKey: report.StockBalance, Version: "1.0.0"},
 	}
 	service := NewReportService(&fakeReportAccess{allowed: true}, store, func() time.Time { return now })
 
 	if _, err := service.Get(context.Background(), recipientID, tenantID, report.StockBalance, runID); err != nil {
 		t.Fatalf("Get() error = %v", err)
+	}
+	dashboard, err := service.GetDashboard(context.Background(), recipientID, tenantID, report.StockBalance, runID)
+	if err != nil || dashboard.ReportKey != report.StockBalance {
+		t.Fatalf("GetDashboard() = %+v, %v", dashboard, err)
 	}
 	page, err := service.ListRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, "", 25)
 	if err != nil || len(page.Columns) != 2 || page.Columns[0] != "a" || page.Columns[1] != "z" {
@@ -121,5 +131,8 @@ func TestReportServiceBindsRunReadsAndCancellationToRequestingRecipient(t *testi
 	otherRecipient := uuid.New()
 	if _, err := service.Get(context.Background(), otherRecipient, tenantID, report.StockBalance, runID); !errors.Is(err, ErrReportForbidden) {
 		t.Fatalf("cross-recipient Get() error = %v", err)
+	}
+	if _, err := service.GetDashboard(context.Background(), otherRecipient, tenantID, report.StockBalance, runID); !errors.Is(err, ErrReportForbidden) {
+		t.Fatalf("cross-recipient GetDashboard() error = %v", err)
 	}
 }

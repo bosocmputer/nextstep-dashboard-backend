@@ -254,10 +254,11 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 	defer func() { _ = tx.Rollback(ctx) }()
 	var source report.Source
 	var tenantID uuid.UUID
+	var reportKey report.Key
 	if err := tx.QueryRow(ctx, `
-		select source, tenant_id from report_runs
+		select source, tenant_id, report_key from report_runs
 		where id = $1 and claimed_by = $2 and status = 'RUNNING' and lease_expires_at >= $3
-		for update`, runID, workerID, now).Scan(&source, &tenantID); errors.Is(err, pgx.ErrNoRows) {
+		for update`, runID, workerID, now).Scan(&source, &tenantID, &reportKey); errors.Is(err, pgx.ErrNoRows) {
 		return report.ErrRunLeaseLost
 	} else if err != nil {
 		return fmt.Errorf("lock report completion: %w", err)
@@ -290,13 +291,30 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 	}
 	summaryJSON, _ := json.Marshal(summary.Metrics)
 	reconciliationJSON, _ := json.Marshal(summary.Reconciliation)
+	dashboardJSON := []byte(`{}`)
+	var dashboardVersion *string
+	if summary.Dashboard != nil {
+		if summary.Dashboard.ReportKey != reportKey || summary.Dashboard.Version == "" {
+			return fmt.Errorf("dashboard identity does not match report run")
+		}
+		summary.Dashboard.GeneratedAt = now
+		encoded, encodeErr := json.Marshal(summary.Dashboard)
+		if encodeErr != nil {
+			return fmt.Errorf("encode report dashboard: %w", encodeErr)
+		}
+		if len(encoded) > 128*1024 {
+			return fmt.Errorf("report dashboard exceeds 128 KiB")
+		}
+		dashboardJSON = encoded
+		dashboardVersion = &summary.Dashboard.Version
+	}
 	result, err := tx.Exec(ctx, `
 		update report_runs
 		set status = 'SUCCEEDED', row_count = $3, summary_json = $4,
-		    reconciliation_json = $5, finished_at = $6, expires_at = $7,
-		    lease_expires_at = null, updated_at = $6
+		    reconciliation_json = $5, dashboard_version = $6, dashboard_json = $7,
+		    finished_at = $8, expires_at = $9, lease_expires_at = null, updated_at = $8
 		where id = $1 and claimed_by = $2 and status = 'RUNNING'`,
-		runID, workerID, summary.RowCount, summaryJSON, reconciliationJSON, now, expiresAt)
+		runID, workerID, summary.RowCount, summaryJSON, reconciliationJSON, dashboardVersion, dashboardJSON, now, expiresAt)
 	if err != nil {
 		return fmt.Errorf("complete report run: %w", err)
 	}
@@ -307,6 +325,26 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 		return fmt.Errorf("commit report completion: %w", err)
 	}
 	return nil
+}
+
+func (store *ReportStore) GetDashboard(ctx context.Context, tenantID, runID uuid.UUID) (report.Dashboard, error) {
+	var dashboardJSON []byte
+	err := store.pool.QueryRow(ctx, `
+		select dashboard_json
+		from report_runs
+		where id = $1 and tenant_id = $2 and status = 'SUCCEEDED'
+		  and dashboard_json <> '{}'::jsonb`, runID, tenantID).Scan(&dashboardJSON)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return report.Dashboard{}, report.ErrRunNotFound
+	}
+	if err != nil {
+		return report.Dashboard{}, fmt.Errorf("get report dashboard: %w", err)
+	}
+	var dashboard report.Dashboard
+	if err := json.Unmarshal(dashboardJSON, &dashboard); err != nil {
+		return report.Dashboard{}, fmt.Errorf("decode report dashboard: %w", err)
+	}
+	return dashboard, nil
 }
 
 func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID, safeCode, safeMessage string, now time.Time) error {

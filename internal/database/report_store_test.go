@@ -146,6 +146,12 @@ func TestReportStoreIdempotencyLeaseCompletionAndCursorRows(t *testing.T) {
 		Rows:           []map[string]string{{"doc_no": "S1"}, {"doc_no": "S2"}, {"doc_no": "S3"}},
 		RowCount:       3,
 		Reconciliation: map[string]any{"status": "OK"},
+		Dashboard: &report.Dashboard{
+			ReportKey: report.SalesGoodsServices, Version: "1.0.0",
+			Period: input.Period, ComparisonPeriod: report.Period{Preset: report.Custom, DateFrom: "2026-06-21", DateTo: "2026-06-30"},
+			Timezone: "Asia/Bangkok", Quality: report.DashboardQuality{Status: "OK", Warnings: []string{}},
+			KPIs: []report.DashboardMetric{{Key: "total_amount", Label: "ยอดขาย", Value: "30.00", Unit: report.UnitTHB, Comparison: report.MetricComparison{Availability: report.ComparisonAvailable, PreviousValue: "20.00"}}},
+		},
 	}
 	if err := store.Complete(ctx, claimed.ID, claimed.ClaimedBy, summary, true, now.Add(time.Second)); err != nil {
 		t.Fatalf("Complete() error = %v", err)
@@ -153,6 +159,10 @@ func TestReportStoreIdempotencyLeaseCompletionAndCursorRows(t *testing.T) {
 	completed, err := store.Get(ctx, claimed.ID, now.Add(time.Second))
 	if err != nil || completed.Status != report.StatusSucceeded || completed.RowCount != 3 {
 		t.Fatalf("Get() = %+v, %v", completed, err)
+	}
+	storedDashboard, err := store.GetDashboard(ctx, tenantID, claimed.ID)
+	if err != nil || storedDashboard.ReportKey != report.SalesGoodsServices || len(storedDashboard.KPIs) != 1 || !storedDashboard.GeneratedAt.Equal(now.Add(time.Second)) {
+		t.Fatalf("GetDashboard() = %+v, %v", storedDashboard, err)
 	}
 	firstPage, err := store.ListRows(ctx, claimed.ID, 0, 2, now.Add(time.Second))
 	if err != nil || len(firstPage.Rows) != 2 || !firstPage.HasMore || firstPage.NextOrdinal != 2 {

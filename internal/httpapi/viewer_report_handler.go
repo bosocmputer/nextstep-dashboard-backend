@@ -60,6 +60,22 @@ func registerViewerReportRoutes(router chi.Router, viewerAuth ViewerAPI, viewerR
 		writeJSON(response, http.StatusOK, reportRunResponse(run))
 	})
 
+	router.Get("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}/dashboard", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, reportKey, runID, ok := parseViewerRunPath(response, request)
+		if !ok {
+			return
+		}
+		dashboard, err := viewerReports.GetDashboard(request.Context(), authenticated.RecipientID, tenantID, reportKey, runID)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, dashboard)
+	})
+
 	router.Get("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}/rows", func(response http.ResponseWriter, request *http.Request) {
 		authenticated, ok := authenticateViewer(response, request, viewerAuth)
 		if !ok {

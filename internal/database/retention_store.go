@@ -42,11 +42,15 @@ func (store *RetentionStore) Run(ctx context.Context, policy retention.Policy, n
 	}
 	snapshotCutoff := now.Add(-policy.SnapshotRetention)
 	if counts.ScrubbedReportRuns, err = execRetention(ctx, tx, `
-		update report_runs set summary_json = '{}'::jsonb, reconciliation_json = '{}'::jsonb, safe_error_message = null, updated_at = $1
+		update report_runs
+		set summary_json = '{}'::jsonb, reconciliation_json = '{}'::jsonb,
+		    dashboard_json = '{}'::jsonb, dashboard_version = null,
+		    safe_error_message = null, updated_at = $1
 		where id in (
 		  select id from report_runs
 		  where source = 'SCHEDULE' and created_at <= $2
-		    and (summary_json <> '{}'::jsonb or reconciliation_json <> '{}'::jsonb or safe_error_message is not null)
+		    and (summary_json <> '{}'::jsonb or reconciliation_json <> '{}'::jsonb
+		      or dashboard_json <> '{}'::jsonb or dashboard_version is not null or safe_error_message is not null)
 		  order by created_at limit $3
 		)`, now, snapshotCutoff, policy.BatchSize); err != nil {
 		return retention.Counts{}, err

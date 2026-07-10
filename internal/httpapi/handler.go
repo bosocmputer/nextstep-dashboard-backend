@@ -185,6 +185,7 @@ func requestLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 type ViewerReportAPI interface {
 	Create(context.Context, uuid.UUID, uuid.UUID, report.Key, string, viewer.CreateReportRunInput) (report.Run, error)
 	Get(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error)
+	GetDashboard(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Dashboard, error)
 	ListRows(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID, string, int) (viewer.ReportRows, error)
 	Cancel(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error)
 }

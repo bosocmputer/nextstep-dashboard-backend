@@ -100,12 +100,49 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	if err != nil {
 		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
 	}
+	stepRows, failure := worker.executePlan(ctx, run, definition, connection, plan)
+	if failure != nil {
+		return report.SummaryResult{}, failure
+	}
+	summary, err := report.Summarize(run.ReportKey, stepRows)
+	if err != nil {
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+	}
+
+	comparisonPeriod, err := report.ResolveComparisonPeriod(run.Period)
+	if err != nil {
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+	}
+	comparisonPlan, err := report.BuildQueryPlan(run.ReportKey, comparisonPeriod)
+	if err != nil {
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+	}
+	comparisonRows, comparisonFailure := worker.executePlan(ctx, run, definition, connection, comparisonPlan)
+	if comparisonFailure != nil {
+		comparisonRows = emptyReportSteps(run.ReportKey)
+	}
+	dashboard, err := report.BuildDashboard(run.ReportKey, run.Period, comparisonPeriod, stepRows, comparisonRows)
+	if err != nil {
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+	}
+	if comparisonFailure != nil {
+		dashboard.Quality.Status = "WARNING"
+		dashboard.Quality.Warnings = append(dashboard.Quality.Warnings, "COMPARISON_QUERY_FAILED")
+		for index := range dashboard.KPIs {
+			dashboard.KPIs[index].Comparison = report.MetricComparison{Availability: report.ComparisonUnavailable}
+		}
+	}
+	summary.Dashboard = &dashboard
+	return summary, nil
+}
+
+func (worker *ReportWorker) executePlan(ctx context.Context, run report.Run, definition report.Definition, connection sml.Connection, plan report.QueryPlan) (map[string][]map[string]string, *executionFailure) {
 	stepRows := make(map[string][]map[string]string, len(plan.Steps))
 	totalRows := 0
 	for _, step := range plan.Steps {
 		rendered, err := report.RenderSQL(step.Query)
 		if err != nil {
-			return report.SummaryResult{}, &executionFailure{Code: "REPORT_QUERY_RENDER_FAILED"}
+			return nil, &executionFailure{Code: "REPORT_QUERY_RENDER_FAILED"}
 		}
 		queryTimeout := definition.DetailTimeout
 		if run.Source == report.SourceSchedule {
@@ -117,24 +154,27 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 		if queryErr != nil {
 			var safeError *sml.SafeError
 			if errors.As(queryErr, &safeError) {
-				return report.SummaryResult{}, &executionFailure{Code: safeError.Code, Retryable: safeError.Retryable}
+				return nil, &executionFailure{Code: safeError.Code, Retryable: safeError.Retryable}
 			}
 			if errors.Is(queryErr, context.DeadlineExceeded) {
-				return report.SummaryResult{}, &executionFailure{Code: "SML_TIMEOUT", Retryable: true}
+				return nil, &executionFailure{Code: "SML_TIMEOUT", Retryable: true}
 			}
-			return report.SummaryResult{}, &executionFailure{Code: "SML_QUERY_FAILED", Retryable: true}
+			return nil, &executionFailure{Code: "SML_QUERY_FAILED", Retryable: true}
 		}
 		totalRows += len(rows)
 		if totalRows > definition.MaxRows {
-			return report.SummaryResult{}, &executionFailure{Code: "REPORT_ROW_LIMIT_EXCEEDED"}
+			return nil, &executionFailure{Code: "REPORT_ROW_LIMIT_EXCEEDED"}
 		}
 		stepRows[step.Name] = rows
 	}
-	summary, err := report.Summarize(run.ReportKey, stepRows)
-	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+	return stepRows, nil
+}
+
+func emptyReportSteps(key report.Key) map[string][]map[string]string {
+	if key == report.SalesGoodsServices || key == report.PurchaseGoodsPayables {
+		return map[string][]map[string]string{"headers": {}, "details": {}}
 	}
-	return summary, nil
+	return map[string][]map[string]string{"rows": {}}
 }
 
 func (worker *ReportWorker) keepLease(ctx context.Context, runID uuid.UUID) {

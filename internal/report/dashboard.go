@@ -1,5 +1,7 @@
 package report
 
+import "time"
+
 type MetricUnit string
 
 const (
@@ -78,6 +80,7 @@ type Dashboard struct {
 	Period           Period                   `json:"period"`
 	ComparisonPeriod Period                   `json:"comparisonPeriod"`
 	Timezone         string                   `json:"timezone"`
+	GeneratedAt      time.Time                `json:"generatedAt"`
 	KPIs             []DashboardMetric        `json:"kpis"`
 	Visualizations   []DashboardVisualization `json:"visualizations"`
 	Quality          DashboardQuality         `json:"quality"`

@@ -69,17 +69,20 @@ func TestReportWorkerCompletesFreshDashboardRunAndPersistsRows(t *testing.T) {
 		return sml.Connection{EndpointURL: "http://10.0.0.8/service"}, nil
 	}), queryClientFunc(func(_ context.Context, _ sml.Connection, sql string) ([]map[string]string, error) {
 		queries++
-		if queries == 1 {
-			return []map[string]string{{"doc_no": "S1", "total_amount": "30.00"}}, nil
+		if queries%2 == 1 {
+			return []map[string]string{{"doc_date": "2026-07-01", "doc_no": "S1", "total_amount": "30.00"}}, nil
 		}
-		return []map[string]string{{"doc_no": "S1", "sum_amount": "30.00"}}, nil
+		return []map[string]string{{"doc_date": "2026-07-01", "doc_no": "S1", "item_code": "I1", "item_name": "สินค้า 1", "sum_amount": "30.00"}}, nil
 	}), "worker-a", func() time.Time { return now })
 
 	if err := worker.ProcessOne(context.Background()); err != nil {
 		t.Fatalf("ProcessOne() error = %v", err)
 	}
-	if store.markRunning != 1 || store.completed == nil || !store.persistRows || store.completed.Metrics["total_amount"] != "30.00" || queries != 2 {
+	if store.markRunning != 1 || store.completed == nil || !store.persistRows || store.completed.Metrics["total_amount"] != "30.00" || queries != 4 {
 		t.Fatalf("worker result: running=%d completed=%+v persist=%v queries=%d", store.markRunning, store.completed, store.persistRows, queries)
+	}
+	if store.completed.Dashboard == nil || len(store.completed.Dashboard.KPIs) < 2 || len(store.completed.Dashboard.Visualizations) == 0 {
+		t.Fatalf("dashboard result = %+v", store.completed.Dashboard)
 	}
 }
 
