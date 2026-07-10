@@ -1,0 +1,208 @@
+package httpapi
+
+import (
+	"errors"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/viewer"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+)
+
+func registerViewerReportRoutes(router chi.Router, viewerAuth ViewerAPI, viewerReports ViewerReportAPI) {
+	router.Post("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewerMutation(response, request, viewerAuth)
+		if !ok || !validIdempotencyHeader(response, request) {
+			return
+		}
+		if !isJSONRequest(request) {
+			writeProblem(response, request, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json.", false)
+			return
+		}
+		tenantID, reportKey, ok := parseViewerReportPath(response, request)
+		if !ok {
+			return
+		}
+		var input struct {
+			PeriodPreset report.Preset `json:"periodPreset"`
+			DateFrom     *string       `json:"dateFrom"`
+			DateTo       *string       `json:"dateTo"`
+		}
+		if err := decodeJSON(response, request, &input); err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Report period input is invalid.", false)
+			return
+		}
+		run, err := viewerReports.Create(request.Context(), authenticated.RecipientID, tenantID, reportKey, request.Header.Get("Idempotency-Key"), viewer.CreateReportRunInput{
+			PeriodPreset: input.PeriodPreset, DateFrom: input.DateFrom, DateTo: input.DateTo,
+		})
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusAccepted, reportRunResponse(run))
+	})
+
+	router.Get("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, reportKey, runID, ok := parseViewerRunPath(response, request)
+		if !ok {
+			return
+		}
+		run, err := viewerReports.Get(request.Context(), authenticated.RecipientID, tenantID, reportKey, runID)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, reportRunResponse(run))
+	})
+
+	router.Get("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}/rows", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, reportKey, runID, ok := parseViewerRunPath(response, request)
+		if !ok {
+			return
+		}
+		pageSize := 25
+		if raw := request.URL.Query().Get("pageSize"); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 1 || value > 100 {
+				writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Report page size must be between 1 and 100.", false)
+				return
+			}
+			pageSize = value
+		}
+		page, err := viewerReports.ListRows(request.Context(), authenticated.RecipientID, tenantID, reportKey, runID, request.URL.Query().Get("cursor"), pageSize)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		var nextCursor any
+		if page.NextCursor != "" {
+			nextCursor = page.NextCursor
+		}
+		writeJSON(response, http.StatusOK, map[string]any{
+			"runId": page.RunID, "columns": page.Columns, "data": page.Rows,
+			"page": map[string]any{"nextCursor": nextCursor, "hasMore": page.HasMore},
+		})
+	})
+
+	router.Post("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}/cancel", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewerMutation(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, reportKey, runID, ok := parseViewerRunPath(response, request)
+		if !ok {
+			return
+		}
+		run, err := viewerReports.Cancel(request.Context(), authenticated.RecipientID, tenantID, reportKey, runID)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, reportRunResponse(run))
+	})
+}
+
+func authenticateViewerMutation(response http.ResponseWriter, request *http.Request, viewerAuth ViewerAPI) (viewer.AuthenticatedViewer, bool) {
+	authenticated, ok := authenticateViewer(response, request, viewerAuth)
+	if !ok || !authorizeViewerCSRF(response, request, viewerAuth, authenticated) {
+		return viewer.AuthenticatedViewer{}, false
+	}
+	return authenticated, true
+}
+
+func parseViewerReportPath(response http.ResponseWriter, request *http.Request) (uuid.UUID, report.Key, bool) {
+	tenantID, ok := parseTenantID(response, request)
+	if !ok {
+		return uuid.Nil, "", false
+	}
+	reportKey := report.Key(chi.URLParam(request, "reportKey"))
+	if _, ok := report.DefinitionFor(reportKey); !ok {
+		writeProblem(response, request, http.StatusNotFound, "REPORT_NOT_FOUND", "Report was not found.", false)
+		return uuid.Nil, "", false
+	}
+	return tenantID, reportKey, true
+}
+
+func parseViewerRunPath(response http.ResponseWriter, request *http.Request) (uuid.UUID, report.Key, uuid.UUID, bool) {
+	tenantID, reportKey, ok := parseViewerReportPath(response, request)
+	if !ok {
+		return uuid.Nil, "", uuid.Nil, false
+	}
+	runID, err := uuid.Parse(chi.URLParam(request, "runId"))
+	if err != nil {
+		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Report run ID must be a UUID.", false)
+		return uuid.Nil, "", uuid.Nil, false
+	}
+	return tenantID, reportKey, runID, true
+}
+
+func handleViewerReportError(response http.ResponseWriter, request *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, viewer.ErrReportForbidden), errors.Is(err, report.ErrRunForbidden):
+		writeProblem(response, request, http.StatusForbidden, "REPORT_ACCESS_FORBIDDEN", "This report is not available to the verified LINE identity.", false)
+	case errors.Is(err, viewer.ErrReportInputInvalid):
+		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Report request input is invalid.", false)
+	case errors.Is(err, report.ErrRunIdempotencyConflict):
+		writeProblem(response, request, http.StatusConflict, "IDEMPOTENCY_CONFLICT", "Idempotency key was already used with different report input.", false)
+	case errors.Is(err, report.ErrRunConcurrencyLimit):
+		response.Header().Set("Retry-After", "5")
+		writeProblem(response, request, http.StatusTooManyRequests, "REPORT_CONCURRENCY_LIMIT", "This store already has the maximum number of active report runs.", true)
+	case errors.Is(err, report.ErrRunRowsExpired):
+		writeProblem(response, request, http.StatusGone, "REPORT_ROWS_EXPIRED", "Temporary report rows have expired. Run the report again.", false)
+	case errors.Is(err, report.ErrRunNotCancellable):
+		writeProblem(response, request, http.StatusConflict, "REPORT_NOT_CANCELLABLE", "This report run has already finished and cannot be cancelled.", false)
+	case errors.Is(err, report.ErrRunNotFound):
+		writeProblem(response, request, http.StatusNotFound, "REPORT_RUN_NOT_FOUND", "Report run was not found.", false)
+	default:
+		writeProblem(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to process the report run.", false)
+	}
+	return true
+}
+
+func reportRunResponse(run report.Run) map[string]any {
+	summary := run.Summary
+	if summary == nil {
+		summary = map[string]string{}
+	}
+	reconciliation := run.Reconciliation
+	if reconciliation == nil {
+		reconciliation = map[string]any{}
+	}
+	result := map[string]any{
+		"id": run.ID, "tenantId": run.TenantID, "reportKey": run.ReportKey, "status": run.Status,
+		"periodPreset": run.Period.Preset, "rowCount": run.RowCount, "isTruncated": run.IsTruncated,
+		"summary": summary, "reconciliation": reconciliation,
+		"queuedAt": run.QueuedAt, "expiresAt": run.ExpiresAt,
+	}
+	result["dateFrom"] = nullableString(run.Period.DateFrom)
+	result["dateTo"] = nullableString(run.Period.DateTo)
+	result["safeErrorCode"] = nullableString(run.SafeErrorCode)
+	result["safeErrorMessage"] = nullableString(run.SafeErrorMessage)
+	result["startedAt"] = nullableTime(run.StartedAt)
+	result["finishedAt"] = nullableTime(run.FinishedAt)
+	return result
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}

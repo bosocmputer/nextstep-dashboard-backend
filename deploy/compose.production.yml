@@ -1,0 +1,138 @@
+name: nextstep-dashboard
+
+x-app-environment: &app-environment
+  APP_ENV: production
+  HTTP_ADDR: :8080
+  PUBLIC_BASE_URL: https://${DASHBOARD_DOMAIN:-dashboard.nextstep-soft.com}
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+  DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-20}
+  DATABASE_MIN_CONNECTIONS: ${DATABASE_MIN_CONNECTIONS:-2}
+  ADMIN_USERNAME: ${ADMIN_USERNAME:-superadmin}
+  ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?ADMIN_PASSWORD_HASH is required}
+  SESSION_HMAC_KEY: ${SESSION_HMAC_KEY:?SESSION_HMAC_KEY is required}
+  ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY is required}
+  ENCRYPTION_KEY_ID: ${ENCRYPTION_KEY_ID:?ENCRYPTION_KEY_ID is required}
+  SML_ALLOWED_CIDRS: ${SML_ALLOWED_CIDRS:?SML_ALLOWED_CIDRS is required}
+  SML_ALLOWED_HOSTS: ${SML_ALLOWED_HOSTS:-}
+  REPORT_WORKER_CONCURRENCY: ${REPORT_WORKER_CONCURRENCY:-4}
+  DELIVERY_WORKER_CONCURRENCY: ${DELIVERY_WORKER_CONCURRENCY:-4}
+  LINE_LOGIN_CHANNEL_ID: ${LINE_LOGIN_CHANNEL_ID:?LINE_LOGIN_CHANNEL_ID is required}
+  LINE_MESSAGING_CHANNEL_ACCESS_TOKEN: ${LINE_MESSAGING_CHANNEL_ACCESS_TOKEN:?LINE_MESSAGING_CHANNEL_ACCESS_TOKEN is required}
+
+x-app-security: &app-security
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=32m,noexec,nosuid,nodev
+  volumes:
+    - ./secrets/postgres/root.crt:/run/secrets/postgres-root.crt:ro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nextstep}
+      POSTGRES_USER: ${POSTGRES_USER:-nextstep}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql/tls/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql/tls/server.key
+      - -c
+      - password_encryption=scram-sha-256
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./secrets/postgres/server.crt:/etc/postgresql/tls/server.crt:ro
+      - ./secrets/postgres/server.key:/etc/postgresql/tls/server.key:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    shm_size: 256m
+    mem_limit: 2g
+    pids_limit: 256
+    networks: [internal]
+
+  migrate:
+    <<: *app-security
+    image: ghcr.io/bosocmputer/nextstep-dashboard-backend:${BACKEND_SHA:?BACKEND_SHA is required}
+    command: ["/app/migrate"]
+    environment: *app-environment
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  api:
+    <<: *app-security
+    image: ghcr.io/bosocmputer/nextstep-dashboard-backend:${BACKEND_SHA:?BACKEND_SHA is required}
+    command: ["/app/api"]
+    environment: *app-environment
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/app/healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 512m
+    pids_limit: 256
+    networks: [internal]
+
+  worker:
+    <<: *app-security
+    image: ghcr.io/bosocmputer/nextstep-dashboard-backend:${BACKEND_SHA:?BACKEND_SHA is required}
+    command: ["/app/worker"]
+    environment: *app-environment
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 2m
+    mem_limit: 2g
+    pids_limit: 512
+    networks: [internal]
+
+  frontend:
+    image: ghcr.io/bosocmputer/nextstep-dashboard-frontend:${FRONTEND_SHA:?FRONTEND_SHA is required}
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:size=32m,nosuid,nodev
+      - /var/run:size=2m,nosuid,nodev
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:6324:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    mem_limit: 128m
+    pids_limit: 128
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres_data:

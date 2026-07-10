@@ -1,0 +1,1018 @@
+openapi: 3.0.3
+info:
+  title: Nextstep Dashboard API
+  version: 1.0.0
+  description: >-
+    Contract for the multi-tenant SML dashboard, production administration,
+    distributed report execution, LINE delivery, and LIFF viewer. Mutation
+    requests authenticated by cookie also require X-CSRF-Token.
+servers:
+  - url: https://dashboard.nextstep-soft.com
+tags:
+  - name: Health
+  - name: Admin authentication
+  - name: Admin tenants
+  - name: Admin configuration
+  - name: Admin operations
+  - name: Viewer
+paths:
+  /api/v1/health/live:
+    get:
+      tags: [Health]
+      operationId: getLiveness
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthStatus'}
+  /api/v1/health/ready:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      responses:
+        '200':
+          description: API dependencies are ready.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthStatus'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/auth/admin/login:
+    post:
+      tags: [Admin authentication]
+      operationId: loginAdmin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdminLoginInput'}
+      responses:
+        '200':
+          description: Session created and secure cookie set.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminSession'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/auth/admin/logout:
+    post:
+      tags: [Admin authentication]
+      operationId: logoutAdmin
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      responses:
+        '204': {description: Session revoked.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/auth/admin/session:
+    get:
+      tags: [Admin authentication]
+      operationId: getAdminSession
+      security: [{AdminSession: []}]
+      responses:
+        '200':
+          description: Current admin session.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminSession'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/auth/admin/password:
+    put:
+      tags: [Admin authentication]
+      operationId: rotateAdminPassword
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdminPasswordInput'}
+      responses:
+        '200':
+          description: Password rotated and all other sessions revoked.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminSession'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants:
+    get:
+      tags: [Admin tenants]
+      operationId: listTenants
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/TenantStatus'}
+        - name: search
+          in: query
+          schema: {type: string, maxLength: 160}
+      responses:
+        '200':
+          description: Cursor-paginated tenants.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TenantPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Admin tenants]
+      operationId: createTenant
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TenantInput'}
+      responses:
+        '201':
+          description: Tenant created disabled by default.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tenant'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}:
+    parameters: [{$ref: '#/components/parameters/TenantID'}]
+    get:
+      tags: [Admin tenants]
+      operationId: getTenant
+      security: [{AdminSession: []}]
+      responses:
+        '200':
+          description: Tenant detail and readiness.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tenant'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Admin tenants]
+      operationId: updateTenant
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TenantPatch'}
+      responses:
+        '200':
+          description: Tenant updated with optimistic concurrency.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tenant'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/sml-connection:
+    parameters: [{$ref: '#/components/parameters/TenantID'}]
+    get:
+      tags: [Admin configuration]
+      operationId: getSMLConnection
+      security: [{AdminSession: []}]
+      responses:
+        '200':
+          description: Redacted connection readiness. Secret values are never returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SMLConnectionStatus'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Admin configuration]
+      operationId: replaceSMLConnection
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SMLConnectionInput'}
+      responses:
+        '200':
+          description: Connection replaced and marked untested.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SMLConnectionStatus'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/sml-connection/test:
+    post:
+      tags: [Admin configuration]
+      operationId: testSMLConnection
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      responses:
+        '200':
+          description: Bounded connection test result.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SMLConnectionTestResult'}
+        '424': {$ref: '#/components/responses/DependencyFailed'}
+  /api/v1/admin/tenants/{tenantId}/recipients:
+    parameters: [{$ref: '#/components/parameters/TenantID'}]
+    get:
+      tags: [Admin configuration]
+      operationId: listRecipients
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Tenant recipients.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecipientPage'}
+    post:
+      tags: [Admin configuration]
+      operationId: createRecipientInvitation
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecipientInput'}
+      responses:
+        '201':
+          description: Pending recipient membership created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Recipient'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/recipients/{recipientId}/permissions:
+    put:
+      tags: [Admin configuration]
+      operationId: replaceRecipientPermissions
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/RecipientID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PermissionUpdate'}
+      responses:
+        '200':
+          description: Entire permission set replaced atomically.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PermissionUpdate'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/schedules:
+    parameters: [{$ref: '#/components/parameters/TenantID'}]
+    get:
+      tags: [Admin configuration]
+      operationId: listSchedules
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Tenant schedules.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SchedulePage'}
+    post:
+      tags: [Admin configuration]
+      operationId: createSchedule
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ScheduleInput'}
+      responses:
+        '201':
+          description: Draft schedule created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/schedules/preview:
+    post:
+      tags: [Admin configuration]
+      operationId: previewScheduleFlex
+      description: Renders the exact LINE Flex payload with numeric sample values only. This endpoint never queries SML or sends a LINE message.
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/FlexPreviewInput'}
+      responses:
+        '200':
+          description: Backend-rendered single-bubble preview and exact LINE payload.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FlexPreview'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}:
+    parameters:
+      - {$ref: '#/components/parameters/TenantID'}
+      - {$ref: '#/components/parameters/ScheduleID'}
+    get:
+      tags: [Admin configuration]
+      operationId: getSchedule
+      security: [{AdminSession: []}]
+      responses:
+        '200':
+          description: Schedule and readiness blockers.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Admin configuration]
+      operationId: updateSchedule
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SchedulePatch'}
+      responses:
+        '200':
+          description: Draft or paused schedule updated.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/activate:
+    post:
+      tags: [Admin configuration]
+      operationId: activateSchedule
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ScheduleID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      responses:
+        '200':
+          description: Schedule activated after all readiness gates pass.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/pause:
+    post:
+      tags: [Admin configuration]
+      operationId: pauseSchedule
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ScheduleID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      responses:
+        '200':
+          description: Future occurrences paused; in-flight runs are unchanged.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/test-send:
+    post:
+      tags: [Admin configuration]
+      operationId: testSendSchedule
+      description: Explicitly queues a fresh SML run and one real LINE Flex delivery per eligible configured recipient. The schedule's next occurrence is unchanged.
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ScheduleID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202':
+          description: Test notification execution accepted for asynchronous report and delivery workers.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationExecution'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/report-runs:
+    get:
+      tags: [Admin operations]
+      operationId: listAdminReportRuns
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: tenantId, in: query, schema: {type: string, format: uuid}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/ReportRunStatus'}}
+      responses:
+        '200':
+          description: Report run history.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportRunPage'}
+  /api/v1/admin/line-deliveries:
+    get:
+      tags: [Admin operations]
+      operationId: listLineDeliveries
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: tenantId, in: query, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Redacted LINE delivery history.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeliveryPage'}
+  /api/v1/admin/audit-logs:
+    get:
+      tags: [Admin operations]
+      operationId: listAuditLogs
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: tenantId, in: query, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Redacted audit events.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditPage'}
+  /api/v1/viewer/line/session:
+    post:
+      tags: [Viewer]
+      operationId: exchangeLineSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LineSessionInput'}
+      responses:
+        '200':
+          description: LINE identity verified and viewer cookie set.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ViewerMe'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/viewer/logout:
+    post:
+      tags: [Viewer]
+      operationId: logoutViewer
+      security: [{ViewerSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      responses:
+        '204': {description: Viewer session revoked.}
+  /api/v1/viewer/me:
+    get:
+      tags: [Viewer]
+      operationId: getViewerMe
+      security: [{ViewerSession: []}]
+      responses:
+        '200':
+          description: Current verified viewer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ViewerMe'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/viewer/tenants:
+    get:
+      tags: [Viewer]
+      operationId: listViewerTenants
+      security: [{ViewerSession: []}]
+      responses:
+        '200':
+          description: Active, unexpired tenant memberships.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {type: array, items: {$ref: '#/components/schemas/ViewerTenant'}}
+  /api/v1/viewer/tenants/{tenantId}/reports:
+    get:
+      tags: [Viewer]
+      operationId: listViewerReports
+      security: [{ViewerSession: []}]
+      parameters: [{$ref: '#/components/parameters/TenantID'}]
+      responses:
+        '200':
+          description: Permission-filtered report catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {type: array, items: {$ref: '#/components/schemas/ReportDefinition'}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs:
+    post:
+      tags: [Viewer]
+      operationId: createViewerReportRun
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ReportKey'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateReportRunInput'}
+      responses:
+        '202':
+          description: Fresh SML report run queued. Reuse this run for pagination.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportRun'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}:
+    get:
+      tags: [Viewer]
+      operationId: getViewerReportRun
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ReportKey'}
+        - {$ref: '#/components/parameters/RunID'}
+      responses:
+        '200':
+          description: Authorized run status and reconciliation.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportRun'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}/rows:
+    get:
+      tags: [Viewer]
+      operationId: listViewerReportRows
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ReportKey'}
+        - {$ref: '#/components/parameters/RunID'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Cursor-paginated rows from the same report run.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportRowPage'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '410': {$ref: '#/components/responses/Gone'}
+  /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}/cancel:
+    post:
+      tags: [Viewer]
+      operationId: cancelViewerReportRun
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ReportKey'}
+        - {$ref: '#/components/parameters/RunID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      responses:
+        '200':
+          description: Queued or running report cancellation requested.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportRun'}
+        '409': {$ref: '#/components/responses/Conflict'}
+components:
+  securitySchemes:
+    AdminSession:
+      type: apiKey
+      in: cookie
+      name: nextstep_admin_session
+    ViewerSession:
+      type: apiKey
+      in: cookie
+      name: nextstep_viewer_session
+  parameters:
+    TenantID: {name: tenantId, in: path, required: true, schema: {type: string, format: uuid}}
+    RecipientID: {name: recipientId, in: path, required: true, schema: {type: string, format: uuid}}
+    ScheduleID: {name: scheduleId, in: path, required: true, schema: {type: string, format: uuid}}
+    RunID: {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
+    ReportKey: {name: reportKey, in: path, required: true, schema: {$ref: '#/components/schemas/ReportKey'}}
+    Cursor: {name: cursor, in: query, schema: {type: string, maxLength: 512}}
+    PageSize: {name: pageSize, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 200}}
+    CSRFToken: {name: X-CSRF-Token, in: header, required: true, schema: {type: string, minLength: 32, maxLength: 256}}
+  responses:
+    Unauthorized: {$ref: '#/components/responses/Problem401'}
+    Forbidden: {$ref: '#/components/responses/Problem403'}
+    NotFound: {$ref: '#/components/responses/Problem404'}
+    Conflict: {$ref: '#/components/responses/Problem409'}
+    Gone: {$ref: '#/components/responses/Problem410'}
+    ValidationFailed: {$ref: '#/components/responses/Problem422'}
+    RateLimited: {$ref: '#/components/responses/Problem429'}
+    DependencyFailed: {$ref: '#/components/responses/Problem424'}
+    ServiceUnavailable: {$ref: '#/components/responses/Problem503'}
+    Problem401: {description: Authentication required or invalid., content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+    Problem403: {description: Authenticated identity is not authorized., content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+    Problem404: {description: Resource not found., content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+    Problem409: {description: 'Duplicate request, state conflict, or optimistic lock conflict.', content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+    Problem410: {description: Temporary report rows have expired., content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+    Problem422: {description: Input is syntactically valid but violates a business rule., content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+    Problem424: {description: SML or LINE dependency failed safely., content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+    Problem429: {description: Rate or concurrency limit exceeded., headers: {Retry-After: {schema: {type: integer}}}, content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+    Problem503: {description: Service is temporarily unavailable., content: {application/json: {schema: {$ref: '#/components/schemas/ProblemEnvelope'}}}}
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status]
+      properties: {status: {type: string, enum: [ok, ready]}}
+    ProblemEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId, retryable]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            requestId: {type: string}
+            retryable: {type: boolean}
+            fieldErrors: {type: array, items: {$ref: '#/components/schemas/FieldError'}}
+    FieldError:
+      type: object
+      required: [field, code, message]
+      properties:
+        field: {type: string}
+        code: {type: string}
+        message: {type: string}
+    PageInfo:
+      type: object
+      required: [hasMore]
+      properties:
+        nextCursor: {type: string, nullable: true}
+        hasMore: {type: boolean}
+    AdminLoginInput:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 1, maxLength: 120}
+        password: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+    AdminSession:
+      type: object
+      required: [username, expiresAt]
+      properties:
+        username: {type: string}
+        csrfToken: {type: string, description: Returned on login; subsequent requests may read the same-site CSRF cookie.}
+        expiresAt: {type: string, format: date-time}
+        mustRotateBootstrapPassword: {type: boolean, default: true}
+    AdminPasswordInput:
+      type: object
+      additionalProperties: false
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+        newPassword: {type: string, minLength: 14, maxLength: 1024, writeOnly: true}
+    TenantStatus: {type: string, enum: [ACTIVE, DISABLED, EXPIRED]}
+    Tenant:
+      type: object
+      required: [id, slug, name, timezone, status, accessEndsAt, version, createdAt, updatedAt]
+      properties:
+        id: {type: string, format: uuid}
+        slug: {type: string}
+        name: {type: string}
+        timezone: {type: string}
+        status: {$ref: '#/components/schemas/TenantStatus'}
+        accessEndsAt: {type: string, format: date-time}
+        version: {type: integer, minimum: 1}
+        smlReadiness: {type: string, enum: [UNCONFIGURED, UNTESTED, READY, FAILED]}
+        nextScheduleAt: {type: string, format: date-time, nullable: true}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    TenantInput:
+      type: object
+      additionalProperties: false
+      required: [slug, name, timezone, accessEndsAt]
+      properties:
+        slug: {type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 80}
+        name: {type: string, minLength: 1, maxLength: 160}
+        timezone: {type: string, minLength: 1, maxLength: 64}
+        accessEndsAt: {type: string, format: date-time}
+    TenantPatch:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 160}
+        timezone: {type: string, minLength: 1, maxLength: 64}
+        status: {$ref: '#/components/schemas/TenantStatus'}
+        accessEndsAt: {type: string, format: date-time}
+        version: {type: integer, minimum: 1}
+    TenantPage:
+      type: object
+      required: [data, page]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Tenant'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    SMLConnectionInput:
+      type: object
+      additionalProperties: false
+      required: [endpointUrl, configFileName, databaseName]
+      properties:
+        endpointUrl: {type: string, format: uri, maxLength: 2048, description: JavaWS base URL or full endpoint; the standard SMLJavaWebService/DotNetFrameWork path is added to a base URL.}
+        configFileName: {type: string, minLength: 5, maxLength: 128, pattern: '^[A-Za-z0-9_.-]+\.xml$'}
+        databaseName: {type: string, minLength: 1, maxLength: 160}
+        username: {type: string, maxLength: 256, writeOnly: true, description: Optional Basic Auth username; username and password must be supplied together.}
+        password: {type: string, maxLength: 1024, writeOnly: true, description: Optional Basic Auth password; username and password must be supplied together.}
+        version: {type: integer, minimum: 0, default: 0}
+    SMLConnectionStatus:
+      type: object
+      required: [isConfigured, readinessStatus, version]
+      properties:
+        isConfigured: {type: boolean}
+        endpointHost: {type: string, nullable: true}
+        databaseName: {type: string, nullable: true}
+        configFileName: {type: string, nullable: true}
+        readinessStatus: {type: string, enum: [UNTESTED, READY, FAILED]}
+        lastTestedAt: {type: string, format: date-time, nullable: true}
+        lastSafeErrorCode: {type: string, nullable: true}
+        version: {type: integer, minimum: 1}
+    SMLConnectionTestResult:
+      type: object
+      required: [status, testedAt, latencyMs]
+      properties:
+        status: {type: string, enum: [READY]}
+        testedAt: {type: string, format: date-time}
+        latencyMs: {type: integer, minimum: 0}
+    RecipientInput:
+      type: object
+      additionalProperties: false
+      required: [invitationLabel]
+      properties: {invitationLabel: {type: string, minLength: 1, maxLength: 160}}
+    Recipient:
+      type: object
+      required: [id, status, displayName, reportKeys, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        status: {type: string, enum: [PENDING, ACTIVE, REVOKED]}
+        displayName: {type: string}
+        reportKeys: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        verifiedAt: {type: string, format: date-time, nullable: true}
+        createdAt: {type: string, format: date-time}
+        invitationUrl: {type: string, format: uri, nullable: true, description: Returned only when a pending invitation is created.}
+    RecipientPage:
+      type: object
+      required: [data, page]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Recipient'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    PermissionUpdate:
+      type: object
+      additionalProperties: false
+      required: [reportKeys]
+      properties:
+        reportKeys: {type: array, uniqueItems: true, maxItems: 10, items: {$ref: '#/components/schemas/ReportKey'}}
+    ReportKey:
+      type: string
+      enum: [sales_goods_services, purchase_goods_payables, gross_profit_by_product, gross_profit_by_ar_customer, stock_balance, stock_reorder, ar_customer_movement, ar_debt_receipt, cash_bank_receipts, cash_bank_payments]
+    ReportDefinition:
+      type: object
+      required: [reportKey, version, label, category, isSensitive]
+      properties:
+        reportKey: {$ref: '#/components/schemas/ReportKey'}
+        version: {type: string}
+        label: {type: string}
+        category: {type: string}
+        isSensitive: {type: boolean}
+    PeriodPreset: {type: string, enum: [YESTERDAY, TODAY_TO_NOW, MONTH_TO_DATE, AS_OF_RUN]}
+    ScheduleStatus: {type: string, enum: [DRAFT, ACTIVE, PAUSED, EXPIRED]}
+    ScheduleInput:
+      type: object
+      additionalProperties: false
+      required: [name, daysOfWeek, localTime, timezone, periodPreset, reportKeys, recipientIds]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 160}
+        daysOfWeek: {type: array, minItems: 1, maxItems: 7, uniqueItems: true, items: {type: integer, minimum: 0, maximum: 6}}
+        localTime: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'}
+        timezone: {type: string, minLength: 1, maxLength: 64}
+        periodPreset: {$ref: '#/components/schemas/PeriodPreset'}
+        reportKeys: {type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        recipientIds: {type: array, minItems: 1, maxItems: 500, uniqueItems: true, items: {type: string, format: uuid}}
+    SchedulePatch:
+      type: object
+      additionalProperties: false
+      required: [name, daysOfWeek, localTime, timezone, periodPreset, reportKeys, recipientIds, version]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 160}
+        daysOfWeek: {type: array, minItems: 1, maxItems: 7, uniqueItems: true, items: {type: integer, minimum: 0, maximum: 6}}
+        localTime: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'}
+        timezone: {type: string, minLength: 1, maxLength: 64}
+        periodPreset: {$ref: '#/components/schemas/PeriodPreset'}
+        reportKeys: {type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        recipientIds: {type: array, minItems: 1, maxItems: 500, uniqueItems: true, items: {type: string, format: uuid}}
+        version: {type: integer, minimum: 1}
+    Schedule:
+      allOf:
+        - {$ref: '#/components/schemas/ScheduleInput'}
+        - type: object
+          required: [id, tenantId, status, version, readinessBlockers, nextOccurrences, createdAt, updatedAt]
+          properties:
+            id: {type: string, format: uuid}
+            tenantId: {type: string, format: uuid}
+            status: {$ref: '#/components/schemas/ScheduleStatus'}
+            version: {type: integer, minimum: 1}
+            readinessBlockers: {type: array, items: {type: string}}
+            nextOccurrences: {type: array, maxItems: 3, items: {type: string, format: date-time}}
+            createdAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
+    SchedulePage:
+      type: object
+      required: [data, page]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Schedule'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    FlexPreviewInput:
+      type: object
+      additionalProperties: false
+      required: [periodPreset, reportKeys]
+      properties:
+        periodPreset: {$ref: '#/components/schemas/PeriodPreset'}
+        reportKeys: {type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+    FlexPreviewMetric:
+      type: object
+      additionalProperties: false
+      required: [label, value]
+      properties:
+        label: {type: string}
+        value: {type: string, description: Numeric sample value; never customer data.}
+    FlexPreviewReport:
+      type: object
+      additionalProperties: false
+      required: [key, label, metrics]
+      properties:
+        key: {$ref: '#/components/schemas/ReportKey'}
+        label: {type: string}
+        metrics: {type: array, minItems: 2, maxItems: 2, items: {$ref: '#/components/schemas/FlexPreviewMetric'}}
+    FlexPreview:
+      type: object
+      additionalProperties: false
+      required: [altText, tenantName, period, periodLabel, generatedAt, actionUrl, reports, payloadBytes, message]
+      properties:
+        altText: {type: string}
+        tenantName: {type: string}
+        period:
+          type: object
+          additionalProperties: false
+          required: [preset, dateFrom, dateTo]
+          properties:
+            preset: {$ref: '#/components/schemas/PeriodPreset'}
+            dateFrom: {type: string, format: date}
+            dateTo: {type: string, format: date}
+        periodLabel: {type: string}
+        generatedAt: {type: string, format: date-time}
+        actionUrl: {type: string, format: uri}
+        reports: {type: array, minItems: 1, maxItems: 5, items: {$ref: '#/components/schemas/FlexPreviewReport'}}
+        payloadBytes: {type: integer, minimum: 1, maximum: 46080}
+        message: {type: object, additionalProperties: true, description: Exact LINE Messaging API Flex message object produced by the backend renderer.}
+    NotificationExecution:
+      type: object
+      additionalProperties: false
+      required: [id, tenantId, scheduleId, scheduledFor, status, reportRunIds]
+      properties:
+        id: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid}
+        scheduleId: {type: string, format: uuid}
+        scheduledFor: {type: string, format: date-time}
+        status: {type: string, enum: [COLLECTING, FAILED]}
+        safeErrorCode: {type: string}
+        reportRunIds: {type: array, minItems: 1, maxItems: 5, items: {type: string, format: uuid}}
+    ReportRunStatus: {type: string, enum: [QUEUED, CLAIMED, RUNNING, SUCCEEDED, FAILED, CANCELLED, EXPIRED]}
+    CreateReportRunInput:
+      type: object
+      additionalProperties: false
+      required: [periodPreset]
+      properties:
+        periodPreset: {type: string, enum: [YESTERDAY, TODAY_TO_NOW, MONTH_TO_DATE, AS_OF_RUN, CUSTOM]}
+        dateFrom: {type: string, format: date}
+        dateTo: {type: string, format: date}
+    ReportRun:
+      type: object
+      required: [id, tenantId, reportKey, status, periodPreset, rowCount, isTruncated, queuedAt, expiresAt]
+      properties:
+        id: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid}
+        reportKey: {$ref: '#/components/schemas/ReportKey'}
+        status: {$ref: '#/components/schemas/ReportRunStatus'}
+        periodPreset: {type: string}
+        dateFrom: {type: string, format: date, nullable: true}
+        dateTo: {type: string, format: date, nullable: true}
+        rowCount: {type: integer, minimum: 0}
+        isTruncated: {type: boolean}
+        summary: {type: object, additionalProperties: true}
+        reconciliation: {type: object, additionalProperties: true}
+        safeErrorCode: {type: string, nullable: true}
+        safeErrorMessage: {type: string, nullable: true}
+        queuePosition: {type: integer, minimum: 1, nullable: true}
+        queuedAt: {type: string, format: date-time}
+        startedAt: {type: string, format: date-time, nullable: true}
+        finishedAt: {type: string, format: date-time, nullable: true}
+        expiresAt: {type: string, format: date-time}
+    ReportRunPage:
+      type: object
+      required: [data, page]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/ReportRun'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    ReportRowPage:
+      type: object
+      required: [runId, columns, data, page]
+      properties:
+        runId: {type: string, format: uuid}
+        columns: {type: array, items: {type: string}}
+        data: {type: array, items: {type: object, additionalProperties: true}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    LineSessionInput:
+      type: object
+      additionalProperties: false
+      required: [idToken]
+      properties:
+        idToken: {type: string, minLength: 32, maxLength: 8192, writeOnly: true}
+        invitationReference: {type: string, minLength: 32, maxLength: 128, writeOnly: true}
+        deliveryReference: {type: string, minLength: 32, maxLength: 512, writeOnly: true}
+    ViewerMe:
+      type: object
+      required: [recipientId, displayName, expiresAt]
+      properties:
+        recipientId: {type: string, format: uuid}
+        displayName: {type: string}
+        csrfToken: {type: string, writeOnly: true}
+        expiresAt: {type: string, format: date-time}
+    ViewerTenant:
+      type: object
+      required: [id, name, timezone, reportKeys]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        timezone: {type: string}
+        reportKeys: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+    Delivery:
+      type: object
+      required: [id, tenantId, status, attempt, createdAt, expiresAt]
+      properties:
+        id: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid}
+        status: {type: string, enum: [PENDING, SENDING, ACCEPTED, RETRY_WAIT, UNCERTAIN, FAILED_PERMANENT]}
+        attempt: {type: integer, minimum: 0}
+        safeErrorCode: {type: string, nullable: true}
+        acceptedAt: {type: string, format: date-time, nullable: true}
+        createdAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+    DeliveryPage:
+      type: object
+      required: [data, page]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Delivery'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    AuditEvent:
+      type: object
+      required: [id, actorType, action, resourceType, result, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid, nullable: true}
+        actorType: {type: string, enum: [ADMIN, VIEWER, WORKER, SYSTEM]}
+        action: {type: string}
+        resourceType: {type: string}
+        resourceId: {type: string, nullable: true}
+        result: {type: string, enum: [SUCCESS, DENIED, FAILED]}
+        safeErrorCode: {type: string, nullable: true}
+        createdAt: {type: string, format: date-time}
+    AuditPage:
+      type: object
+      required: [data, page]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
