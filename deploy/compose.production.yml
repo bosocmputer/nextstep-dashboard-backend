@@ -102,6 +102,12 @@ services:
       migrate:
         condition: service_completed_successfully
     stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "/app/worker-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
     mem_limit: 2g
     pids_limit: 512
     networks: [internal]

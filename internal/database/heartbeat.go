@@ -29,3 +29,25 @@ func RecordWorkerHeartbeat(ctx context.Context, pool *pgxpool.Pool, workerID, wo
 	}
 	return nil
 }
+
+func WorkerNodeHealthy(ctx context.Context, pool *pgxpool.Pool, nodeName string, now time.Time) (bool, error) {
+	if nodeName == "" || len(nodeName) > 255 {
+		return false, nil
+	}
+	var reportReady, schedulerReady, retentionReady, notificationReady, deliveryReady bool
+	err := pool.QueryRow(ctx, `
+		select
+		  coalesce(bool_or(worker_type = 'REPORT'), false),
+		  coalesce(bool_or(worker_type = 'SCHEDULER'), false),
+		  coalesce(bool_or(worker_type = 'RETENTION'), false),
+		  coalesce(bool_or(worker_type = 'DELIVERY' and metadata_json ->> 'stage' = 'prepare'), false),
+		  coalesce(bool_or(worker_type = 'DELIVERY' and metadata_json ->> 'stage' = 'send'), false)
+		from worker_heartbeats
+		where node_name = $1 and heartbeat_at >= $2`, nodeName, now.Add(-45*time.Second)).Scan(
+		&reportReady, &schedulerReady, &retentionReady, &notificationReady, &deliveryReady,
+	)
+	if err != nil {
+		return false, fmt.Errorf("read worker heartbeat health: %w", err)
+	}
+	return reportReady && schedulerReady && retentionReady && notificationReady && deliveryReady, nil
+}

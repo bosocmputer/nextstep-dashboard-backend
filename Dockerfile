@@ -10,6 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux go test ./... \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -tags timetzdata -ldflags="-s -w" -o /out/worker ./cmd/worker \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -tags timetzdata -ldflags="-s -w" -o /out/migrate ./cmd/migrate \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -tags timetzdata -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -tags timetzdata -ldflags="-s -w" -o /out/worker-healthcheck ./cmd/worker-healthcheck \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -tags timetzdata -ldflags="-s -w" -o /out/sml-smoke ./cmd/sml-smoke
 
 FROM gcr.io/distroless/static-debian12:nonroot
