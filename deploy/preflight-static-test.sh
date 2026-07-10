@@ -8,6 +8,13 @@ tls_dir="$temporary/tls"
 env_file="$temporary/production.env"
 bad_env_file="$temporary/production-bad.env"
 
+chmod_line=$(awk '/chmod 600 .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
+chown_line=$(awk '/chown .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
+if [ -z "$chmod_line" ] || [ -z "$chown_line" ] || [ "$chmod_line" -ge "$chown_line" ]; then
+  echo "PostgreSQL TLS key permissions must be set before ownership is transferred" >&2
+  exit 1
+fi
+
 POSTGRES_TLS_DIR="$tls_dir" POSTGRES_UID=$(id -u) "$script_dir/generate-postgres-tls.sh" >/dev/null
 cat > "$env_file" <<'EOF'
 DASHBOARD_DOMAIN=dashboard.nextstep-soft.com

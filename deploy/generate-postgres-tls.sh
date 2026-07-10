@@ -44,13 +44,13 @@ if [ -z "$postgres_uid" ] && docker version >/dev/null 2>&1; then
 elif [ -z "$postgres_uid" ]; then
   postgres_uid=$(sudo docker run --rm postgres:16-alpine id -u postgres)
 fi
+chmod 600 "$target_dir/server.key"
+chmod 644 "$target_dir/server.crt" "$target_dir/root.crt"
 if [ "$(id -u)" -eq 0 ]; then
   chown "$postgres_uid:$postgres_uid" "$target_dir/server.key" "$target_dir/server.crt"
 elif [ "$(id -u)" -ne "$postgres_uid" ]; then
   sudo chown "$postgres_uid:$postgres_uid" "$target_dir/server.key" "$target_dir/server.crt"
 fi
-chmod 600 "$target_dir/server.key"
-chmod 644 "$target_dir/server.crt" "$target_dir/root.crt"
 chmod 755 "$target_parent" "$target_dir"
 
 echo "PostgreSQL TLS material created in $target_dir"
