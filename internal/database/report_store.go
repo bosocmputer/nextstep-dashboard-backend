@@ -269,25 +269,23 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 	}
 	expiresAt := now.Add(24 * time.Hour)
 	if persistRows && source == report.SourceDashboard && len(summary.Rows) > 0 {
-		copyRows := make([][]any, 0, len(summary.Rows))
-		for index, row := range summary.Rows {
-			rowJSON, err := json.Marshal(row)
-			if err != nil {
-				return fmt.Errorf("encode report row %d: %w", index+1, err)
-			}
-			copyRows = append(copyRows, []any{runID, tenantID, index + 1, rowJSON, now, expiresAt})
-		}
 		copied, err := tx.CopyFrom(
 			ctx,
 			pgx.Identifier{"report_run_rows"},
 			[]string{"run_id", "tenant_id", "ordinal", "row_json", "created_at", "expires_at"},
-			pgx.CopyFromRows(copyRows),
+			pgx.CopyFromSlice(len(summary.Rows), func(index int) ([]any, error) {
+				rowJSON, encodeErr := json.Marshal(summary.Rows[index])
+				if encodeErr != nil {
+					return nil, fmt.Errorf("encode report row %d: %w", index+1, encodeErr)
+				}
+				return []any{runID, tenantID, index + 1, rowJSON, now, expiresAt}, nil
+			}),
 		)
 		if err != nil {
 			return fmt.Errorf("copy report rows: %w", err)
 		}
-		if copied != int64(len(copyRows)) {
-			return fmt.Errorf("copy report rows inserted %d of %d rows", copied, len(copyRows))
+		if copied != int64(len(summary.Rows)) {
+			return fmt.Errorf("copy report rows inserted %d of %d rows", copied, len(summary.Rows))
 		}
 	}
 	summaryJSON, _ := json.Marshal(summary.Metrics)
