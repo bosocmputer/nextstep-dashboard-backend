@@ -113,23 +113,40 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	if err != nil {
 		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
 	}
-	comparisonPlan, err := report.BuildQueryPlan(run.ReportKey, comparisonPeriod)
-	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
-	}
-	comparisonRows, comparisonFailure := worker.executePlan(ctx, run, definition, connection, comparisonPlan)
-	if comparisonFailure != nil {
-		comparisonRows = emptyReportSteps(run.ReportKey)
+	comparisonRows := emptyReportSteps(run.ReportKey)
+	comparisonWarning := ""
+	if run.Period.Preset == report.TodayToNow {
+		comparisonWarning = "COMPARISON_TIME_WINDOW_UNAVAILABLE"
+	} else {
+		comparisonPlan, planErr := report.BuildQueryPlan(run.ReportKey, comparisonPeriod)
+		if planErr != nil {
+			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+		}
+		var comparisonFailure *executionFailure
+		comparisonRows, comparisonFailure = worker.executePlan(ctx, run, definition, connection, comparisonPlan)
+		if comparisonFailure != nil {
+			comparisonRows = emptyReportSteps(run.ReportKey)
+			comparisonWarning = "COMPARISON_QUERY_FAILED"
+		}
 	}
 	dashboard, err := report.BuildDashboard(run.ReportKey, run.Period, comparisonPeriod, stepRows, comparisonRows)
 	if err != nil {
 		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
 	}
-	if comparisonFailure != nil {
+	if comparisonWarning != "" {
 		dashboard.Quality.Status = "WARNING"
-		dashboard.Quality.Warnings = append(dashboard.Quality.Warnings, "COMPARISON_QUERY_FAILED")
+		dashboard.Quality.Warnings = append(dashboard.Quality.Warnings, comparisonWarning)
 		for index := range dashboard.KPIs {
 			dashboard.KPIs[index].Comparison = report.MetricComparison{Availability: report.ComparisonUnavailable}
+		}
+		for visualizationIndex := range dashboard.Visualizations {
+			series := dashboard.Visualizations[visualizationIndex].Series[:0]
+			for _, item := range dashboard.Visualizations[visualizationIndex].Series {
+				if item.Key != "previous" {
+					series = append(series, item)
+				}
+			}
+			dashboard.Visualizations[visualizationIndex].Series = series
 		}
 	}
 	summary.Dashboard = &dashboard

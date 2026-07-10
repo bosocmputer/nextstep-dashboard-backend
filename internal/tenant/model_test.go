@@ -34,6 +34,7 @@ func TestCreateInputRejectsInvalidProductionFields(t *testing.T) {
 		{name: "slug", input: CreateInput{Slug: "Shop One", Name: "Shop", Timezone: "Asia/Bangkok", AccessEndsAt: now.Add(time.Hour)}, field: "slug"},
 		{name: "name", input: CreateInput{Slug: "shop", Name: " ", Timezone: "Asia/Bangkok", AccessEndsAt: now.Add(time.Hour)}, field: "name"},
 		{name: "timezone", input: CreateInput{Slug: "shop", Name: "Shop", Timezone: "Mars/Olympus", AccessEndsAt: now.Add(time.Hour)}, field: "timezone"},
+		{name: "non Thailand timezone", input: CreateInput{Slug: "shop", Name: "Shop", Timezone: "Asia/Tokyo", AccessEndsAt: now.Add(time.Hour)}, field: "timezone"},
 		{name: "expiry", input: CreateInput{Slug: "shop", Name: "Shop", Timezone: "Asia/Bangkok", AccessEndsAt: now}, field: "accessEndsAt"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

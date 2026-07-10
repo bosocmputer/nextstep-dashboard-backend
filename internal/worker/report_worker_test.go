@@ -146,6 +146,48 @@ func TestReportWorkerKeepsCurrentDashboardWhenComparisonQueryFails(t *testing.T)
 	}
 }
 
+func TestReportWorkerDoesNotPublishFullPriorDayAsTodayToNowComparison(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	store := &fakeRunStore{run: report.Run{
+		ID: uuid.New(), TenantID: uuid.New(), ReportKey: report.SalesGoodsServices,
+		Source: report.SourceDashboard, Status: report.StatusClaimed, Attempt: 1,
+		Period: report.Period{Preset: report.TodayToNow, DateFrom: "2026-07-10", DateTo: "2026-07-10"},
+	}}
+	queries := 0
+	worker := NewReportWorker(store, connectionProviderFunc(func(context.Context, uuid.UUID) (sml.Connection, error) {
+		return sml.Connection{}, nil
+	}), queryClientFunc(func(context.Context, sml.Connection, string) ([]map[string]string, error) {
+		queries++
+		if queries == 1 {
+			return []map[string]string{{"doc_date": "2026-07-10", "doc_no": "S1", "total_amount": "30.00"}}, nil
+		}
+		return []map[string]string{{"doc_date": "2026-07-10", "doc_no": "S1", "item_code": "I1", "item_name": "สินค้า 1", "sum_amount": "30.00"}}, nil
+	}), "worker-a", func() time.Time { return now })
+
+	if err := worker.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("ProcessOne() error = %v", err)
+	}
+	if store.completed == nil || store.completed.Dashboard == nil || queries != 2 {
+		t.Fatalf("completed=%+v queries=%d", store.completed, queries)
+	}
+	dashboard := store.completed.Dashboard
+	if dashboard.Quality.Status != "WARNING" || len(dashboard.Quality.Warnings) != 1 || dashboard.Quality.Warnings[0] != "COMPARISON_TIME_WINDOW_UNAVAILABLE" {
+		t.Fatalf("quality = %+v", dashboard.Quality)
+	}
+	for _, metric := range dashboard.KPIs {
+		if metric.Comparison.Availability != report.ComparisonUnavailable {
+			t.Fatalf("comparison = %+v", metric.Comparison)
+		}
+	}
+	for _, visualization := range dashboard.Visualizations {
+		for _, series := range visualization.Series {
+			if series.Key == "previous" {
+				t.Fatalf("misleading previous-day series published: %+v", visualization)
+			}
+		}
+	}
+}
+
 func TestReportWorkerFailsMalformedOutputAndSurfacesEmptyQueue(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	store := &fakeRunStore{run: report.Run{

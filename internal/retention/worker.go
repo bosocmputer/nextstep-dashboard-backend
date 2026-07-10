@@ -24,6 +24,7 @@ func ProductionPolicy() Policy {
 type Counts struct {
 	ReportRows             int64
 	ReportRuns             int64
+	DashboardRefreshes     int64
 	ScrubbedReportRuns     int64
 	ScrubbedOutboxPayloads int64
 	Deliveries             int64

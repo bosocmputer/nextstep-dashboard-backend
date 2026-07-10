@@ -115,10 +115,7 @@ func Validate(input Input) (Input, error) {
 	if _, err := time.Parse("15:04", input.LocalTime); err != nil || len(input.LocalTime) != 5 {
 		return Input{}, &ValidationError{Field: "localTime", Code: "INVALID_LOCAL_TIME"}
 	}
-	if len(input.Timezone) < 1 || len(input.Timezone) > 64 {
-		return Input{}, &ValidationError{Field: "timezone", Code: "INVALID_TIMEZONE"}
-	}
-	if _, err := time.LoadLocation(input.Timezone); err != nil {
+	if input.Timezone != "Asia/Bangkok" {
 		return Input{}, &ValidationError{Field: "timezone", Code: "INVALID_TIMEZONE"}
 	}
 	switch input.PeriodPreset {

@@ -86,6 +86,7 @@ func TestValidateNormalizesOrderAndRejectsUserError(t *testing.T) {
 		func(value *Input) { value.DaysOfWeek = []int{1, 1} },
 		func(value *Input) { value.LocalTime = "24:00" },
 		func(value *Input) { value.Timezone = "GMT+7-ish" },
+		func(value *Input) { value.Timezone = "Asia/Tokyo" },
 		func(value *Input) { value.ReportKeys = append(value.ReportKeys, value.ReportKeys...) },
 		func(value *Input) { value.RecipientIDs = []uuid.UUID{uuid.Nil} },
 		func(value *Input) { value.PeriodPreset = report.Custom },

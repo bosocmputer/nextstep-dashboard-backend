@@ -128,11 +128,8 @@ func EffectiveStatus(stored Status, accessEndsAt, now time.Time) Status {
 }
 
 func validateTimezone(value string) error {
-	if len(value) < 1 || len(value) > 64 {
-		return validation("timezone", "INVALID_TIMEZONE", "Timezone is invalid.")
-	}
-	if _, err := time.LoadLocation(value); err != nil {
-		return validation("timezone", "INVALID_TIMEZONE", "Timezone must be a valid IANA timezone.")
+	if value != "Asia/Bangkok" {
+		return validation("timezone", "INVALID_TIMEZONE", "Timezone must be Asia/Bangkok.")
 	}
 	return nil
 }
