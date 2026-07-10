@@ -79,8 +79,21 @@ case "$bind_address" in
 esac
 
 database_url=$(env_value DATABASE_URL)
+postgres_user=$(env_value POSTGRES_USER)
+postgres_database=$(env_value POSTGRES_DB)
+postgres_password=$(env_value POSTGRES_PASSWORD)
+if ! printf '%s' "$postgres_user" | grep -Eq '^[a-z_][a-z0-9_-]{0,62}$' ||
+   ! printf '%s' "$postgres_database" | grep -Eq '^[a-z_][a-z0-9_-]{0,62}$'; then
+  echo "POSTGRES_USER and POSTGRES_DB must be compact lowercase identifiers" >&2
+  exit 1
+fi
+if ! printf '%s' "$postgres_password" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+  echo "POSTGRES_PASSWORD must be a 32-byte hexadecimal value" >&2
+  exit 1
+fi
+database_prefix="postgres://$postgres_user:$postgres_password@postgres:5432/$postgres_database?"
 case "$database_url" in
-  *'@postgres:5432/'*'sslmode=verify-full'*'sslrootcert=/run/secrets/postgres-root.crt'*) ;;
+  "$database_prefix"*'sslmode=verify-full'*'sslrootcert=/run/secrets/postgres-root.crt'*) ;;
   *) echo "DATABASE_URL must target postgres:5432 with verify-full and the mounted root certificate" >&2; exit 1 ;;
 esac
 case "$database_url" in
@@ -122,7 +135,7 @@ case "$allowed_hosts" in
   *example.com*|*replace*) echo "SML_ALLOWED_HOSTS still contains an example value" >&2; exit 1 ;;
 esac
 
-tls_dir="$script_dir/secrets/postgres"
+tls_dir=${POSTGRES_TLS_DIR:-"$script_dir/secrets/postgres"}
 for file in root.crt server.crt; do
   if [ ! -r "$tls_dir/$file" ]; then
     echo "Missing or unreadable PostgreSQL TLS file: $tls_dir/$file" >&2
