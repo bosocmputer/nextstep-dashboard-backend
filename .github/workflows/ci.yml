@@ -43,6 +43,7 @@ jobs:
       - run: go vet ./...
       - uses: golang/govulncheck-action@v1
       - run: go build ./cmd/...
+      - run: sh -n deploy/*.sh
 
   container:
     runs-on: ubuntu-latest

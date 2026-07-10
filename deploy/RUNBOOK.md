@@ -63,12 +63,18 @@ the production database.
 
 ## Release
 
-1. Run `backup.sh` and verify the most recent `restore-drill.sh` result.
-2. CI builds immutable GHCR tags from reviewed commits. Record the independent
+1. CI builds immutable GHCR tags from reviewed commits. Record the independent
    frontend and backend commit SHAs as one release pair.
-3. Copy `.env.production.example` to an owner-readable deployment env file and
+2. Copy `.env.production.example` to an owner-readable deployment env file and
    populate it from the secret store.
-4. Validate the effective Compose model locally without publishing its output.
+3. Validate the owner-only env file, paired SHAs, PostgreSQL certificates,
+   domain, SML allowlist and effective Compose model without printing secrets:
+
+   ```bash
+   ./deploy/preflight.sh ./deploy/.env.production full
+   ```
+
+4. Run `backup.sh` and verify the most recent `restore-drill.sh` result.
 5. Run `sudo docker compose --env-file <env> -f deploy/compose.production.yml
    pull`, then `sudo docker compose --env-file <env> -f
    deploy/compose.production.yml up -d`. The API and worker start only after the
