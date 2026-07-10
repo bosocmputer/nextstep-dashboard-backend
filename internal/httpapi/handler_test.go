@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,5 +67,24 @@ func TestUnknownRouteUsesProblemContract(t *testing.T) {
 	}
 	if body := response.Body.String(); !strings.Contains(body, `"code":"NOT_FOUND"`) {
 		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestRequestLogUsesRoutePatternWithoutQueryData(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), Logger: logger})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/not-found?token=must-not-log", nil)
+	request.Header.Set("X-Request-ID", "request-log-test")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	logLine := output.String()
+	if !strings.Contains(logLine, `"route":"UNMATCHED"`) || !strings.Contains(logLine, `"status":404`) || !strings.Contains(logLine, "request-log-test") {
+		t.Fatalf("log = %s", logLine)
+	}
+	if strings.Contains(logLine, "must-not-log") || strings.Contains(logLine, `"token"`) {
+		t.Fatalf("sensitive query leaked to log: %s", logLine)
 	}
 }

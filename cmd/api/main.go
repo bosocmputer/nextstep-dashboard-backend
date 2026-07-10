@@ -66,6 +66,7 @@ func main() {
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Dependencies{
+			Logger:         logger,
 			Readiness:      pool,
 			AdminAuth:      adminService,
 			Tenants:        tenantService,

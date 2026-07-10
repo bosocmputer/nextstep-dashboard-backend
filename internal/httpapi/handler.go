@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -43,6 +44,7 @@ type Dependencies struct {
 	ViewerAuth     ViewerAPI
 	ViewerReports  ViewerReportAPI
 	SecureCookies  bool
+	Logger         *slog.Logger
 }
 
 type problemEnvelope struct {
@@ -76,6 +78,9 @@ func NewHandler(dependencies Dependencies) http.Handler {
 	router := chi.NewRouter()
 	router.Use(securityHeaders(dependencies.SecureCookies))
 	router.Use(requestIDMiddleware)
+	if dependencies.Logger != nil {
+		router.Use(requestLogMiddleware(dependencies.Logger))
+	}
 	router.Use(recoverMiddleware)
 	router.Get("/api/v1/health/live", func(response http.ResponseWriter, _ *http.Request) {
 		writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
@@ -117,6 +122,64 @@ func NewHandler(dependencies Dependencies) http.Handler {
 		writeProblem(response, request, http.StatusNotFound, "NOT_FOUND", "The requested resource was not found.", false)
 	})
 	return router
+}
+
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (recorder *responseRecorder) Unwrap() http.ResponseWriter { return recorder.ResponseWriter }
+
+func (recorder *responseRecorder) WriteHeader(status int) {
+	if recorder.status != 0 {
+		return
+	}
+	recorder.status = status
+	recorder.ResponseWriter.WriteHeader(status)
+}
+
+func (recorder *responseRecorder) Write(body []byte) (int, error) {
+	if recorder.status == 0 {
+		recorder.WriteHeader(http.StatusOK)
+	}
+	written, err := recorder.ResponseWriter.Write(body)
+	recorder.bytes += written
+	return written, err
+}
+
+func requestLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			started := time.Now()
+			recorder := &responseRecorder{ResponseWriter: response}
+			next.ServeHTTP(recorder, request)
+			if request.URL.Path == "/api/v1/health/live" || request.URL.Path == "/api/v1/health/ready" {
+				return
+			}
+			status := recorder.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			route := chi.RouteContext(request.Context()).RoutePattern()
+			if route == "" {
+				route = "UNMATCHED"
+			}
+			arguments := []any{
+				"method", request.Method, "route", route, "status", status, "bytes", recorder.bytes,
+				"durationMs", time.Since(started).Milliseconds(), "requestId", requestID(request),
+			}
+			switch {
+			case status >= 500:
+				logger.Error("HTTP request completed", arguments...)
+			case status >= 400:
+				logger.Warn("HTTP request completed", arguments...)
+			default:
+				logger.Info("HTTP request completed", arguments...)
+			}
+		})
+	}
 }
 
 type ViewerReportAPI interface {
