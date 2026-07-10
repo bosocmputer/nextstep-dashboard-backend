@@ -76,6 +76,31 @@ func TestServiceCreatesOpaqueInvitationWithoutStoringLabelPlaintext(t *testing.T
 	}
 }
 
+func TestServiceReturnsEmptyReportKeyArraysForNewRecipients(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 12)))
+	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{3}, 32), bytes.NewReader(nil), func() time.Time { return now })
+	store := &memoryRecipientStore{}
+	service := NewService(store, box, tokens, bytes.NewReader(bytes.Repeat([]byte{4}, 32)), "https://dashboard.nextstep-soft.com", func() time.Time { return now })
+	tenantID := uuid.New()
+
+	created, err := service.CreateInvitation(context.Background(), []byte("admin"), "request-1", "recipient-create-empty-permissions", tenantID, "Owner")
+	if err != nil {
+		t.Fatalf("CreateInvitation() error = %v", err)
+	}
+	if created.ReportKeys == nil || len(created.ReportKeys) != 0 {
+		t.Fatalf("CreateInvitation() reportKeys = %#v, want non-nil empty array", created.ReportKeys)
+	}
+
+	page, err := service.List(context.Background(), tenantID, 25, "")
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(page.Data) != 1 || page.Data[0].ReportKeys == nil || len(page.Data[0].ReportKeys) != 0 {
+		t.Fatalf("List() reportKeys = %#v, want non-nil empty array", page.Data)
+	}
+}
+
 func TestServiceRedeemsVerifiedIdentityAndSupportsSubsequentLogin(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 36)))

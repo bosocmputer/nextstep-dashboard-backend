@@ -230,9 +230,11 @@ func (service *Service) publicRecipient(stored StoredRecipient) (Recipient, erro
 	if err != nil {
 		return Recipient{}, fmt.Errorf("decrypt recipient display name: %w", err)
 	}
+	reportKeys := make([]report.Key, len(stored.ReportKeys))
+	copy(reportKeys, stored.ReportKeys)
 	return Recipient{
 		ID: stored.ID, Status: stored.Status, DisplayName: string(displayName),
-		ReportKeys: append([]report.Key(nil), stored.ReportKeys...), VerifiedAt: stored.VerifiedAt, CreatedAt: stored.CreatedAt,
+		ReportKeys: reportKeys, VerifiedAt: stored.VerifiedAt, CreatedAt: stored.CreatedAt,
 	}, nil
 }
 
