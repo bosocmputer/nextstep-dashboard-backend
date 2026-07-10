@@ -7,6 +7,7 @@ trap 'rm -rf "$temporary"' EXIT INT TERM
 tls_dir="$temporary/tls"
 env_file="$temporary/production.env"
 bad_env_file="$temporary/production-bad.env"
+raw_hash_env_file="$temporary/production-raw-hash.env"
 
 chmod_line=$(awk '/chmod 600 .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
 chown_line=$(awk '/chown .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
@@ -28,7 +29,7 @@ DATABASE_URL=postgres://nextstep:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 DATABASE_MAX_CONNECTIONS=20
 DATABASE_MIN_CONNECTIONS=2
 ADMIN_USERNAME=superadmin
-ADMIN_PASSWORD_HASH=$argon2id$v=19$m=65536,t=3,p=2$fake$fake
+ADMIN_PASSWORD_HASH='$argon2id$v=19$m=65536,t=3,p=2$fake$fake'
 SESSION_HMAC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 ENCRYPTION_MASTER_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 ENCRYPTION_KEY_ID=test-key
@@ -41,6 +42,13 @@ LINE_MESSAGING_CHANNEL_ACCESS_TOKEN=fake-token-value-that-is-long-enough-for-sta
 EOF
 chmod 600 "$env_file"
 POSTGRES_TLS_DIR="$tls_dir" "$script_dir/preflight.sh" "$env_file" static >/dev/null
+
+sed 's|^ADMIN_PASSWORD_HASH=.*|ADMIN_PASSWORD_HASH=$argon2id$v=19$m=65536,t=3,p=2$fake$fake|' "$env_file" > "$raw_hash_env_file"
+chmod 600 "$raw_hash_env_file"
+if POSTGRES_TLS_DIR="$tls_dir" "$script_dir/preflight.sh" "$raw_hash_env_file" static >/dev/null 2>&1; then
+  echo "Preflight accepted an unquoted Argon2id hash that Compose would interpolate" >&2
+  exit 1
+fi
 
 sed 's/SML_ALLOWED_HOSTS=sml.internal.local/SML_ALLOWED_HOSTS=sml-shop.example.com/' "$env_file" > "$bad_env_file"
 chmod 600 "$bad_env_file"

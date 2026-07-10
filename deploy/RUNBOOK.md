@@ -25,8 +25,10 @@ openssl rand -base64 32 # ENCRYPTION_MASTER_KEY
 ```
 
 Generate `ADMIN_PASSWORD_HASH` with `make hash-password`; it reads and confirms
-the password with terminal echo disabled. Do not place the plaintext password
-in shell history.
+the password with terminal echo disabled. Store the generated value inside
+literal single quotes in the production env file, for example
+`ADMIN_PASSWORD_HASH='<generated Argon2id hash>'`, so Docker Compose preserves
+the hash's dollar signs. Do not place the plaintext password in shell history.
 
 For the first deployment, generate PostgreSQL TLS material before validating
 Compose. The script refuses to overwrite existing keys and deletes the signing

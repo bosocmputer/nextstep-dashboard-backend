@@ -102,6 +102,12 @@ esac
 
 admin_hash=$(env_value ADMIN_PASSWORD_HASH)
 case "$admin_hash" in
+  \'*\') ;;
+  *) echo "ADMIN_PASSWORD_HASH must be single-quoted so Docker Compose preserves literal dollar signs" >&2; exit 1 ;;
+esac
+admin_hash=${admin_hash#\'}
+admin_hash=${admin_hash%\'}
+case "$admin_hash" in
   '$argon2id$'*) ;;
   *) echo "ADMIN_PASSWORD_HASH must be an Argon2id encoded hash" >&2; exit 1 ;;
 esac
