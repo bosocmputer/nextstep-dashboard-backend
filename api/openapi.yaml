@@ -428,6 +428,18 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ReportRunPage'}
+  /api/v1/admin/line-quota:
+    get:
+      tags: [Admin operations]
+      operationId: getLineQuota
+      description: Provider-wide shared OA quota status. Consumption includes messages sent by other systems and LINE Official Account Manager.
+      security: [{AdminSession: []}]
+      responses:
+        '200':
+          description: Safe quota metadata without channel credentials.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LineQuotaStatus'}
   /api/v1/admin/line-deliveries:
     get:
       tags: [Admin operations]
@@ -991,6 +1003,17 @@ components:
         acceptedAt: {type: string, format: date-time, nullable: true}
         createdAt: {type: string, format: date-time}
         expiresAt: {type: string, format: date-time}
+    LineQuotaStatus:
+      type: object
+      additionalProperties: false
+      required: [state, providerLimit, providerConsumed, locallyAccepted, operationalReservePercent, syncedAt]
+      properties:
+        state: {type: string, enum: [READY, UNLIMITED, STALE, UNSYNCED]}
+        providerLimit: {type: integer, minimum: 0, nullable: true, description: "Provider target limit; null means unlimited or not yet synced, distinguished by state."}
+        providerConsumed: {type: integer, minimum: 0, nullable: true, description: Approximate provider-wide consumption including Nexflow and OA Manager.}
+        locallyAccepted: {type: integer, minimum: 0, description: Push messages accepted from Nextstep Dashboard in the current month.}
+        operationalReservePercent: {type: integer, minimum: 0, maximum: 50}
+        syncedAt: {type: string, format: date-time, nullable: true}
     DeliveryPage:
       type: object
       required: [data, page]

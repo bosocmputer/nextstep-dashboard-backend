@@ -4,9 +4,12 @@ import (
 	"errors"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/quota"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/google/uuid"
 )
+
+type LineQuotaStatus = quota.Status
 
 var ErrInvalidCursor = errors.New("operations cursor is invalid")
 

@@ -13,6 +13,7 @@ import (
 )
 
 type OperationsAPI interface {
+	GetLineQuota(context.Context, time.Time) (operations.LineQuotaStatus, error)
 	ListReportRuns(context.Context, operations.ReportRunFilter) (operations.ReportRunPage, error)
 	ListDeliveries(context.Context, operations.DeliveryFilter) (operations.DeliveryPage, error)
 	ListAudit(context.Context, operations.AuditFilter) (operations.AuditPage, error)
@@ -21,6 +22,17 @@ type OperationsAPI interface {
 func registerOperationsRoutes(router interface {
 	Get(string, http.HandlerFunc)
 }, adminAuth AdminAuthenticator, operationsAPI OperationsAPI) {
+	router.Get("/api/v1/admin/line-quota", func(response http.ResponseWriter, request *http.Request) {
+		if _, ok := operationalAdmin(response, request, adminAuth, false); !ok {
+			return
+		}
+		status, err := operationsAPI.GetLineQuota(request.Context(), time.Now().UTC())
+		if handleOperationsError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, status)
+	})
+
 	router.Get("/api/v1/admin/report-runs", func(response http.ResponseWriter, request *http.Request) {
 		if _, ok := operationalAdmin(response, request, adminAuth, false); !ok {
 			return

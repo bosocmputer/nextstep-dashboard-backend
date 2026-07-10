@@ -14,10 +14,16 @@ import (
 )
 
 type fakeOperationsAPI struct {
+	quotaStatus  operations.LineQuotaStatus
 	reportPage   operations.ReportRunPage
 	deliveryPage operations.DeliveryPage
 	auditPage    operations.AuditPage
 	calls        int
+}
+
+func (fake *fakeOperationsAPI) GetLineQuota(context.Context, time.Time) (operations.LineQuotaStatus, error) {
+	fake.calls++
+	return fake.quotaStatus, nil
 }
 
 func (fake *fakeOperationsAPI) ListReportRuns(context.Context, operations.ReportRunFilter) (operations.ReportRunPage, error) {
@@ -63,5 +69,23 @@ func TestAdminOperationsRejectInvalidFiltersBeforeQuery(t *testing.T) {
 
 	if response.Code != http.StatusUnprocessableEntity || api.calls != 0 {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, api.calls, response.Body.String())
+	}
+}
+
+func TestAdminReadsSafeSharedLINEQuotaStatus(t *testing.T) {
+	limit, consumed := 5000, 4200
+	api := &fakeOperationsAPI{quotaStatus: operations.LineQuotaStatus{
+		State: "READY", ProviderLimit: &limit, ProviderConsumed: &consumed, LocallyAccepted: 24, OperationalReservePercent: 10,
+	}}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: &fakeAdminAuth{}, Operations: api})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/line-quota", nil)
+	request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "admin-session"})
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if response.Code != http.StatusOK || api.calls != 1 || !strings.Contains(body, `"providerConsumed":4200`) || strings.Contains(body, "token") {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, api.calls, body)
 	}
 }

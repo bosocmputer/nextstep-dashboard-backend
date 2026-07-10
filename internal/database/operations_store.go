@@ -19,6 +19,10 @@ func NewOperationsStore(pool *pgxpool.Pool) *OperationsStore {
 	return &OperationsStore{pool: pool}
 }
 
+func (store *OperationsStore) GetLineQuota(ctx context.Context, now time.Time) (operations.LineQuotaStatus, error) {
+	return NewQuotaStore(store.pool).Get(ctx, now)
+}
+
 func (store *OperationsStore) ListReportRuns(ctx context.Context, filter operations.ReportRunFilter) (operations.ReportRunPage, error) {
 	cursorTime, cursorID, err := operationsCursor(filter.Cursor)
 	if err != nil {

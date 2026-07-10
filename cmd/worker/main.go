@@ -17,6 +17,7 @@ import (
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/delivery"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/line"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/notification"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/quota"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/recipient"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/retention"
@@ -74,6 +75,12 @@ func main() {
 	)
 	retentionID := workerID + "-retention"
 	retentionWorker := retention.NewWorker(database.NewRetentionStore(pool), retention.ProductionPolicy(), time.Now)
+	quotaWorker := quota.NewWorker(
+		line.NewQuotaClient(
+			cfg.LineMessagingAccessToken, line.DefaultQuotaEndpoint, line.DefaultQuotaConsumptionEndpoint, 10*time.Second,
+		),
+		database.NewQuotaStore(pool), time.Now,
+	)
 
 	logger.Info("report worker started", "workerId", workerID, "concurrency", cfg.ReportWorkerConcurrency)
 	go heartbeatLoop(ctx, logger, pool, workerID, "REPORT", hostname, map[string]any{"concurrency": cfg.ReportWorkerConcurrency})
@@ -87,11 +94,41 @@ func main() {
 		go deliveryLoop(ctx, logger, deliveryWorker, lane)
 	}
 	go retentionLoop(ctx, logger, retentionWorker)
+	if cfg.LineMessagingAccessToken != "" {
+		quotaID := workerID + "-quota"
+		go heartbeatLoop(ctx, logger, pool, quotaID, "DELIVERY", hostname, map[string]any{"stage": "quota-sync"})
+		go lineQuotaLoop(ctx, logger, quotaWorker)
+	}
 	for lane := 0; lane < cfg.ReportWorkerConcurrency; lane++ {
 		go processLoop(ctx, logger, reportWorker, lane)
 	}
 	<-ctx.Done()
 	logger.Info("report worker stopping", "workerId", workerID)
+}
+
+func lineQuotaLoop(ctx context.Context, logger *slog.Logger, quotaWorker *quota.Worker) {
+	delay := time.Duration(0)
+	for ctx.Err() == nil {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+		status, err := quotaWorker.Process(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				logger.Warn("LINE quota sync failed", "error", err)
+			}
+			delay = time.Minute
+			continue
+		}
+		logger.Info("LINE quota synced", "state", status.State, "providerLimit", status.ProviderLimit, "providerConsumed", status.ProviderConsumed)
+		delay = 5 * time.Minute
+	}
 }
 
 func retentionLoop(ctx context.Context, logger *slog.Logger, retentionWorker *retention.Worker) {
