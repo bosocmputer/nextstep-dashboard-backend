@@ -117,6 +117,27 @@ func TestNextOccurrencesUseLocalWeekdayAndTime(t *testing.T) {
 	}
 }
 
+func TestHydrationReturnsEmptyReadinessBlockersAsArray(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	store := &memoryScheduleStore{}
+	service := NewService(store, true, func() time.Time { return now })
+	created, err := service.Create(context.Background(), []byte("admin"), "request-1", "schedule-create-1", uuid.New(), validInput(uuid.New()))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.ReadinessBlockers == nil || len(created.ReadinessBlockers) != 0 {
+		t.Fatalf("Create().ReadinessBlockers = %#v, want non-nil empty slice", created.ReadinessBlockers)
+	}
+
+	page, err := service.List(context.Background(), created.TenantID, 25, "")
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(page.Data) != 1 || page.Data[0].ReadinessBlockers == nil || len(page.Data[0].ReadinessBlockers) != 0 {
+		t.Fatalf("List().Data = %#v, want one schedule with non-nil empty readiness blockers", page.Data)
+	}
+}
+
 func TestActivationReportsAllReadinessBlockersAndComputesNextRun(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	store := &memoryScheduleStore{}

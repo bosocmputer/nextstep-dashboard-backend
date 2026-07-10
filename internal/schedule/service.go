@@ -305,7 +305,9 @@ func (service *Service) hydrateMany(ctx context.Context, tenantID uuid.UUID, ite
 		return nil, err
 	}
 	for index := range items {
-		items[index].ReadinessBlockers = append([]string(nil), readiness[items[index].ID]...)
+		blockers := readiness[items[index].ID]
+		items[index].ReadinessBlockers = make([]string, len(blockers))
+		copy(items[index].ReadinessBlockers, blockers)
 		if !service.lineReady {
 			items[index].ReadinessBlockers = appendUnique(items[index].ReadinessBlockers, BlockerLineNotConfigured)
 		}
