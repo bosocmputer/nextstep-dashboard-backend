@@ -15,13 +15,17 @@ import (
 type fakeAdminAuth struct {
 	loginResult auth.LoginResult
 	loginErr    error
+	loginUser   string
+	loginPass   string
 	admin       auth.AuthenticatedAdmin
 	authErr     error
 	csrfErr     error
 	logoutCount int
 }
 
-func (fake *fakeAdminAuth) Login(context.Context, string, string, string) (auth.LoginResult, error) {
+func (fake *fakeAdminAuth) Login(_ context.Context, username, password, _ string) (auth.LoginResult, error) {
+	fake.loginUser = username
+	fake.loginPass = password
 	return fake.loginResult, fake.loginErr
 }
 
@@ -112,6 +116,23 @@ func TestAdminLoginRejectsUnknownJSONField(t *testing.T) {
 
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdminLoginPassesAnyNonEmptyPasswordToTheAuthenticator(t *testing.T) {
+	adminAuth := &fakeAdminAuth{loginErr: auth.ErrInvalidCredentials}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: adminAuth})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/admin/login", strings.NewReader(`{"username":"superadmin","password":"x"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if adminAuth.loginUser != "superadmin" || adminAuth.loginPass != "x" {
+		t.Fatalf("authenticator received username=%q password=%q", adminAuth.loginUser, adminAuth.loginPass)
 	}
 }
 

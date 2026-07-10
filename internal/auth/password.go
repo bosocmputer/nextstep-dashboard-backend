@@ -7,20 +7,30 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
 
 const (
-	minimumArgonMemory      = 8 * 1024
-	maximumArgonMemory      = 1024 * 1024
-	maximumArgonIterations  = 10
-	maximumArgonParallelism = 16
+	MinimumAdminPasswordCharacters = 15
+	MaximumAdminPasswordBytes      = 1024
+	minimumArgonMemory             = 8 * 1024
+	maximumArgonMemory             = 1024 * 1024
+	maximumArgonIterations         = 10
+	maximumArgonParallelism        = 16
 )
 
+func ValidateAdminPassword(password string) error {
+	if utf8.RuneCountInString(password) < MinimumAdminPasswordCharacters || len(password) > MaximumAdminPasswordBytes {
+		return fmt.Errorf("password length must be between %d characters and %d bytes", MinimumAdminPasswordCharacters, MaximumAdminPasswordBytes)
+	}
+	return nil
+}
+
 func HashArgon2ID(password string, entropy io.Reader) (string, error) {
-	if len(password) < 14 || len(password) > 1024 {
-		return "", errors.New("password length must be between 14 and 1024 bytes")
+	if err := ValidateAdminPassword(password); err != nil {
+		return "", err
 	}
 	if entropy == nil {
 		return "", errors.New("password hashing entropy source is required")

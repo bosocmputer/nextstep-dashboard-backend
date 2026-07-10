@@ -693,7 +693,7 @@ components:
       required: [username, password]
       properties:
         username: {type: string, minLength: 1, maxLength: 120}
-        password: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+        password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
     AdminSession:
       type: object
       required: [username, expiresAt]
@@ -707,8 +707,8 @@ components:
       additionalProperties: false
       required: [currentPassword, newPassword]
       properties:
-        currentPassword: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
-        newPassword: {type: string, minLength: 14, maxLength: 1024, writeOnly: true}
+        currentPassword: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+        newPassword: {type: string, minLength: 15, maxLength: 1024, writeOnly: true}
     TenantStatus: {type: string, enum: [ACTIVE, DISABLED, EXPIRED]}
     Tenant:
       type: object

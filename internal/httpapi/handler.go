@@ -277,7 +277,7 @@ func registerAdminAuthRoutes(router chi.Router, adminAuth AdminAuthenticator, se
 			Username string `json:"username"`
 			Password string `json:"password"`
 		}
-		if err := decodeJSON(response, request, &input); err != nil || len(input.Username) < 1 || len(input.Username) > 120 || len(input.Password) < 12 || len(input.Password) > 1024 {
+		if err := decodeJSON(response, request, &input); err != nil || len(input.Username) < 1 || len(input.Username) > 120 || len(input.Password) < 1 || len(input.Password) > auth.MaximumAdminPasswordBytes {
 			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Login input is invalid.", false)
 			return
 		}
@@ -330,7 +330,7 @@ func registerAdminAuthRoutes(router chi.Router, adminAuth AdminAuthenticator, se
 			CurrentPassword string `json:"currentPassword"`
 			NewPassword     string `json:"newPassword"`
 		}
-		if err := decodeJSON(response, request, &input); err != nil || len(input.CurrentPassword) < 12 || len(input.CurrentPassword) > 1024 || len(input.NewPassword) < 14 || len(input.NewPassword) > 1024 {
+		if err := decodeJSON(response, request, &input); err != nil || len(input.CurrentPassword) < 1 || len(input.CurrentPassword) > auth.MaximumAdminPasswordBytes || auth.ValidateAdminPassword(input.NewPassword) != nil {
 			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Password input is invalid.", false)
 			return
 		}

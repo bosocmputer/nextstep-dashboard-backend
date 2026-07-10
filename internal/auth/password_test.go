@@ -23,6 +23,18 @@ func TestHashArgon2IDProducesVerifiableBoundedHash(t *testing.T) {
 	}
 }
 
+func TestHashArgon2IDRequiresFifteenUnicodeCharacters(t *testing.T) {
+	entropy := func() *bytes.Reader { return bytes.NewReader(bytes.Repeat([]byte{0x42}, 16)) }
+	for _, password := range []string{"12345678901234", "กกกกก"} {
+		if _, err := HashArgon2ID(password, entropy()); err == nil {
+			t.Fatalf("HashArgon2ID(%q) accepted fewer than 15 characters", password)
+		}
+	}
+	if _, err := HashArgon2ID("123456789012345", entropy()); err != nil {
+		t.Fatalf("HashArgon2ID() rejected 15 characters: %v", err)
+	}
+}
+
 func TestVerifyArgon2ID(t *testing.T) {
 	hash := encodedHash("correct horse battery staple", 64*1024, 3, 2)
 
