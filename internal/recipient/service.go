@@ -85,6 +85,14 @@ func (service *Service) Get(ctx context.Context, recipientID uuid.UUID) (Recipie
 	return service.publicRecipient(stored)
 }
 
+func (service *Service) DisplayName(stored StoredRecipient) (string, error) {
+	public, err := service.publicRecipient(stored)
+	if err != nil {
+		return "", err
+	}
+	return public.DisplayName, nil
+}
+
 func (service *Service) OutboundLineUserID(ctx context.Context, recipientID uuid.UUID) (string, error) {
 	stored, err := service.store.GetByID(ctx, recipientID)
 	if err != nil || stored.Status != StatusActive || len(stored.LineUserIDHash) == 0 {

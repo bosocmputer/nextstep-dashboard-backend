@@ -210,15 +210,16 @@ func TestMaterializeDueScheduleIsAtomicAndSingleClaim(t *testing.T) {
 	}
 	operationsStore := NewOperationsStore(pool)
 	reportPage, err := operationsStore.ListReportRuns(ctx, operations.ReportRunFilter{TenantID: &tenantID, PageSize: 25, Now: now.Add(12 * time.Second)})
-	if err != nil || len(reportPage.Data) != 2 {
+	if err != nil || len(reportPage.Data) != 2 || reportPage.Data[0].TenantName != "Execution Store" {
 		t.Fatalf("ListReportRuns() = %+v, %v", reportPage, err)
 	}
 	deliveryPage, err := operationsStore.ListDeliveries(ctx, operations.DeliveryFilter{TenantID: &tenantID, PageSize: 25})
-	if err != nil || len(deliveryPage.Data) != 1 || deliveryPage.Data[0].Status != "ACCEPTED" {
+	if err != nil || len(deliveryPage.Data) != 1 || deliveryPage.Data[0].Status != "ACCEPTED" ||
+		deliveryPage.Data[0].TenantName != "Execution Store" || deliveryPage.Data[0].StoredRecipient.ID != deliveredRecipientID {
 		t.Fatalf("ListDeliveries() = %+v, %v", deliveryPage, err)
 	}
 	auditPage, err := operationsStore.ListAudit(ctx, operations.AuditFilter{TenantID: &tenantID, PageSize: 25})
-	if err != nil || len(auditPage.Data) < 2 {
+	if err != nil || len(auditPage.Data) < 2 || auditPage.Data[0].TenantName == nil || *auditPage.Data[0].TenantName != "Execution Store" {
 		t.Fatalf("ListAudit() = %+v, %v", auditPage, err)
 	}
 	testExecution, err := store.MaterializeTest(ctx, []byte("admin"), "test-send-request", "schedule-test-send-001", tenantID, created.ID, now.Add(20*time.Second))

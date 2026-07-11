@@ -15,6 +15,7 @@ import (
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/database"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/httpapi"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/line"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/operations"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/recipient"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/schedule"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/secret"
@@ -77,7 +78,7 @@ func main() {
 			Schedules:      scheduleService,
 			FlexPreviews:   flexPreviewService,
 			ScheduleTests:  scheduleTestService,
-			Operations:     database.NewOperationsStore(pool),
+			Operations:     operations.NewService(database.NewOperationsStore(pool), recipientService),
 			SecureCookies:  cfg.Environment == "production",
 		}),
 		ReadHeaderTimeout: 5 * time.Second,

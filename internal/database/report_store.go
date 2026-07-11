@@ -679,16 +679,22 @@ coalesce(safe_error_message, ''), queued_at, started_at, finished_at,
 expires_at, created_at, updated_at`
 
 func scanReportRun(row rowScanner, now time.Time) (report.Run, error) {
+	return scanReportRunWithExtras(row, now)
+}
+
+func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ...any) (report.Run, error) {
 	var run report.Run
 	var summaryJSON, reconciliationJSON []byte
-	err := row.Scan(
+	destinations := []any{
 		&run.ID, &run.TenantID, &run.ReportKey, &run.Source, &run.IdempotencyKey,
 		&run.Status, &run.Period.Preset, &run.Period.DateFrom, &run.Period.DateTo,
 		&run.RequestedByRecipient, &run.ClaimedBy, &run.LeaseExpiresAt, &run.Attempt,
 		&run.RowCount, &run.IsTruncated, &summaryJSON, &reconciliationJSON,
 		&run.SafeErrorCode, &run.SafeErrorMessage, &run.QueuedAt, &run.StartedAt,
 		&run.FinishedAt, &run.ExpiresAt, &run.CreatedAt, &run.UpdatedAt,
-	)
+	}
+	destinations = append(destinations, extraDestinations...)
+	err := row.Scan(destinations...)
 	if err != nil {
 		return report.Run{}, err
 	}

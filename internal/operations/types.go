@@ -1,10 +1,12 @@
 package operations
 
 import (
+	"context"
 	"errors"
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/quota"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/recipient"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/google/uuid"
 )
@@ -22,23 +24,31 @@ type ReportRunFilter struct {
 }
 
 type ReportRunPage struct {
-	Data       []report.Run
+	Data       []ReportRun
 	NextCursor string
 	HasMore    bool
+}
+
+type ReportRun struct {
+	Run        report.Run
+	TenantName string
 }
 
 type DeliveryStatus string
 
 type Delivery struct {
-	ID                uuid.UUID      `json:"id"`
-	TenantID          uuid.UUID      `json:"tenantId"`
-	Status            DeliveryStatus `json:"status"`
-	Attempt           int            `json:"attempt"`
-	SafeErrorCode     *string        `json:"safeErrorCode"`
-	ProviderRequestID *string        `json:"providerRequestId,omitempty"`
-	AcceptedAt        *time.Time     `json:"acceptedAt"`
-	CreatedAt         time.Time      `json:"createdAt"`
-	ExpiresAt         time.Time      `json:"expiresAt"`
+	ID                uuid.UUID                 `json:"id"`
+	TenantID          uuid.UUID                 `json:"tenantId"`
+	TenantName        string                    `json:"tenantName"`
+	RecipientName     string                    `json:"recipientDisplayName"`
+	Status            DeliveryStatus            `json:"status"`
+	Attempt           int                       `json:"attempt"`
+	SafeErrorCode     *string                   `json:"safeErrorCode"`
+	ProviderRequestID *string                   `json:"providerRequestId,omitempty"`
+	AcceptedAt        *time.Time                `json:"acceptedAt"`
+	CreatedAt         time.Time                 `json:"createdAt"`
+	ExpiresAt         time.Time                 `json:"expiresAt"`
+	StoredRecipient   recipient.StoredRecipient `json:"-"`
 }
 
 type DeliveryFilter struct {
@@ -56,6 +66,7 @@ type DeliveryPage struct {
 type AuditEvent struct {
 	ID            uuid.UUID  `json:"id"`
 	TenantID      *uuid.UUID `json:"tenantId"`
+	TenantName    *string    `json:"tenantName"`
 	ActorType     string     `json:"actorType"`
 	Action        string     `json:"action"`
 	ResourceType  string     `json:"resourceType"`
@@ -75,4 +86,15 @@ type AuditPage struct {
 	Data       []AuditEvent
 	NextCursor string
 	HasMore    bool
+}
+
+type Store interface {
+	GetLineQuota(context.Context, time.Time) (LineQuotaStatus, error)
+	ListReportRuns(context.Context, ReportRunFilter) (ReportRunPage, error)
+	ListDeliveries(context.Context, DeliveryFilter) (DeliveryPage, error)
+	ListAudit(context.Context, AuditFilter) (AuditPage, error)
+}
+
+type RecipientNameResolver interface {
+	DisplayName(recipient.StoredRecipient) (string, error)
 }

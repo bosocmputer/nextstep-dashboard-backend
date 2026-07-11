@@ -59,8 +59,10 @@ func registerOperationsRoutes(router interface {
 			return
 		}
 		data := make([]map[string]any, 0, len(page.Data))
-		for _, run := range page.Data {
-			data = append(data, reportRunResponse(run))
+		for _, item := range page.Data {
+			responseItem := reportRunResponse(item.Run)
+			responseItem["tenantName"] = item.TenantName
+			data = append(data, responseItem)
 		}
 		writeJSON(response, http.StatusOK, map[string]any{"data": data, "page": operationsPage(page.NextCursor, page.HasMore)})
 	})

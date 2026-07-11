@@ -1005,6 +1005,7 @@ components:
       properties:
         id: {type: string, format: uuid}
         tenantId: {type: string, format: uuid}
+        tenantName: {type: string, description: Present on Admin report history responses.}
         reportKey: {$ref: '#/components/schemas/ReportKey'}
         status: {$ref: '#/components/schemas/ReportRunStatus'}
         periodPreset: {type: string}
@@ -1200,10 +1201,12 @@ components:
         reportKeys: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
     Delivery:
       type: object
-      required: [id, tenantId, status, attempt, createdAt, expiresAt]
+      required: [id, tenantId, tenantName, recipientDisplayName, status, attempt, createdAt, expiresAt]
       properties:
         id: {type: string, format: uuid}
         tenantId: {type: string, format: uuid}
+        tenantName: {type: string}
+        recipientDisplayName: {type: string, description: Decrypted recipient label for authenticated Admin display only.}
         status: {type: string, enum: [PENDING, SENDING, ACCEPTED, RETRY_WAIT, UNCERTAIN, FAILED_PERMANENT]}
         attempt: {type: integer, minimum: 0}
         safeErrorCode: {type: string, nullable: true}
@@ -1233,6 +1236,7 @@ components:
       properties:
         id: {type: string, format: uuid}
         tenantId: {type: string, format: uuid, nullable: true}
+        tenantName: {type: string, nullable: true}
         actorType: {type: string, enum: [ADMIN, VIEWER, WORKER, SYSTEM]}
         action: {type: string}
         resourceType: {type: string}
