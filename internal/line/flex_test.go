@@ -38,6 +38,9 @@ func TestRenderFlexBuildsOneCompactPermissionFilteredBubble(t *testing.T) {
 	if !strings.Contains(string(payload), `"size":"giga"`) || !strings.Contains(string(payload), "snapshotRunId=00000000-0000-0000-0000-000000000002") || !strings.Contains(string(payload), "22:30 เวลาไทย") || strings.Contains(string(payload), "UTC") {
 		t.Fatalf("executive layout, deep link, or timezone missing: %s", payload)
 	}
+	if !strings.Contains(string(payload), "#1D4ED8") || strings.Contains(string(payload), "#0F766E") || strings.Contains(string(payload), "฿") {
+		t.Fatalf("blue palette or symbol-free values missing: %s", payload)
+	}
 	var decoded map[string]any
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("payload is invalid JSON: %v", err)

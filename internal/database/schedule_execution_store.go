@@ -57,7 +57,7 @@ func (store *ScheduleStore) MaterializeTest(ctx context.Context, actorHash []byt
 	if err != nil {
 		return schedule.Execution{}, err
 	}
-	if item.Status == schedule.StatusExpired {
+	if item.Status == schedule.StatusExpired || item.Status == schedule.StatusArchived {
 		return schedule.Execution{}, schedule.ErrStateConflict
 	}
 	readiness, err := scheduleReadiness(ctx, tx, tenantID, []uuid.UUID{scheduleID}, now)
@@ -246,7 +246,7 @@ func scanSchedule(row rowScanner, extra ...any) (schedule.Schedule, error) {
 	var reportKeys []string
 	destinations := []any{
 		&item.ID, &item.TenantID, &item.Name, &item.Status, &item.LocalTime, &item.Timezone,
-		&item.PeriodPreset, &item.Version, &item.CreatedAt, &item.UpdatedAt,
+		&item.PeriodPreset, &item.Version, &item.CreatedAt, &item.UpdatedAt, &item.ArchivedAt,
 		&days, &reportKeys, &item.RecipientIDs,
 	}
 	destinations = append(destinations, extra...)

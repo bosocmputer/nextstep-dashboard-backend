@@ -122,8 +122,52 @@ func TestScheduleStoreLifecycleAndReadinessGates(t *testing.T) {
 	if err != nil || paused.Status != schedule.StatusPaused {
 		t.Fatalf("Pause() = %+v, %v", paused, err)
 	}
-	page, err := store.List(ctx, tenantID, 25, "")
+	page, err := store.List(ctx, tenantID, 25, "", false)
 	if err != nil || len(page.Data) != 1 || page.Data[0].ID != created.ID {
 		t.Fatalf("List() = %+v, %v", page, err)
 	}
+	archived, err := store.Archive(ctx, []byte("admin"), "request-archive", tenantID, created.ID, paused.Version, now.Add(5*time.Second))
+	if err != nil || archived.Status != schedule.StatusArchived || archived.ArchivedAt == nil {
+		t.Fatalf("Archive() = %+v, %v", archived, err)
+	}
+	page, err = store.List(ctx, tenantID, 25, "", false)
+	if err != nil || len(page.Data) != 0 {
+		t.Fatalf("default List() includes archived schedule: %+v, %v", page, err)
+	}
+	page, err = store.List(ctx, tenantID, 25, "", true)
+	if err != nil || len(page.Data) != 1 || page.Data[0].Status != schedule.StatusArchived {
+		t.Fatalf("List(includeArchived) = %+v, %v", page, err)
+	}
+	if _, err := store.MaterializeTest(ctx, []byte("admin"), "request-archived-test", "archived-test-send-001", tenantID, created.ID, now.Add(6*time.Second)); !errors.Is(err, schedule.ErrStateConflict) {
+		t.Fatalf("archived test send error = %v", err)
+	}
+	restored, err := store.Restore(ctx, []byte("admin"), "request-restore", tenantID, created.ID, archived.Version, now.Add(7*time.Second))
+	if err != nil || restored.Status != schedule.StatusDraft || restored.ArchivedAt != nil {
+		t.Fatalf("Restore() = %+v, %v", restored, err)
+	}
+	var auditActions []string
+	rows, err := pool.Query(ctx, `select action from audit_logs where tenant_id = $1 and entity_id = $2 order by occurred_at`, tenantID, created.ID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var action string
+		if err := rows.Scan(&action); err != nil {
+			t.Fatal(err)
+		}
+		auditActions = append(auditActions, action)
+	}
+	if !containsString(auditActions, "SCHEDULE_ARCHIVED") || !containsString(auditActions, "SCHEDULE_RESTORED") {
+		t.Fatalf("audit actions = %v", auditActions)
+	}
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }

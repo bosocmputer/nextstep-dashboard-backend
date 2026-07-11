@@ -16,11 +16,13 @@ import (
 
 type ScheduleAPI interface {
 	Create(context.Context, []byte, string, string, uuid.UUID, schedule.Input) (schedule.Schedule, error)
-	List(context.Context, uuid.UUID, int, string) (schedule.Page, error)
+	List(context.Context, uuid.UUID, int, string, bool) (schedule.Page, error)
 	Get(context.Context, uuid.UUID, uuid.UUID) (schedule.Schedule, error)
 	Update(context.Context, []byte, string, uuid.UUID, uuid.UUID, schedule.Input, int) (schedule.Schedule, error)
 	Activate(context.Context, []byte, string, uuid.UUID, uuid.UUID) (schedule.Schedule, error)
 	Pause(context.Context, []byte, string, uuid.UUID, uuid.UUID) (schedule.Schedule, error)
+	Archive(context.Context, []byte, string, uuid.UUID, uuid.UUID, int) (schedule.Schedule, error)
+	Restore(context.Context, []byte, string, uuid.UUID, uuid.UUID, int) (schedule.Schedule, error)
 }
 
 type SchedulePreviewAPI interface {
@@ -66,7 +68,16 @@ func registerScheduleRoutes(router chi.Router, adminAuth AdminAuthenticator, sch
 			}
 			pageSize = value
 		}
-		page, err := schedules.List(request.Context(), tenantID, pageSize, request.URL.Query().Get("cursor"))
+		includeArchived := false
+		if raw := request.URL.Query().Get("includeArchived"); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "includeArchived must be true or false.", false)
+				return
+			}
+			includeArchived = value
+		}
+		page, err := schedules.List(request.Context(), tenantID, pageSize, request.URL.Query().Get("cursor"), includeArchived)
 		if handleScheduleError(response, request, err) {
 			return
 		}
@@ -179,6 +190,46 @@ func registerScheduleRoutes(router chi.Router, adminAuth AdminAuthenticator, sch
 		writeJSON(response, http.StatusOK, updated)
 	})
 
+	router.Delete("/api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}", func(response http.ResponseWriter, request *http.Request) {
+		admin, ok := operationalAdmin(response, request, adminAuth, true)
+		if !ok {
+			return
+		}
+		tenantID, scheduleID, ok := parseSchedulePath(response, request)
+		if !ok {
+			return
+		}
+		version, versionOK := parseScheduleVersion(response, request)
+		if !versionOK {
+			return
+		}
+		item, err := schedules.Archive(request.Context(), admin.TokenHash, requestID(request), tenantID, scheduleID, version)
+		if handleScheduleError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, item)
+	})
+
+	router.Post("/api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/restore", func(response http.ResponseWriter, request *http.Request) {
+		admin, ok := operationalAdmin(response, request, adminAuth, true)
+		if !ok {
+			return
+		}
+		tenantID, scheduleID, ok := parseSchedulePath(response, request)
+		if !ok {
+			return
+		}
+		version, versionOK := parseScheduleVersion(response, request)
+		if !versionOK {
+			return
+		}
+		item, err := schedules.Restore(request.Context(), admin.TokenHash, requestID(request), tenantID, scheduleID, version)
+		if handleScheduleError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, item)
+	})
+
 	for _, operation := range []struct {
 		path   string
 		invoke func(context.Context, []byte, string, uuid.UUID, uuid.UUID) (schedule.Schedule, error)
@@ -243,6 +294,15 @@ func requireJSONRequest(response http.ResponseWriter, request *http.Request) boo
 		return false
 	}
 	return true
+}
+
+func parseScheduleVersion(response http.ResponseWriter, request *http.Request) (int, bool) {
+	version, err := strconv.Atoi(request.URL.Query().Get("version"))
+	if err != nil || version < 1 {
+		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Schedule version must be a positive integer.", false)
+		return 0, false
+	}
+	return version, true
 }
 
 func handleScheduleError(response http.ResponseWriter, request *http.Request, err error) bool {

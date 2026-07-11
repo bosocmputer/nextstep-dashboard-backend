@@ -109,7 +109,7 @@ func (store *ScheduleStore) Create(ctx context.Context, actorHash []byte, reques
 	return created, nil
 }
 
-func (store *ScheduleStore) List(ctx context.Context, tenantID uuid.UUID, pageSize int, cursor string) (schedule.Page, error) {
+func (store *ScheduleStore) List(ctx context.Context, tenantID uuid.UUID, pageSize int, cursor string, includeArchived bool) (schedule.Page, error) {
 	var cursorTime *time.Time
 	var cursorID *uuid.UUID
 	if cursor != "" {
@@ -123,9 +123,10 @@ func (store *ScheduleStore) List(ctx context.Context, tenantID uuid.UUID, pageSi
 		select `+scheduleColumns+`
 		from notification_schedules s
 		where s.tenant_id = $1
+		  and ($4 or s.status <> 'ARCHIVED')
 		  and ($2::timestamptz is null or (s.updated_at, s.id) < ($2, $3))
 		order by s.updated_at desc, s.id desc
-		limit $4`, tenantID, cursorTime, cursorID, pageSize+1)
+		limit $5`, tenantID, cursorTime, cursorID, includeArchived, pageSize+1)
 	if err != nil {
 		return schedule.Page{}, fmt.Errorf("list schedules: %w", err)
 	}
@@ -292,6 +293,88 @@ func (store *ScheduleStore) Pause(ctx context.Context, actorHash []byte, request
 	return paused, nil
 }
 
+func (store *ScheduleStore) Archive(ctx context.Context, actorHash []byte, requestID string, tenantID, scheduleID uuid.UUID, version int, now time.Time) (schedule.Schedule, error) {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return schedule.Schedule{}, fmt.Errorf("begin archive schedule: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	before, err := getSchedule(ctx, tx, tenantID, scheduleID, true)
+	if err != nil {
+		return schedule.Schedule{}, err
+	}
+	if before.Status == schedule.StatusArchived {
+		if err := tx.Commit(ctx); err != nil {
+			return schedule.Schedule{}, fmt.Errorf("commit archive replay: %w", err)
+		}
+		return before, nil
+	}
+	if before.Status != schedule.StatusDraft && before.Status != schedule.StatusPaused {
+		return schedule.Schedule{}, schedule.ErrStateConflict
+	}
+	if before.Version != version {
+		return schedule.Schedule{}, schedule.ErrVersionConflict
+	}
+	if _, err := tx.Exec(ctx, `
+		update notification_schedules
+		set status = 'ARCHIVED', archived_at = $3, next_run_at = null,
+		    version = version + 1, updated_at = $3
+		where tenant_id = $1 and id = $2`, tenantID, scheduleID, now); err != nil {
+		return schedule.Schedule{}, fmt.Errorf("archive schedule: %w", err)
+	}
+	archived, err := getSchedule(ctx, tx, tenantID, scheduleID, false)
+	if err != nil {
+		return schedule.Schedule{}, err
+	}
+	beforeJSON, _ := json.Marshal(before)
+	afterJSON, _ := json.Marshal(archived)
+	if err := insertAudit(ctx, tx, tenantID, actorHash, "SCHEDULE_ARCHIVED", "NOTIFICATION_SCHEDULE", scheduleID.String(), requestID, beforeJSON, afterJSON, now); err != nil {
+		return schedule.Schedule{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return schedule.Schedule{}, fmt.Errorf("commit archive schedule: %w", err)
+	}
+	return archived, nil
+}
+
+func (store *ScheduleStore) Restore(ctx context.Context, actorHash []byte, requestID string, tenantID, scheduleID uuid.UUID, version int, now time.Time) (schedule.Schedule, error) {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return schedule.Schedule{}, fmt.Errorf("begin restore schedule: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	before, err := getSchedule(ctx, tx, tenantID, scheduleID, true)
+	if err != nil {
+		return schedule.Schedule{}, err
+	}
+	if before.Status != schedule.StatusArchived {
+		return schedule.Schedule{}, schedule.ErrStateConflict
+	}
+	if before.Version != version {
+		return schedule.Schedule{}, schedule.ErrVersionConflict
+	}
+	if _, err := tx.Exec(ctx, `
+		update notification_schedules
+		set status = 'DRAFT', archived_at = null, next_run_at = null,
+		    version = version + 1, updated_at = $3
+		where tenant_id = $1 and id = $2`, tenantID, scheduleID, now); err != nil {
+		return schedule.Schedule{}, fmt.Errorf("restore schedule: %w", err)
+	}
+	restored, err := getSchedule(ctx, tx, tenantID, scheduleID, false)
+	if err != nil {
+		return schedule.Schedule{}, err
+	}
+	beforeJSON, _ := json.Marshal(before)
+	afterJSON, _ := json.Marshal(restored)
+	if err := insertAudit(ctx, tx, tenantID, actorHash, "SCHEDULE_RESTORED", "NOTIFICATION_SCHEDULE", scheduleID.String(), requestID, beforeJSON, afterJSON, now); err != nil {
+		return schedule.Schedule{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return schedule.Schedule{}, fmt.Errorf("commit restore schedule: %w", err)
+	}
+	return restored, nil
+}
+
 type scheduleQuerier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -448,7 +531,7 @@ func scheduleReadiness(ctx context.Context, queryer scheduleQuerier, tenantID uu
 
 const scheduleColumns = `
 s.id, s.tenant_id, s.name, s.status, to_char(s.local_time, 'HH24:MI'), s.timezone,
-s.period_preset, s.version, s.created_at, s.updated_at,
+s.period_preset, s.version, s.created_at, s.updated_at, s.archived_at,
 array(select d.day_of_week from notification_schedule_days d where d.schedule_id = s.id order by d.day_of_week),
 array(select r.report_key from notification_schedule_reports r where r.schedule_id = s.id order by r.position),
 array(select recipient.recipient_id from notification_schedule_recipients recipient where recipient.schedule_id = s.id order by recipient.recipient_id)`

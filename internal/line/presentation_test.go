@@ -21,13 +21,13 @@ func TestBuildFlexReportPresentationUsesExecutiveSalesMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildFlexReportPresentation() error = %v", err)
 	}
-	if presentation.Primary.Label != "ยอดขาย" || presentation.Primary.Value != "฿604,058.00" {
+	if presentation.Primary.Label != "ยอดขาย" || presentation.Primary.Value != "604,058.00" {
 		t.Fatalf("primary = %+v", presentation.Primary)
 	}
 	if presentation.Comparison == nil || presentation.Comparison.Text != "↓ 7.82% จากช่วงก่อน" || presentation.Comparison.Direction != report.DirectionDown {
 		t.Fatalf("comparison = %+v", presentation.Comparison)
 	}
-	if len(presentation.Supporting) != 2 || presentation.Supporting[0].Value != "741" || presentation.Supporting[1].Value != "฿815.19" {
+	if len(presentation.Supporting) != 2 || presentation.Supporting[0].Value != "741" || presentation.Supporting[1].Value != "815.19" {
 		t.Fatalf("supporting = %+v", presentation.Supporting)
 	}
 	if presentation.Attention != nil {
@@ -52,7 +52,7 @@ func TestBuildFlexReportPresentationFlagsLossWithoutLeakingEntityNames(t *testin
 	if presentation.Attention == nil || presentation.Attention.Severity != FlexAttentionDanger || presentation.Attention.Text != "ขาดทุนขั้นต้น" {
 		t.Fatalf("attention = %+v", presentation.Attention)
 	}
-	if presentation.Primary.Value != "−฿79,825.88" || len(presentation.Supporting) != 2 || presentation.Supporting[0].Value != "−1.10%" {
+	if presentation.Primary.Value != "−79,825.88" || len(presentation.Supporting) != 2 || presentation.Supporting[0].Value != "−1.10%" {
 		t.Fatalf("presentation = %+v", presentation)
 	}
 	encoded, _ := json.Marshal(presentation)
@@ -93,7 +93,7 @@ func TestBuildFlexReportPresentationFallsBackForLegacySummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildFlexReportPresentation() error = %v", err)
 	}
-	if presentation.Primary.Value != "฿1,234.50" || len(presentation.Supporting) != 1 || presentation.Comparison != nil || presentation.Attention == nil || presentation.Attention.Text != "ไม่มีข้อมูลเปรียบเทียบ" {
+	if presentation.Primary.Value != "1,234.50" || len(presentation.Supporting) != 1 || presentation.Comparison != nil || presentation.Attention == nil || presentation.Attention.Text != "ไม่มีข้อมูลเปรียบเทียบ" {
 		t.Fatalf("legacy presentation = %+v", presentation)
 	}
 }

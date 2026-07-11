@@ -14,10 +14,11 @@ import (
 type Status string
 
 const (
-	StatusDraft   Status = "DRAFT"
-	StatusActive  Status = "ACTIVE"
-	StatusPaused  Status = "PAUSED"
-	StatusExpired Status = "EXPIRED"
+	StatusDraft    Status = "DRAFT"
+	StatusActive   Status = "ACTIVE"
+	StatusPaused   Status = "PAUSED"
+	StatusExpired  Status = "EXPIRED"
+	StatusArchived Status = "ARCHIVED"
 )
 
 const (
@@ -68,6 +69,7 @@ type Schedule struct {
 	NextOccurrences   []time.Time `json:"nextOccurrences"`
 	CreatedAt         time.Time   `json:"createdAt"`
 	UpdatedAt         time.Time   `json:"updatedAt"`
+	ArchivedAt        *time.Time  `json:"archivedAt,omitempty"`
 }
 
 type Page struct {
@@ -78,12 +80,14 @@ type Page struct {
 
 type Store interface {
 	Create(context.Context, []byte, string, string, uuid.UUID, Input, time.Time) (Schedule, error)
-	List(context.Context, uuid.UUID, int, string) (Page, error)
+	List(context.Context, uuid.UUID, int, string, bool) (Page, error)
 	Get(context.Context, uuid.UUID, uuid.UUID) (Schedule, error)
 	Update(context.Context, []byte, string, uuid.UUID, uuid.UUID, Input, int, time.Time) (Schedule, error)
 	Readiness(context.Context, uuid.UUID, []uuid.UUID, time.Time) (map[uuid.UUID][]string, error)
 	Activate(context.Context, []byte, string, uuid.UUID, uuid.UUID, time.Time, time.Time) (Schedule, error)
 	Pause(context.Context, []byte, string, uuid.UUID, uuid.UUID, time.Time) (Schedule, error)
+	Archive(context.Context, []byte, string, uuid.UUID, uuid.UUID, int, time.Time) (Schedule, error)
+	Restore(context.Context, []byte, string, uuid.UUID, uuid.UUID, int, time.Time) (Schedule, error)
 }
 
 type Service struct {
@@ -206,14 +210,14 @@ func (service *Service) Create(ctx context.Context, actorHash []byte, requestID,
 	return service.hydrate(ctx, created)
 }
 
-func (service *Service) List(ctx context.Context, tenantID uuid.UUID, pageSize int, cursor string) (Page, error) {
+func (service *Service) List(ctx context.Context, tenantID uuid.UUID, pageSize int, cursor string, includeArchived bool) (Page, error) {
 	if pageSize == 0 {
 		pageSize = 25
 	}
 	if pageSize < 1 || pageSize > 100 {
 		return Page{}, &ValidationError{Field: "pageSize", Code: "INVALID_PAGE_SIZE"}
 	}
-	page, err := service.store.List(ctx, tenantID, pageSize, cursor)
+	page, err := service.store.List(ctx, tenantID, pageSize, cursor, includeArchived)
 	if err != nil {
 		return Page{}, err
 	}
@@ -223,6 +227,28 @@ func (service *Service) List(ctx context.Context, tenantID uuid.UUID, pageSize i
 	}
 	page.Data = items
 	return page, nil
+}
+
+func (service *Service) Archive(ctx context.Context, actorHash []byte, requestID string, tenantID, scheduleID uuid.UUID, version int) (Schedule, error) {
+	if version < 1 {
+		return Schedule{}, &ValidationError{Field: "version", Code: "INVALID_VERSION"}
+	}
+	item, err := service.store.Archive(ctx, actorHash, requestID, tenantID, scheduleID, version, service.now().UTC())
+	if err != nil {
+		return Schedule{}, err
+	}
+	return service.hydrate(ctx, item)
+}
+
+func (service *Service) Restore(ctx context.Context, actorHash []byte, requestID string, tenantID, scheduleID uuid.UUID, version int) (Schedule, error) {
+	if version < 1 {
+		return Schedule{}, &ValidationError{Field: "version", Code: "INVALID_VERSION"}
+	}
+	item, err := service.store.Restore(ctx, actorHash, requestID, tenantID, scheduleID, version, service.now().UTC())
+	if err != nil {
+		return Schedule{}, err
+	}
+	return service.hydrate(ctx, item)
 }
 
 func (service *Service) Get(ctx context.Context, tenantID, scheduleID uuid.UUID) (Schedule, error) {
@@ -292,9 +318,11 @@ func (service *Service) hydrateMany(ctx context.Context, tenantID uuid.UUID, ite
 	if len(items) == 0 {
 		return []Schedule{}, nil
 	}
-	ids := make([]uuid.UUID, len(items))
+	ids := make([]uuid.UUID, 0, len(items))
 	for index := range items {
-		ids[index] = items[index].ID
+		if items[index].Status != StatusArchived {
+			ids = append(ids, items[index].ID)
+		}
 	}
 	now := service.now().UTC()
 	readiness, err := service.store.Readiness(ctx, tenantID, ids, now)
@@ -302,6 +330,11 @@ func (service *Service) hydrateMany(ctx context.Context, tenantID uuid.UUID, ite
 		return nil, err
 	}
 	for index := range items {
+		if items[index].Status == StatusArchived {
+			items[index].ReadinessBlockers = []string{}
+			items[index].NextOccurrences = []time.Time{}
+			continue
+		}
 		blockers := readiness[items[index].ID]
 		items[index].ReadinessBlockers = make([]string, len(blockers))
 		copy(items[index].ReadinessBlockers, blockers)

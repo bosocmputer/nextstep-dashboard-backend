@@ -14,12 +14,15 @@ import (
 )
 
 type fakeScheduleAPI struct {
-	item        schedule.Schedule
-	createErr   error
-	updateErr   error
-	activateErr error
-	createCall  int
-	updateCall  int
+	item            schedule.Schedule
+	createErr       error
+	updateErr       error
+	activateErr     error
+	createCall      int
+	updateCall      int
+	archiveCall     int
+	restoreCall     int
+	includeArchived bool
 }
 
 type fakeSchedulePreviewAPI struct {
@@ -49,7 +52,8 @@ func (fake *fakeScheduleAPI) Create(context.Context, []byte, string, string, uui
 	return fake.item, fake.createErr
 }
 
-func (fake *fakeScheduleAPI) List(context.Context, uuid.UUID, int, string) (schedule.Page, error) {
+func (fake *fakeScheduleAPI) List(_ context.Context, _ uuid.UUID, _ int, _ string, includeArchived bool) (schedule.Page, error) {
+	fake.includeArchived = includeArchived
 	return schedule.Page{Data: []schedule.Schedule{fake.item}}, nil
 }
 
@@ -67,6 +71,16 @@ func (fake *fakeScheduleAPI) Activate(context.Context, []byte, string, uuid.UUID
 }
 
 func (fake *fakeScheduleAPI) Pause(context.Context, []byte, string, uuid.UUID, uuid.UUID) (schedule.Schedule, error) {
+	return fake.item, nil
+}
+
+func (fake *fakeScheduleAPI) Archive(context.Context, []byte, string, uuid.UUID, uuid.UUID, int) (schedule.Schedule, error) {
+	fake.archiveCall++
+	return fake.item, nil
+}
+
+func (fake *fakeScheduleAPI) Restore(context.Context, []byte, string, uuid.UUID, uuid.UUID, int) (schedule.Schedule, error) {
+	fake.restoreCall++
 	return fake.item, nil
 }
 
@@ -115,6 +129,38 @@ func TestAdminSchedulePatchAcceptsVersionedFullInput(t *testing.T) {
 
 	if response.Code != http.StatusOK || api.updateCall != 1 {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, api.updateCall, response.Body.String())
+	}
+}
+
+func TestAdminListsArchivesAndSupportsVersionedArchiveRestore(t *testing.T) {
+	tenantID, scheduleID := uuid.New(), uuid.New()
+	api := &fakeScheduleAPI{item: schedule.Schedule{ID: scheduleID, TenantID: tenantID, Version: 3}}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: &fakeAdminAuth{}, Schedules: api})
+
+	list := httptest.NewRequest(http.MethodGet, "/api/v1/admin/tenants/"+tenantID.String()+"/schedules?includeArchived=true", nil)
+	list.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "admin-session"})
+	listResponse := httptest.NewRecorder()
+	handler.ServeHTTP(listResponse, list)
+	if listResponse.Code != http.StatusOK || !api.includeArchived {
+		t.Fatalf("list status=%d includeArchived=%v body=%s", listResponse.Code, api.includeArchived, listResponse.Body.String())
+	}
+
+	for _, operation := range []struct {
+		method string
+		path   string
+		calls  *int
+	}{
+		{http.MethodDelete, "/api/v1/admin/tenants/" + tenantID.String() + "/schedules/" + scheduleID.String() + "?version=3", &api.archiveCall},
+		{http.MethodPost, "/api/v1/admin/tenants/" + tenantID.String() + "/schedules/" + scheduleID.String() + "/restore?version=3", &api.restoreCall},
+	} {
+		request := httptest.NewRequest(operation.method, operation.path, nil)
+		request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "admin-session"})
+		request.Header.Set("X-CSRF-Token", "admin-csrf")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || *operation.calls != 1 {
+			t.Fatalf("%s status=%d calls=%d body=%s", operation.path, response.Code, *operation.calls, response.Body.String())
+		}
 	}
 }
 

@@ -12,11 +12,14 @@ import (
 )
 
 type memoryScheduleStore struct {
-	item       Schedule
-	blockers   []string
-	activated  bool
-	paused     bool
-	activation time.Time
+	item           Schedule
+	blockers       []string
+	activated      bool
+	paused         bool
+	archived       bool
+	restored       bool
+	listedArchived bool
+	activation     time.Time
 }
 
 func (store *memoryScheduleStore) Create(_ context.Context, _ []byte, _, _ string, tenantID uuid.UUID, input Input, now time.Time) (Schedule, error) {
@@ -24,7 +27,8 @@ func (store *memoryScheduleStore) Create(_ context.Context, _ []byte, _, _ strin
 	return store.item, nil
 }
 
-func (store *memoryScheduleStore) List(context.Context, uuid.UUID, int, string) (Page, error) {
+func (store *memoryScheduleStore) List(_ context.Context, _ uuid.UUID, _ int, _ string, includeArchived bool) (Page, error) {
+	store.listedArchived = includeArchived
 	return Page{Data: []Schedule{store.item}}, nil
 }
 
@@ -58,6 +62,24 @@ func (store *memoryScheduleStore) Activate(_ context.Context, _ []byte, _ string
 func (store *memoryScheduleStore) Pause(_ context.Context, _ []byte, _ string, _, _ uuid.UUID, now time.Time) (Schedule, error) {
 	store.paused = true
 	store.item.Status = StatusPaused
+	store.item.UpdatedAt = now
+	store.item.Version++
+	return store.item, nil
+}
+
+func (store *memoryScheduleStore) Archive(_ context.Context, _ []byte, _ string, _, _ uuid.UUID, _ int, now time.Time) (Schedule, error) {
+	store.archived = true
+	store.item.Status = StatusArchived
+	store.item.ArchivedAt = &now
+	store.item.UpdatedAt = now
+	store.item.Version++
+	return store.item, nil
+}
+
+func (store *memoryScheduleStore) Restore(_ context.Context, _ []byte, _ string, _, _ uuid.UUID, _ int, now time.Time) (Schedule, error) {
+	store.restored = true
+	store.item.Status = StatusDraft
+	store.item.ArchivedAt = nil
 	store.item.UpdatedAt = now
 	store.item.Version++
 	return store.item, nil
@@ -142,12 +164,36 @@ func TestHydrationReturnsEmptyReadinessBlockersAsArray(t *testing.T) {
 		t.Fatalf("Create().ReadinessBlockers = %#v, want non-nil empty slice", created.ReadinessBlockers)
 	}
 
-	page, err := service.List(context.Background(), created.TenantID, 25, "")
+	page, err := service.List(context.Background(), created.TenantID, 25, "", false)
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
 	if len(page.Data) != 1 || page.Data[0].ReadinessBlockers == nil || len(page.Data[0].ReadinessBlockers) != 0 {
 		t.Fatalf("List().Data = %#v, want one schedule with non-nil empty readiness blockers", page.Data)
+	}
+}
+
+func TestArchiveAndRestoreUseVersionAndArchivedHydration(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	store := &memoryScheduleStore{}
+	service := NewService(store, true, func() time.Time { return now })
+	created, err := service.Create(context.Background(), []byte("admin"), "request-1", "schedule-create-1", uuid.New(), validInput(uuid.New()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := service.Archive(context.Background(), []byte("admin"), "request-2", created.TenantID, created.ID, created.Version)
+	if err != nil || !store.archived || archived.Status != StatusArchived || archived.ArchivedAt == nil {
+		t.Fatalf("Archive() = %+v err=%v", archived, err)
+	}
+	if len(archived.ReadinessBlockers) != 0 || len(archived.NextOccurrences) != 0 {
+		t.Fatalf("archived hydration exposes readiness/future runs: %+v", archived)
+	}
+	restored, err := service.Restore(context.Background(), []byte("admin"), "request-3", created.TenantID, created.ID, archived.Version)
+	if err != nil || !store.restored || restored.Status != StatusDraft || restored.ArchivedAt != nil {
+		t.Fatalf("Restore() = %+v err=%v", restored, err)
+	}
+	if _, err := service.List(context.Background(), created.TenantID, 25, "", true); err != nil || !store.listedArchived {
+		t.Fatalf("List(includeArchived) err=%v listed=%v", err, store.listedArchived)
 	}
 }
 

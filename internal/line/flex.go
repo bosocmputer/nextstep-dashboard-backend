@@ -101,17 +101,17 @@ func RenderFlex(input FlexInput) (json.RawMessage, error) {
 		"contents": map[string]any{
 			"type": "bubble", "size": "giga",
 			"header": map[string]any{
-				"type": "box", "layout": "vertical", "backgroundColor": "#0F766E", "paddingAll": "16px",
+				"type": "box", "layout": "vertical", "backgroundColor": "#1D4ED8", "paddingAll": "16px",
 				"contents": []any{
 					flexText("NEXTSTEP DASHBOARD", "sm", "#FFFFFF", true, false),
-					flexText("สรุปผู้บริหาร", "xs", "#CCFBF1", false, false, "xs"),
+					flexText("สรุปผู้บริหาร", "xs", "#DBEAFE", false, false, "xs"),
 				},
 			},
 			"body": map[string]any{"type": "box", "layout": "vertical", "paddingAll": "18px", "contents": bodyContents},
 			"footer": map[string]any{
 				"type": "box", "layout": "vertical", "paddingAll": "16px",
 				"contents": []any{map[string]any{
-					"type": "button", "style": "primary", "color": "#0F766E", "height": "sm", "scaling": true,
+					"type": "button", "style": "primary", "color": "#1D4ED8", "height": "sm", "scaling": true,
 					"action": map[string]any{"type": "uri", "label": "เปิดภาพรวมร้าน", "uri": overviewURL.String()},
 				}},
 			},
@@ -129,7 +129,7 @@ func reportBox(item FlexReportPresentation) map[string]any {
 		map[string]any{
 			"type": "box", "layout": "horizontal", "alignItems": "center",
 			"contents": []any{
-				map[string]any{"type": "text", "text": item.Label, "weight": "bold", "size": "sm", "color": "#0F766E", "wrap": true, "scaling": true, "flex": 9},
+				map[string]any{"type": "text", "text": item.Label, "weight": "bold", "size": "sm", "color": "#1D4ED8", "wrap": true, "scaling": true, "flex": 9},
 				map[string]any{"type": "text", "text": "›", "size": "lg", "color": "#94A3B8", "align": "end", "flex": 1},
 			},
 		},

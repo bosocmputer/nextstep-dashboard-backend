@@ -61,6 +61,21 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 		)`).Scan(&hasDashboardJSON); err != nil || !hasDashboardJSON {
 		t.Fatalf("report_runs.dashboard_json missing: exists=%v err=%v", hasDashboardJSON, err)
 	}
+	var hasArchivedAt, acceptsArchived bool
+	if err := pool.QueryRow(ctx, `
+		select exists (
+		  select 1 from information_schema.columns
+		  where table_name = 'notification_schedules' and column_name = 'archived_at'
+		)`).Scan(&hasArchivedAt); err != nil || !hasArchivedAt {
+		t.Fatalf("notification_schedules.archived_at missing: exists=%v err=%v", hasArchivedAt, err)
+	}
+	if err := pool.QueryRow(ctx, `
+		select pg_get_constraintdef(oid) like '%ARCHIVED%'
+		from pg_constraint
+		where conrelid = 'notification_schedules'::regclass
+		  and conname = 'notification_schedules_status_check'`).Scan(&acceptsArchived); err != nil || !acceptsArchived {
+		t.Fatalf("notification schedule status does not accept ARCHIVED: accepts=%v err=%v", acceptsArchived, err)
+	}
 	var hasConfigFileName bool
 	if err := pool.QueryRow(ctx, `
 		select exists (

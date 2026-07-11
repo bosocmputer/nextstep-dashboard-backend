@@ -249,16 +249,14 @@ func formatMetricValue(value string, unit report.MetricUnit) (string, error) {
 	parts := strings.SplitN(raw, ".", 2)
 	parts[0] = groupThousands(parts[0])
 	formatted := strings.Join(parts, ".")
-	prefix, suffix := "", ""
-	if unit == report.UnitTHB {
-		prefix = "฿"
-	} else if unit == report.UnitPercent {
+	suffix := ""
+	if unit == report.UnitPercent {
 		suffix = "%"
 	}
 	if negative {
-		return "−" + prefix + formatted + suffix, nil
+		return "−" + formatted + suffix, nil
 	}
-	return prefix + formatted + suffix, nil
+	return formatted + suffix, nil
 }
 
 func normalizeNumber(value string) string {

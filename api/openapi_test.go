@@ -23,6 +23,8 @@ func TestOpenAPIContractIsValidAndContainsCriticalFlows(t *testing.T) {
 		"/api/v1/auth/admin/login": "POST",
 		"/api/v1/admin/tenants":    "POST",
 		"/api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/activate":             "POST",
+		"/api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}":                      "DELETE",
+		"/api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/restore":              "POST",
 		"/api/v1/viewer/line/session":                                                  "POST",
 		"/api/v1/viewer/tenants/{tenantId}/executive-overview":                         "GET",
 		"/api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes":               "POST",

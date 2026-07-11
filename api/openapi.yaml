@@ -306,6 +306,7 @@ paths:
       parameters:
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/PageSize'}
+        - {name: includeArchived, in: query, schema: {type: boolean, default: false}, description: Include soft-deleted schedules retained for audit history.}
       responses:
         '200':
           description: Tenant schedules.
@@ -387,6 +388,22 @@ paths:
               schema: {$ref: '#/components/schemas/Schedule'}
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
+    delete:
+      tags: [Admin configuration]
+      operationId: archiveSchedule
+      description: Soft-deletes a draft or paused schedule. Future sends stop while delivery and audit history remain retained.
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/ScheduleVersion'}
+      responses:
+        '200':
+          description: Schedule archived.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/activate:
     post:
       tags: [Admin configuration]
@@ -420,6 +437,25 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Schedule'}
         '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/restore:
+    post:
+      tags: [Admin configuration]
+      operationId: restoreSchedule
+      description: Restores an archived schedule as a draft; it remains inactive until explicitly activated.
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ScheduleID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/ScheduleVersion'}
+      responses:
+        '200':
+          description: Schedule restored as draft.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/test-send:
     post:
       tags: [Admin configuration]
@@ -731,6 +767,7 @@ components:
     ReportKey: {name: reportKey, in: path, required: true, schema: {$ref: '#/components/schemas/ReportKey'}}
     Cursor: {name: cursor, in: query, schema: {type: string, maxLength: 512}}
     PageSize: {name: pageSize, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
+    ScheduleVersion: {name: version, in: query, required: true, schema: {type: integer, minimum: 1}}
     IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 200}}
     CSRFToken: {name: X-CSRF-Token, in: header, required: true, schema: {type: string, minLength: 32, maxLength: 256}}
   responses:
@@ -940,7 +977,7 @@ components:
             maxScheduleReports: {type: integer, minimum: 1}
             maxFlexPayloadBytes: {type: integer, minimum: 1}
     PeriodPreset: {type: string, enum: [YESTERDAY, TODAY_TO_NOW, MONTH_TO_DATE, AS_OF_RUN]}
-    ScheduleStatus: {type: string, enum: [DRAFT, ACTIVE, PAUSED, EXPIRED]}
+    ScheduleStatus: {type: string, enum: [DRAFT, ACTIVE, PAUSED, EXPIRED, ARCHIVED]}
     ScheduleInput:
       type: object
       additionalProperties: false
@@ -980,6 +1017,7 @@ components:
             nextOccurrences: {type: array, maxItems: 3, items: {type: string, format: date-time}}
             createdAt: {type: string, format: date-time}
             updatedAt: {type: string, format: date-time}
+            archivedAt: {type: string, format: date-time, nullable: true}
     SchedulePage:
       type: object
       required: [data, page]
