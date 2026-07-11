@@ -222,6 +222,14 @@ func TestMaterializeDueScheduleIsAtomicAndSingleClaim(t *testing.T) {
 	if err != nil || len(auditPage.Data) < 2 || auditPage.Data[0].TenantName == nil || *auditPage.Data[0].TenantName != "Execution Store" {
 		t.Fatalf("ListAudit() = %+v, %v", auditPage, err)
 	}
+	if _, err := store.MaterializeTest(ctx, []byte("admin"), "test-send-blocked", "schedule-test-blocked-001", tenantID, created.ID, now.Add(19*time.Second)); err == nil {
+		t.Fatal("test send with incomplete recipient permissions was accepted")
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into recipient_report_permissions (tenant_id, recipient_id, report_key)
+		values ($1, $2, 'stock_balance')`, tenantID, recipientID); err != nil {
+		t.Fatal(err)
+	}
 	testExecution, err := store.MaterializeTest(ctx, []byte("admin"), "test-send-request", "schedule-test-send-001", tenantID, created.ID, now.Add(20*time.Second))
 	if err != nil || testExecution.Status != schedule.ExecutionCollecting || len(testExecution.ReportRunIDs) != 2 {
 		t.Fatalf("MaterializeTest() = %+v, %v", testExecution, err)

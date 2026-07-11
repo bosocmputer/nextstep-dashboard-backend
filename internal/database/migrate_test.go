@@ -79,7 +79,7 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 	}
 	var acceptsPositionTen bool
 	if err := pool.QueryRow(ctx, `
-		select pg_get_constraintdef(oid) ilike '%position >= 1%position <= 10%'
+		select pg_get_constraintdef(oid) ~ 'position.*>= 1.*position.*<= 10'
 		from pg_constraint
 		where conrelid = 'notification_schedule_reports'::regclass
 		  and conname = 'notification_schedule_reports_position_check'`).Scan(&acceptsPositionTen); err != nil || !acceptsPositionTen {
