@@ -146,7 +146,7 @@ func TestScheduleStoreLifecycleAndReadinessGates(t *testing.T) {
 		t.Fatalf("Restore() = %+v, %v", restored, err)
 	}
 	var auditActions []string
-	rows, err := pool.Query(ctx, `select action from audit_logs where tenant_id = $1 and entity_id = $2 order by occurred_at`, tenantID, created.ID.String())
+	rows, err := pool.Query(ctx, `select action from audit_logs where tenant_id = $1 and resource_id = $2 order by created_at`, tenantID, created.ID.String())
 	if err != nil {
 		t.Fatal(err)
 	}
