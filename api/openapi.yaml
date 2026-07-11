@@ -135,6 +135,18 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/reports:
+    get:
+      tags: [Admin configuration]
+      operationId: listAdminReports
+      security: [{AdminSession: []}]
+      responses:
+        '200':
+          description: Approved report catalog and current LINE presentation limits. SQL and query contracts are never returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminReportCatalog'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
   /api/v1/admin/tenants/{tenantId}:
     parameters: [{$ref: '#/components/parameters/TenantID'}]
     get:
@@ -266,9 +278,25 @@ paths:
           description: Entire permission set replaced atomically.
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/PermissionUpdate'}
+              schema: {$ref: '#/components/schemas/Recipient'}
+        '409': {$ref: '#/components/responses/Conflict'}
         '404': {$ref: '#/components/responses/NotFound'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/recipients/{recipientId}:
+    get:
+      tags: [Admin configuration]
+      operationId: getTenantRecipient
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/RecipientID'}
+      responses:
+        '200':
+          description: Recipient scoped to the requested tenant membership.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Recipient'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/admin/tenants/{tenantId}/schedules:
     parameters: [{$ref: '#/components/parameters/TenantID'}]
     get:
@@ -796,12 +824,12 @@ components:
     TenantInput:
       type: object
       additionalProperties: false
-      required: [slug, name, timezone, accessEndsAt]
+      required: [name]
       properties:
-        slug: {type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 80}
+        slug: {type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 80, deprecated: true, description: Compatibility field for older clients; omitted by the current admin UI.}
         name: {type: string, minLength: 1, maxLength: 160}
-        timezone: {type: string, enum: [Asia/Bangkok]}
-        accessEndsAt: {type: string, format: date-time}
+        timezone: {type: string, enum: [Asia/Bangkok], deprecated: true}
+        accessEndsAt: {type: string, format: date-time, deprecated: true}
     TenantPatch:
       type: object
       additionalProperties: false
@@ -855,12 +883,13 @@ components:
       properties: {invitationLabel: {type: string, minLength: 1, maxLength: 160}}
     Recipient:
       type: object
-      required: [id, status, displayName, reportKeys, createdAt]
+      required: [id, status, displayName, reportKeys, permissionsVersion, createdAt]
       properties:
         id: {type: string, format: uuid}
         status: {type: string, enum: [PENDING, ACTIVE, REVOKED]}
         displayName: {type: string}
         reportKeys: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        permissionsVersion: {type: integer, minimum: 1}
         verifiedAt: {type: string, format: date-time, nullable: true}
         createdAt: {type: string, format: date-time}
         invitationUrl: {type: string, format: uri, nullable: true, description: Returned only when a pending invitation is created.}
@@ -873,9 +902,10 @@ components:
     PermissionUpdate:
       type: object
       additionalProperties: false
-      required: [reportKeys]
+      required: [reportKeys, version]
       properties:
-        reportKeys: {type: array, uniqueItems: true, maxItems: 10, items: {$ref: '#/components/schemas/ReportKey'}}
+        reportKeys: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        version: {type: integer, minimum: 1}
     ReportKey:
       type: string
       enum: [sales_goods_services, purchase_goods_payables, gross_profit_by_product, gross_profit_by_ar_customer, stock_balance, stock_reorder, ar_customer_movement, ar_debt_receipt, cash_bank_receipts, cash_bank_payments]
@@ -888,6 +918,27 @@ components:
         label: {type: string}
         category: {type: string}
         isSensitive: {type: boolean}
+    AdminReportDefinition:
+      type: object
+      required: [reportKey, version, label, category, categoryLabel, status]
+      properties:
+        reportKey: {$ref: '#/components/schemas/ReportKey'}
+        version: {type: string}
+        label: {type: string}
+        category: {type: string}
+        categoryLabel: {type: string}
+        status: {type: string, enum: [ACTIVE, DEPRECATED]}
+    AdminReportCatalog:
+      type: object
+      required: [data, limits]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/AdminReportDefinition'}}
+        limits:
+          type: object
+          required: [maxScheduleReports, maxFlexPayloadBytes]
+          properties:
+            maxScheduleReports: {type: integer, minimum: 1}
+            maxFlexPayloadBytes: {type: integer, minimum: 1}
     PeriodPreset: {type: string, enum: [YESTERDAY, TODAY_TO_NOW, MONTH_TO_DATE, AS_OF_RUN]}
     ScheduleStatus: {type: string, enum: [DRAFT, ACTIVE, PAUSED, EXPIRED]}
     ScheduleInput:
@@ -900,7 +951,7 @@ components:
         localTime: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'}
         timezone: {type: string, enum: [Asia/Bangkok]}
         periodPreset: {$ref: '#/components/schemas/PeriodPreset'}
-        reportKeys: {type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        reportKeys: {type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
         recipientIds: {type: array, minItems: 1, maxItems: 500, uniqueItems: true, items: {type: string, format: uuid}}
     SchedulePatch:
       type: object
@@ -912,7 +963,7 @@ components:
         localTime: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'}
         timezone: {type: string, enum: [Asia/Bangkok]}
         periodPreset: {$ref: '#/components/schemas/PeriodPreset'}
-        reportKeys: {type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        reportKeys: {type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
         recipientIds: {type: array, minItems: 1, maxItems: 500, uniqueItems: true, items: {type: string, format: uuid}}
         version: {type: integer, minimum: 1}
     Schedule:
@@ -941,7 +992,7 @@ components:
       required: [periodPreset, reportKeys]
       properties:
         periodPreset: {$ref: '#/components/schemas/PeriodPreset'}
-        reportKeys: {type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        reportKeys: {type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
     FlexPreviewMetric:
       type: object
       additionalProperties: false
@@ -975,7 +1026,7 @@ components:
         periodLabel: {type: string}
         generatedAt: {type: string, format: date-time}
         actionUrl: {type: string, format: uri}
-        reports: {type: array, minItems: 1, maxItems: 5, items: {$ref: '#/components/schemas/FlexPreviewReport'}}
+        reports: {type: array, minItems: 1, maxItems: 10, items: {$ref: '#/components/schemas/FlexPreviewReport'}}
         payloadBytes: {type: integer, minimum: 1, maximum: 46080}
         message: {type: object, additionalProperties: true, description: Exact LINE Messaging API Flex message object produced by the backend renderer.}
     NotificationExecution:
@@ -989,7 +1040,7 @@ components:
         scheduledFor: {type: string, format: date-time}
         status: {type: string, enum: [COLLECTING, FAILED]}
         safeErrorCode: {type: string}
-        reportRunIds: {type: array, minItems: 1, maxItems: 5, items: {type: string, format: uuid}}
+        reportRunIds: {type: array, minItems: 1, maxItems: 10, items: {type: string, format: uuid}}
     ReportRunStatus: {type: string, enum: [QUEUED, CLAIMED, RUNNING, SUCCEEDED, FAILED, CANCELLED, EXPIRED]}
     CreateReportRunInput:
       type: object

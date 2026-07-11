@@ -24,6 +24,22 @@ func TestCreateInputNormalizeAndValidate(t *testing.T) {
 	}
 }
 
+func TestCreateInputDefaultsInternalFieldsWhenAdminOnlySuppliesName(t *testing.T) {
+	now := time.Date(2026, 7, 10, 18, 30, 0, 0, time.UTC)
+	normalized, err := (CreateInput{Name: " วาวา "}).NormalizeAndValidate(now)
+	if err != nil {
+		t.Fatalf("NormalizeAndValidate() error = %v", err)
+	}
+	if normalized.Slug != "" || normalized.Name != "วาวา" || normalized.Timezone != "Asia/Bangkok" || normalized.Status != StatusDisabled {
+		t.Fatalf("normalized input = %+v", normalized)
+	}
+	location, _ := time.LoadLocation("Asia/Bangkok")
+	want := now.In(location).AddDate(1, 0, 0).UTC()
+	if !normalized.AccessEndsAt.Equal(want) {
+		t.Fatalf("AccessEndsAt = %s, want %s", normalized.AccessEndsAt, want)
+	}
+}
+
 func TestCreateInputRejectsInvalidProductionFields(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

@@ -61,7 +61,7 @@ func TestWorkerDefersWhileReportsAreRunning(t *testing.T) {
 	}
 }
 
-func TestWorkerPublishesOnePermissionFilteredCardPerRecipient(t *testing.T) {
+func TestWorkerPublishesOneCompleteCardPerRecipient(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	recipientID := uuid.New()
 	period := report.Period{Preset: report.Yesterday, DateFrom: "2026-07-09", DateTo: "2026-07-09"}
@@ -71,7 +71,7 @@ func TestWorkerPublishesOnePermissionFilteredCardPerRecipient(t *testing.T) {
 			{Key: report.SalesGoodsServices, Period: period, FinishedAt: now, Metrics: map[string]string{"document_count": "2", "total_amount": "30.00"}},
 			{Key: report.StockBalance, Period: period, FinishedAt: now, Metrics: map[string]string{"item_count": "10", "balance_amount": "99.00"}},
 		},
-		Targets: []Target{{RecipientID: recipientID, ReportKeys: []report.Key{report.StockBalance}}},
+		Targets: []Target{{RecipientID: recipientID, ReportKeys: []report.Key{report.SalesGoodsServices, report.StockBalance}}},
 	}}
 	if err := testNotificationWorker(t, store, now).ProcessOne(context.Background()); err != nil {
 		t.Fatalf("ProcessOne() error = %v", err)
@@ -80,12 +80,25 @@ func TestWorkerPublishesOnePermissionFilteredCardPerRecipient(t *testing.T) {
 		t.Fatalf("published = %+v partial=%v", store.published, store.partial)
 	}
 	payload := string(store.published[0].Payload)
-	if !strings.Contains(payload, "รายงานสต็อกคงเหลือ") || strings.Contains(payload, "ยอดขาย") || !strings.Contains(payload, "deliveryRef") {
-		t.Fatalf("permission filtering failed: %s", payload)
+	if !strings.Contains(payload, "รายงานสต็อกคงเหลือ") || !strings.Contains(payload, "ยอดขาย") || !strings.Contains(payload, "deliveryRef") {
+		t.Fatalf("complete card rendering failed: %s", payload)
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(store.published[0].Payload, &decoded); err != nil {
 		t.Fatalf("payload invalid: %v", err)
+	}
+}
+
+func TestWorkerRefusesAReportSubset(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	period := report.Period{Preset: report.Yesterday, DateFrom: "2026-07-09", DateTo: "2026-07-09"}
+	store := &memoryNotificationStore{work: Work{
+		ID: uuid.New(), TenantName: "Shop",
+		Reports: []ReportResult{{Key: report.SalesGoodsServices, Period: period, FinishedAt: now, Metrics: map[string]string{"document_count": "2", "total_amount": "30.00"}}},
+		Targets: []Target{{RecipientID: uuid.New(), ReportKeys: []report.Key{report.SalesGoodsServices, report.StockBalance}}},
+	}}
+	if err := testNotificationWorker(t, store, now).ProcessOne(context.Background()); err != nil || store.failedCode != "NO_ELIGIBLE_RECIPIENTS" || len(store.published) != 0 {
+		t.Fatalf("ProcessOne() error=%v failedCode=%q published=%d", err, store.failedCode, len(store.published))
 	}
 }
 

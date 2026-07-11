@@ -28,7 +28,7 @@ func TestCatalogKeepsStableTenReportContract(t *testing.T) {
 			t.Errorf("missing definition for %s", key)
 			continue
 		}
-		if definition.Version == "" || definition.LabelTH == "" || definition.MaxRows != 200_000 {
+		if definition.Version == "" || definition.LabelTH == "" || definition.CategoryLabelTH == "" || definition.Status != StatusActive || definition.MaxRows != 200_000 {
 			t.Errorf("incomplete definition for %s: %+v", key, definition)
 		}
 		if len(definition.LineMetrics) != 2 {
@@ -37,6 +37,16 @@ func TestCatalogKeepsStableTenReportContract(t *testing.T) {
 	}
 	if _, ok := DefinitionFor(Key("unknown_report")); ok {
 		t.Fatal("unknown report key was accepted")
+	}
+}
+
+func TestCanSelectKeepsDeprecatedDefinitionsOnlyWhenAlreadySelected(t *testing.T) {
+	if !CanSelect(Definition{Status: StatusActive}, false) {
+		t.Fatal("active report was not selectable")
+	}
+	deprecated := Definition{Status: StatusDeprecated}
+	if CanSelect(deprecated, false) || !CanSelect(deprecated, true) {
+		t.Fatal("deprecated report selection policy is invalid")
 	}
 }
 

@@ -3,6 +3,7 @@ package database
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"strings"
@@ -49,8 +50,18 @@ func TestRecipientStoreInvitationPermissionAndIdentityMerge(t *testing.T) {
 	if err != nil || replayed.ID != pending.ID || replayed.InvitationURL != pending.InvitationURL {
 		t.Fatalf("CreateInvitation() replay = %+v, %v", replayed, err)
 	}
-	if err := service.ReplacePermissions(ctx, []byte("admin"), "request-2", tenantID, pending.ID, []report.Key{report.SalesGoodsServices, report.StockBalance}); err != nil {
+	updated, err := service.ReplacePermissions(ctx, []byte("admin"), "request-2", tenantID, pending.ID, []report.Key{report.SalesGoodsServices, report.StockBalance}, pending.PermissionsVersion)
+	if err != nil {
 		t.Fatalf("ReplacePermissions() error = %v", err)
+	}
+	if updated.PermissionsVersion != pending.PermissionsVersion+1 {
+		t.Fatalf("permissions version = %d, want %d", updated.PermissionsVersion, pending.PermissionsVersion+1)
+	}
+	if _, err := service.ReplacePermissions(ctx, []byte("admin"), "request-stale", tenantID, pending.ID, []report.Key{report.SalesGoodsServices}, pending.PermissionsVersion); !errors.Is(err, recipient.ErrVersionConflict) {
+		t.Fatalf("stale ReplacePermissions() error = %v", err)
+	}
+	if _, err := service.GetForTenant(ctx, uuid.New(), pending.ID); !errors.Is(err, recipient.ErrRecipientNotFound) {
+		t.Fatalf("cross-tenant GetForTenant() error = %v", err)
 	}
 	page, err := service.List(ctx, tenantID, 25, "")
 	if err != nil || len(page.Data) != 1 || page.Data[0].Status != recipient.StatusPending || len(page.Data[0].ReportKeys) != 2 {

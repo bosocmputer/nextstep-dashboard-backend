@@ -18,6 +18,8 @@ type NotificationStore struct {
 	pool *pgxpool.Pool
 }
 
+const maximumNotificationPayloadBytes = 30 * 1024
+
 func NewNotificationStore(pool *pgxpool.Pool) *NotificationStore {
 	return &NotificationStore{pool: pool}
 }
@@ -106,7 +108,7 @@ func (store *NotificationStore) Publish(ctx context.Context, runID uuid.UUID, wo
 	}
 	published := 0
 	for _, delivery := range deliveries {
-		if len(delivery.Payload) == 0 || len(delivery.Payload) > 45*1024 || len(delivery.ReferenceHash) == 0 || len(delivery.ReportKeys) == 0 {
+		if len(delivery.Payload) == 0 || len(delivery.Payload) > maximumNotificationPayloadBytes || len(delivery.ReferenceHash) == 0 || len(delivery.ReportKeys) == 0 {
 			return errors.New("prepared notification delivery is invalid")
 		}
 		keyStrings := make([]string, len(delivery.ReportKeys))
@@ -252,6 +254,10 @@ func loadNotificationWork(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now t
 		join report_runs report_run on report_run.id = linked.report_run_id and report_run.status = 'SUCCEEDED' and report_run.expires_at > $2
 		where n.id = $1
 		group by sr.recipient_id
+		having count(distinct permission.report_key) = (
+		  select count(*) from notification_schedule_reports expected
+		  where expected.schedule_id = (select schedule_id from notification_runs where id = $1)
+		)
 		order by sr.recipient_id`, runID, now)
 	if err != nil {
 		return notification.Work{}, fmt.Errorf("load notification targets: %w", err)

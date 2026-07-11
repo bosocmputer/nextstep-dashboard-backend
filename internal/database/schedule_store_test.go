@@ -55,7 +55,10 @@ func TestScheduleStoreLifecycleAndReadinessGates(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		insert into recipient_report_permissions (tenant_id, recipient_id, report_key)
-		values ($1, $2, 'sales_goods_services')`, tenantID, activeRecipientID); err != nil {
+		values ($1, $2, 'sales_goods_services'),
+		       ($1, $2, 'stock_balance'),
+		       ($1, $3, 'sales_goods_services'),
+		       ($1, $3, 'stock_balance')`, tenantID, activeRecipientID, pendingRecipientID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -77,6 +80,13 @@ func TestScheduleStoreLifecycleAndReadinessGates(t *testing.T) {
 	changed.Name = "Changed"
 	if _, err := store.Create(ctx, []byte("admin"), "request-conflict", "schedule-create-001", tenantID, changed, now); !errors.Is(err, schedule.ErrConflict) {
 		t.Fatalf("changed idempotency input error = %v", err)
+	}
+	// Simulate permission drift after a valid schedule was created. Readiness must
+	// still catch it, even though create/update reject incomplete permission sets.
+	if _, err := pool.Exec(ctx, `
+		delete from recipient_report_permissions
+		where tenant_id = $1 and recipient_id = $2 and report_key = 'stock_balance'`, tenantID, activeRecipientID); err != nil {
+		t.Fatal(err)
 	}
 	readiness, err := store.Readiness(ctx, tenantID, []uuid.UUID{created.ID}, now)
 	if err != nil {

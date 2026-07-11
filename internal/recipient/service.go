@@ -32,28 +32,37 @@ var (
 	ErrPermissionInvalid   = errors.New("recipient report permission is invalid")
 	ErrInvalidInput        = errors.New("recipient input is invalid")
 	ErrIdempotencyConflict = errors.New("recipient idempotency conflict")
+	ErrVersionConflict     = errors.New("recipient permission version conflict")
 )
 
+type PermissionInUseError struct{ ScheduleNames []string }
+
+func (err *PermissionInUseError) Error() string {
+	return "recipient permission is used by an active schedule"
+}
+
 type StoredRecipient struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	LineUserIDHash []byte
-	LineUserID     secret.Sealed
-	DisplayName    secret.Sealed
-	Status         Status
-	ReportKeys     []report.Key
-	VerifiedAt     *time.Time
-	CreatedAt      time.Time
+	ID                 uuid.UUID
+	TenantID           uuid.UUID
+	LineUserIDHash     []byte
+	LineUserID         secret.Sealed
+	DisplayName        secret.Sealed
+	Status             Status
+	ReportKeys         []report.Key
+	PermissionsVersion int
+	VerifiedAt         *time.Time
+	CreatedAt          time.Time
 }
 
 type Recipient struct {
-	ID            uuid.UUID    `json:"id"`
-	Status        Status       `json:"status"`
-	DisplayName   string       `json:"displayName"`
-	ReportKeys    []report.Key `json:"reportKeys"`
-	VerifiedAt    *time.Time   `json:"verifiedAt"`
-	CreatedAt     time.Time    `json:"createdAt"`
-	InvitationURL string       `json:"invitationUrl,omitempty"`
+	ID                 uuid.UUID    `json:"id"`
+	Status             Status       `json:"status"`
+	DisplayName        string       `json:"displayName"`
+	ReportKeys         []report.Key `json:"reportKeys"`
+	PermissionsVersion int          `json:"permissionsVersion"`
+	VerifiedAt         *time.Time   `json:"verifiedAt"`
+	CreatedAt          time.Time    `json:"createdAt"`
+	InvitationURL      string       `json:"invitationUrl,omitempty"`
 }
 
 type Page struct {
@@ -71,14 +80,23 @@ type RecipientPage struct {
 type Store interface {
 	CreateInvitation(context.Context, []byte, string, string, []byte, StoredRecipient, []byte, time.Time, time.Time) (StoredRecipient, error)
 	List(context.Context, uuid.UUID, int, string) (Page, error)
-	ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, time.Time) error
+	ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, int, time.Time) (StoredRecipient, error)
 	RedeemInvitation(context.Context, []byte, []byte, StoredRecipient, time.Time) (StoredRecipient, error)
 	FindByLineHash(context.Context, []byte) (StoredRecipient, error)
 	GetByID(context.Context, uuid.UUID) (StoredRecipient, error)
+	GetForTenant(context.Context, uuid.UUID, uuid.UUID) (StoredRecipient, error)
 }
 
 func (service *Service) Get(ctx context.Context, recipientID uuid.UUID) (Recipient, error) {
 	stored, err := service.store.GetByID(ctx, recipientID)
+	if err != nil {
+		return Recipient{}, err
+	}
+	return service.publicRecipient(stored)
+}
+
+func (service *Service) GetForTenant(ctx context.Context, tenantID, recipientID uuid.UUID) (Recipient, error) {
+	stored, err := service.store.GetForTenant(ctx, tenantID, recipientID)
 	if err != nil {
 		return Recipient{}, err
 	}
@@ -137,7 +155,7 @@ func (service *Service) CreateInvitation(ctx context.Context, actorHash []byte, 
 	}
 	now := service.now().UTC()
 	pending := StoredRecipient{
-		ID: recipientID, TenantID: tenantID, DisplayName: displayName, Status: StatusPending, ReportKeys: []report.Key{}, CreatedAt: now,
+		ID: recipientID, TenantID: tenantID, DisplayName: displayName, Status: StatusPending, ReportKeys: []report.Key{}, PermissionsVersion: 1, CreatedAt: now,
 	}
 	stored, err := service.store.CreateInvitation(ctx, actorHash, requestID, idempotencyKey, requestHash, pending, invitationHash, now.Add(7*24*time.Hour), now)
 	if err != nil {
@@ -173,21 +191,25 @@ func (service *Service) List(ctx context.Context, tenantID uuid.UUID, pageSize i
 	return result, nil
 }
 
-func (service *Service) ReplacePermissions(ctx context.Context, actorHash []byte, requestID string, tenantID, recipientID uuid.UUID, keys []report.Key) error {
-	if len(keys) > 10 {
-		return ErrPermissionInvalid
+func (service *Service) ReplacePermissions(ctx context.Context, actorHash []byte, requestID string, tenantID, recipientID uuid.UUID, keys []report.Key, version int) (Recipient, error) {
+	if version < 1 || len(keys) > len(report.Keys()) {
+		return Recipient{}, ErrPermissionInvalid
 	}
 	seen := make(map[report.Key]struct{}, len(keys))
 	for _, key := range keys {
 		if _, ok := report.DefinitionFor(key); !ok {
-			return ErrPermissionInvalid
+			return Recipient{}, ErrPermissionInvalid
 		}
 		if _, duplicate := seen[key]; duplicate {
-			return ErrPermissionInvalid
+			return Recipient{}, ErrPermissionInvalid
 		}
 		seen[key] = struct{}{}
 	}
-	return service.store.ReplacePermissions(ctx, actorHash, requestID, tenantID, recipientID, keys, service.now().UTC())
+	stored, err := service.store.ReplacePermissions(ctx, actorHash, requestID, tenantID, recipientID, keys, version, service.now().UTC())
+	if err != nil {
+		return Recipient{}, err
+	}
+	return service.publicRecipient(stored)
 }
 
 func (service *Service) ResolveIdentity(ctx context.Context, identity line.Identity, invitationReference string) (Recipient, error) {
@@ -242,7 +264,7 @@ func (service *Service) publicRecipient(stored StoredRecipient) (Recipient, erro
 	copy(reportKeys, stored.ReportKeys)
 	return Recipient{
 		ID: stored.ID, Status: stored.Status, DisplayName: string(displayName),
-		ReportKeys: reportKeys, VerifiedAt: stored.VerifiedAt, CreatedAt: stored.CreatedAt,
+		ReportKeys: reportKeys, PermissionsVersion: stored.PermissionsVersion, VerifiedAt: stored.VerifiedAt, CreatedAt: stored.CreatedAt,
 	}, nil
 }
 

@@ -38,21 +38,24 @@ func TestRenderFlexBuildsOneCompactPermissionFilteredBubble(t *testing.T) {
 	}
 }
 
-func TestRenderFlexSupportsFiveReportsButRejectsSixOrIncompleteMetrics(t *testing.T) {
+func TestRenderFlexSupportsTenReportsButRejectsElevenOrIncompleteMetrics(t *testing.T) {
 	keys := report.Keys()
 	input := FlexInput{
 		TenantName: "Shop", Period: report.Period{DateFrom: "2026-07-01", DateTo: "2026-07-10"}, GeneratedAt: time.Now(),
 		ActionURL: "https://dashboard.nextstep-soft.com/app?deliveryRef=opaque",
 	}
-	for _, key := range keys[:5] {
+	for _, key := range keys {
 		input.Reports = append(input.Reports, flexReport(key))
 	}
 	if _, err := RenderFlex(input); err != nil {
-		t.Fatalf("five reports rejected: %v", err)
+		t.Fatalf("ten reports rejected: %v", err)
 	}
-	input.Reports = append(input.Reports, flexReport(keys[5]))
+	if payload, err := RenderFlex(input); err != nil || len(payload) > 30*1024 {
+		t.Fatalf("ten-report payload = %d bytes, err = %v", len(payload), err)
+	}
+	input.Reports = append(input.Reports, flexReport(keys[0]))
 	if _, err := RenderFlex(input); err == nil {
-		t.Fatal("six reports accepted in one bubble")
+		t.Fatal("eleven reports accepted in one bubble")
 	}
 	input.Reports = []FlexReport{{Key: report.SalesGoodsServices, Metrics: map[string]string{"document_count": "1"}}}
 	if _, err := RenderFlex(input); err == nil {

@@ -77,18 +77,33 @@ the production database.
    ```
 
 4. Run `backup.sh` and verify the most recent `restore-drill.sh` result.
-5. Run `sudo docker compose --env-file <env> -f deploy/compose.production.yml
+5. Run the report-management data preflight against the current database. It
+   prints affected rows and exits non-zero if an active schedule has a recipient
+   missing any selected report permission. Resolve every row manually; do not
+   auto-pause schedules:
+
+   ```bash
+   sudo docker compose --env-file <env> -f deploy/compose.production.yml \
+     exec -T postgres sh -ceu 'exec psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"' \
+     < deploy/report-management-preflight.sql
+   ```
+
+6. Deploy and verify the backend API and worker image first while keeping the
+   prior frontend SHA. Confirm the admin report catalog, name-only tenant create
+   compatibility, schedule readiness, and LINE Flex validation without sending
+   a message. Then deploy the new frontend SHA.
+7. Run `sudo docker compose --env-file <env> -f deploy/compose.production.yml
    pull`, then `sudo docker compose --env-file <env> -f
    deploy/compose.production.yml up -d`. The API and worker start only after the
    checksummed migration job succeeds.
-6. Verify `/api/v1/health/live` and `/api/v1/health/ready`, admin login, one SML
+8. Verify `/api/v1/health/live` and `/api/v1/health/ready`, admin login, one SML
    connection test, a fresh viewer report run, and a LINE delivery to a test
    recipient.
    Before enabling a new tenant, run `/app/sml-smoke` with
    `SML_SMOKE_TENANT_ID`, `SML_SMOKE_DATE_FROM`, and `SML_SMOKE_DATE_TO`. It
    executes only the approved report SQL and returns at most one sample row per
    step; logs contain status/count only, never customer row values.
-7. Watch JSON logs, failed report runs, delivery retries, quota responses, and
+9. Watch JSON logs, failed report runs, delivery retries, quota responses, and
    worker heartbeat freshness for at least 30 minutes.
 
 Do not activate a schedule until the tenant SML connection is READY, at least
@@ -100,6 +115,10 @@ test delivery succeeds.
 - Application rollback: restore both `BACKEND_SHA` and `FRONTEND_SHA` from the
   prior recorded release pair, pull, and recreate the services. Never mix an
   unverified pair or reuse a tag for different bytes.
+- Frontend rollback remains safe while the new backend and worker stay running.
+  Do not roll the backend/worker back to a version limited to five reports until
+  the rollback-guard query in `report-management-preflight.sql` returns no
+  schedules with more than five reports.
 - Database rollback: migrations are forward-only. If a schema change cannot
   remain backward-compatible, stop API/worker writers and restore the verified
   pre-release dump into a replacement database volume; never improvise a down

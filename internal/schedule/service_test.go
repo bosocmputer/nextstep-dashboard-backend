@@ -99,6 +99,18 @@ func TestValidateNormalizesOrderAndRejectsUserError(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsTenReportsButRejectsEleven(t *testing.T) {
+	input := validInput(uuid.New())
+	input.ReportKeys = append([]report.Key(nil), report.Keys()...)
+	if _, err := Validate(input); err != nil {
+		t.Fatalf("ten reports rejected: %v", err)
+	}
+	input.ReportKeys = append(input.ReportKeys, report.Keys()[0])
+	if _, err := Validate(input); err == nil {
+		t.Fatal("eleven reports accepted")
+	}
+}
+
 func TestNextOccurrencesUseLocalWeekdayAndTime(t *testing.T) {
 	input := validInput(uuid.New())
 	input.DaysOfWeek = []int{6, 0}

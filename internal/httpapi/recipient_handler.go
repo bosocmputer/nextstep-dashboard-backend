@@ -15,7 +15,8 @@ import (
 type RecipientAPI interface {
 	CreateInvitation(context.Context, []byte, string, string, uuid.UUID, string) (recipient.Recipient, error)
 	List(context.Context, uuid.UUID, int, string) (recipient.RecipientPage, error)
-	ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key) error
+	GetForTenant(context.Context, uuid.UUID, uuid.UUID) (recipient.Recipient, error)
+	ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, int) (recipient.Recipient, error)
 }
 
 func registerRecipientRoutes(router chi.Router, adminAuth AdminAuthenticator, recipients RecipientAPI) {
@@ -70,6 +71,26 @@ func registerRecipientRoutes(router chi.Router, adminAuth AdminAuthenticator, re
 		writeJSON(response, http.StatusCreated, created)
 	})
 
+	router.Get("/api/v1/admin/tenants/{tenantId}/recipients/{recipientId}", func(response http.ResponseWriter, request *http.Request) {
+		if _, ok := operationalAdmin(response, request, adminAuth, false); !ok {
+			return
+		}
+		tenantID, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		recipientID, err := uuid.Parse(chi.URLParam(request, "recipientId"))
+		if err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Recipient ID must be a UUID.", false)
+			return
+		}
+		item, err := recipients.GetForTenant(request.Context(), tenantID, recipientID)
+		if handleRecipientError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, item)
+	})
+
 	router.Put("/api/v1/admin/tenants/{tenantId}/recipients/{recipientId}/permissions", func(response http.ResponseWriter, request *http.Request) {
 		admin, ok := operationalAdmin(response, request, adminAuth, true)
 		if !ok {
@@ -86,15 +107,17 @@ func registerRecipientRoutes(router chi.Router, adminAuth AdminAuthenticator, re
 		}
 		var input struct {
 			ReportKeys []report.Key `json:"reportKeys"`
+			Version    int          `json:"version"`
 		}
 		if err := decodeJSON(response, request, &input); err != nil {
 			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Permission input is invalid.", false)
 			return
 		}
-		if err := recipients.ReplacePermissions(request.Context(), admin.TokenHash, requestID(request), tenantID, recipientID, input.ReportKeys); handleRecipientError(response, request, err) {
+		updated, err := recipients.ReplacePermissions(request.Context(), admin.TokenHash, requestID(request), tenantID, recipientID, input.ReportKeys, input.Version)
+		if handleRecipientError(response, request, err) {
 			return
 		}
-		writeJSON(response, http.StatusOK, map[string]any{"reportKeys": input.ReportKeys})
+		writeJSON(response, http.StatusOK, updated)
 	})
 }
 
@@ -111,7 +134,18 @@ func handleRecipientError(response http.ResponseWriter, request *http.Request, e
 		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Recipient input is invalid.", false)
 	case errors.Is(err, recipient.ErrIdempotencyConflict):
 		writeProblem(response, request, http.StatusConflict, "IDEMPOTENCY_CONFLICT", "Idempotency key was already used with different recipient input.", false)
+	case errors.Is(err, recipient.ErrVersionConflict):
+		writeProblem(response, request, http.StatusConflict, "VERSION_CONFLICT", "Report permissions changed in another session. Reload before saving again.", false)
 	default:
+		var inUse *recipient.PermissionInUseError
+		if errors.As(err, &inUse) {
+			fieldErrors := make([]fieldError, 0, len(inUse.ScheduleNames))
+			for _, name := range inUse.ScheduleNames {
+				fieldErrors = append(fieldErrors, fieldError{Field: "reportKeys", Code: "ACTIVE_SCHEDULE_DEPENDENCY", Message: name})
+			}
+			writeJSON(response, http.StatusConflict, problemEnvelope{Error: problem{Code: "PERMISSION_IN_USE", Message: "Pause or edit active schedules before removing these permissions.", RequestID: requestID(request), FieldErrors: fieldErrors}})
+			break
+		}
 		writeProblem(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to process the recipient request.", false)
 	}
 	return true

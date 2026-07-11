@@ -96,6 +96,7 @@ func NewHandler(dependencies Dependencies) http.Handler {
 	})
 	if dependencies.AdminAuth != nil {
 		registerAdminAuthRoutes(router, dependencies.AdminAuth, dependencies.SecureCookies)
+		registerAdminReportRoutes(router, dependencies.AdminAuth)
 		if dependencies.Tenants != nil {
 			registerTenantRoutes(router, dependencies.AdminAuth, dependencies.Tenants)
 		}

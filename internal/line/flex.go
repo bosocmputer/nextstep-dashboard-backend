@@ -11,7 +11,7 @@ import (
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 )
 
-const maximumFlexPayloadBytes = 45 * 1024
+const maximumFlexPayloadBytes = 30 * 1024
 
 var ErrFlexInputInvalid = errors.New("LINE Flex input is invalid")
 
@@ -30,7 +30,7 @@ type FlexInput struct {
 
 func RenderFlex(input FlexInput) (json.RawMessage, error) {
 	input.TenantName = strings.TrimSpace(input.TenantName)
-	if input.TenantName == "" || utf8.RuneCountInString(input.TenantName) > 160 || len(input.Reports) < 1 || len(input.Reports) > 5 || input.GeneratedAt.IsZero() {
+	if input.TenantName == "" || utf8.RuneCountInString(input.TenantName) > 160 || len(input.Reports) < 1 || len(input.Reports) > 10 || input.GeneratedAt.IsZero() {
 		return nil, ErrFlexInputInvalid
 	}
 	actionURL, err := url.Parse(input.ActionURL)

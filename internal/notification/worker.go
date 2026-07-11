@@ -98,7 +98,9 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 	prepared := make([]PreparedDelivery, 0, len(work.Targets))
 	for _, target := range work.Targets {
 		reports := permittedReports(work.Reports, target.ReportKeys)
-		if len(reports) == 0 {
+		// Never turn an incomplete result set into a smaller card silently. The
+		// database query applies the same invariant; this is the worker boundary.
+		if len(reports) == 0 || len(reports) != len(target.ReportKeys) {
 			continue
 		}
 		reference, referenceHash, err := worker.issueDeliveryReference()

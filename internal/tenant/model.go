@@ -70,14 +70,21 @@ func (input CreateInput) NormalizeAndValidate(now time.Time) (CreateInput, error
 	input.Name = strings.TrimSpace(input.Name)
 	input.Timezone = strings.TrimSpace(input.Timezone)
 	input.Status = StatusDisabled
-	if !slugPattern.MatchString(input.Slug) || len(input.Slug) > 80 {
+	if input.Slug != "" && (!slugPattern.MatchString(input.Slug) || len(input.Slug) > 80) {
 		return CreateInput{}, validation("slug", "INVALID_SLUG", "Slug must contain lowercase letters, numbers, and single hyphens only.")
 	}
 	if len(input.Name) < 1 || len(input.Name) > 160 {
 		return CreateInput{}, validation("name", "INVALID_LENGTH", "Tenant name must contain 1 to 160 characters.")
 	}
+	if input.Timezone == "" {
+		input.Timezone = "Asia/Bangkok"
+	}
 	if err := validateTimezone(input.Timezone); err != nil {
 		return CreateInput{}, err
+	}
+	if input.AccessEndsAt.IsZero() {
+		location, _ := time.LoadLocation("Asia/Bangkok")
+		input.AccessEndsAt = now.In(location).AddDate(1, 0, 0)
 	}
 	if !input.AccessEndsAt.After(now) {
 		return CreateInput{}, validation("accessEndsAt", "MUST_BE_FUTURE", "Access end time must be in the future.")

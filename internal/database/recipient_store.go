@@ -122,13 +122,14 @@ func (store *RecipientStore) List(ctx context.Context, tenantID uuid.UUID, pageS
 		       r.line_user_id_ciphertext, r.line_user_id_nonce,
 		       r.display_name_ciphertext, r.display_name_nonce,
 		       r.encryption_key_id, r.status, r.verified_at, r.created_at,
-		       coalesce(array_agg(p.report_key order by p.report_key) filter (where p.report_key is not null), '{}')
+		       coalesce(array_agg(p.report_key order by p.report_key) filter (where p.report_key is not null), '{}'),
+		       m.permissions_version
 		from tenant_memberships m
 		join line_recipients r on r.id = m.recipient_id
 		left join recipient_report_permissions p on p.tenant_id = m.tenant_id and p.recipient_id = m.recipient_id
 		where m.tenant_id = $1 and m.status <> 'REVOKED'
 		  and ($2::timestamptz is null or (r.created_at, r.id) < ($2, $3))
-		group by r.id, m.tenant_id
+		group by r.id, m.tenant_id, m.permissions_version
 		order by r.created_at desc, r.id desc
 		limit $4`, tenantID, cursorTime, cursorID, pageSize+1)
 	if err != nil {
@@ -155,39 +156,94 @@ func (store *RecipientStore) List(ctx context.Context, tenantID uuid.UUID, pageS
 	return recipient.Page{Stored: items, NextCursor: nextCursor, HasMore: hasMore}, nil
 }
 
-func (store *RecipientStore) ReplacePermissions(ctx context.Context, actorHash []byte, requestID string, tenantID, recipientID uuid.UUID, keys []report.Key, now time.Time) error {
+func (store *RecipientStore) ReplacePermissions(ctx context.Context, actorHash []byte, requestID string, tenantID, recipientID uuid.UUID, keys []report.Key, version int, now time.Time) (recipient.StoredRecipient, error) {
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin recipient permissions: %w", err)
+		return recipient.StoredRecipient{}, fmt.Errorf("begin recipient permissions: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var membershipStatus string
+	var storedVersion int
 	if err := tx.QueryRow(ctx, `
-		select status from tenant_memberships
+		select status, permissions_version from tenant_memberships
 		where tenant_id = $1 and recipient_id = $2 and status <> 'REVOKED'
-		for update`, tenantID, recipientID).Scan(&membershipStatus); errors.Is(err, pgx.ErrNoRows) {
-		return recipient.ErrRecipientNotFound
+		for update`, tenantID, recipientID).Scan(&membershipStatus, &storedVersion); errors.Is(err, pgx.ErrNoRows) {
+		return recipient.StoredRecipient{}, recipient.ErrRecipientNotFound
 	} else if err != nil {
-		return fmt.Errorf("lock recipient membership: %w", err)
+		return recipient.StoredRecipient{}, fmt.Errorf("lock recipient membership: %w", err)
+	}
+	if storedVersion != version {
+		return recipient.StoredRecipient{}, recipient.ErrVersionConflict
+	}
+	var existingKeyValues []string
+	if err := tx.QueryRow(ctx, `
+		select coalesce(array_agg(report_key), '{}')
+		from recipient_report_permissions
+		where tenant_id = $1 and recipient_id = $2`, tenantID, recipientID).Scan(&existingKeyValues); err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("load existing recipient permissions: %w", err)
+	}
+	existingKeys := make(map[report.Key]struct{}, len(existingKeyValues))
+	for _, key := range existingKeyValues {
+		existingKeys[report.Key(key)] = struct{}{}
+	}
+	keyValues := make([]string, len(keys))
+	for index, key := range keys {
+		definition, ok := report.DefinitionFor(key)
+		_, alreadySelected := existingKeys[key]
+		if !ok || !report.CanSelect(definition, alreadySelected) {
+			return recipient.StoredRecipient{}, recipient.ErrPermissionInvalid
+		}
+		keyValues[index] = string(key)
+	}
+	rows, err := tx.Query(ctx, `
+		select distinct s.name
+		from notification_schedules s
+		join notification_schedule_recipients sr on sr.schedule_id = s.id and sr.recipient_id = $2
+		join notification_schedule_reports scheduled on scheduled.schedule_id = s.id
+		where s.tenant_id = $1 and s.status = 'ACTIVE'
+		  and not (scheduled.report_key = any($3::text[]))
+		order by s.name`, tenantID, recipientID, keyValues)
+	if err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("check active schedule permission dependencies: %w", err)
+	}
+	var scheduleNames []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return recipient.StoredRecipient{}, fmt.Errorf("scan active schedule permission dependency: %w", err)
+		}
+		scheduleNames = append(scheduleNames, name)
+	}
+	rows.Close()
+	if len(scheduleNames) > 0 {
+		return recipient.StoredRecipient{}, &recipient.PermissionInUseError{ScheduleNames: scheduleNames}
 	}
 	if _, err := tx.Exec(ctx, `delete from recipient_report_permissions where tenant_id = $1 and recipient_id = $2`, tenantID, recipientID); err != nil {
-		return fmt.Errorf("clear recipient permissions: %w", err)
+		return recipient.StoredRecipient{}, fmt.Errorf("clear recipient permissions: %w", err)
 	}
-	for _, key := range keys {
-		if _, err := tx.Exec(ctx, `
-			insert into recipient_report_permissions (tenant_id, recipient_id, report_key, created_at)
-			values ($1, $2, $3, $4)`, tenantID, recipientID, key, now); err != nil {
-			return fmt.Errorf("insert recipient permission: %w", err)
-		}
+	if _, err := tx.Exec(ctx, `
+		insert into recipient_report_permissions (tenant_id, recipient_id, report_key, created_at)
+		select $1, $2, value, $4 from unnest($3::text[]) as value`, tenantID, recipientID, keyValues, now); err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("insert recipient permissions: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update tenant_memberships set permissions_version = permissions_version + 1, updated_at = $3
+		where tenant_id = $1 and recipient_id = $2`, tenantID, recipientID, now); err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("advance recipient permission version: %w", err)
 	}
 	afterJSON, _ := json.Marshal(map[string]any{"reportKeys": keys})
 	if err := insertAudit(ctx, tx, tenantID, actorHash, "RECIPIENT_PERMISSIONS_REPLACED", "REPORT_PERMISSION", recipientID.String(), requestID, nil, afterJSON, now); err != nil {
-		return err
+		return recipient.StoredRecipient{}, err
+	}
+	updated, err := loadRecipientForTenantAny(ctx, tx, tenantID, recipientID)
+	if err != nil {
+		return recipient.StoredRecipient{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit recipient permissions: %w", err)
+		return recipient.StoredRecipient{}, fmt.Errorf("commit recipient permissions: %w", err)
 	}
-	return nil
+	return updated, nil
 }
 
 func (store *RecipientStore) RedeemInvitation(ctx context.Context, invitationHash, lineHash []byte, identity recipient.StoredRecipient, now time.Time) (recipient.StoredRecipient, error) {
@@ -288,7 +344,7 @@ func (store *RecipientStore) FindByLineHash(ctx context.Context, lineHash []byte
 		       r.line_user_id_ciphertext, r.line_user_id_nonce,
 		       r.display_name_ciphertext, r.display_name_nonce,
 		       r.encryption_key_id, r.status, r.verified_at, r.created_at,
-		       '{}'::text[]
+		       '{}'::text[], 1
 		from line_recipients r
 		where r.line_user_id_hash = $1 and r.status = 'ACTIVE'`, lineHash)
 	item, err := scanRecipient(row)
@@ -307,7 +363,7 @@ func (store *RecipientStore) GetByID(ctx context.Context, recipientID uuid.UUID)
 		       r.line_user_id_ciphertext, r.line_user_id_nonce,
 		       r.display_name_ciphertext, r.display_name_nonce,
 		       r.encryption_key_id, r.status, r.verified_at, r.created_at,
-		       '{}'::text[]
+		       '{}'::text[], 1
 		from line_recipients r
 		where r.id = $1 and r.status = 'ACTIVE'`, recipientID)
 	item, err := scanRecipient(row)
@@ -320,18 +376,42 @@ func (store *RecipientStore) GetByID(ctx context.Context, recipientID uuid.UUID)
 	return item, nil
 }
 
+func (store *RecipientStore) GetForTenant(ctx context.Context, tenantID, recipientID uuid.UUID) (recipient.StoredRecipient, error) {
+	row := store.pool.QueryRow(ctx, `
+		select r.id, m.tenant_id, r.line_user_id_hash,
+		       r.line_user_id_ciphertext, r.line_user_id_nonce,
+		       r.display_name_ciphertext, r.display_name_nonce,
+		       r.encryption_key_id, r.status, r.verified_at, r.created_at,
+		       coalesce(array_agg(p.report_key order by p.report_key) filter (where p.report_key is not null), '{}'),
+		       m.permissions_version
+		from tenant_memberships m
+		join line_recipients r on r.id = m.recipient_id
+		left join recipient_report_permissions p on p.tenant_id = m.tenant_id and p.recipient_id = m.recipient_id
+		where m.tenant_id = $1 and m.recipient_id = $2 and m.status <> 'REVOKED'
+		group by r.id, m.tenant_id, m.permissions_version`, tenantID, recipientID)
+	item, err := scanRecipient(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return recipient.StoredRecipient{}, recipient.ErrRecipientNotFound
+	}
+	if err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("get recipient for tenant: %w", err)
+	}
+	return item, nil
+}
+
 func loadRecipientForTenant(ctx context.Context, tx pgx.Tx, tenantID, recipientID uuid.UUID) (recipient.StoredRecipient, error) {
 	row := tx.QueryRow(ctx, `
 		select r.id, m.tenant_id, r.line_user_id_hash,
 		       r.line_user_id_ciphertext, r.line_user_id_nonce,
 		       r.display_name_ciphertext, r.display_name_nonce,
 		       r.encryption_key_id, r.status, r.verified_at, r.created_at,
-		       coalesce(array_agg(p.report_key order by p.report_key) filter (where p.report_key is not null), '{}')
+		       coalesce(array_agg(p.report_key order by p.report_key) filter (where p.report_key is not null), '{}'),
+		       m.permissions_version
 		from tenant_memberships m
 		join line_recipients r on r.id = m.recipient_id
 		left join recipient_report_permissions p on p.tenant_id = m.tenant_id and p.recipient_id = m.recipient_id
 		where m.tenant_id = $1 and m.recipient_id = $2 and m.status = 'ACTIVE'
-		group by r.id, m.tenant_id`, tenantID, recipientID)
+		group by r.id, m.tenant_id, m.permissions_version`, tenantID, recipientID)
 	item, err := scanRecipient(row)
 	if err != nil {
 		return recipient.StoredRecipient{}, fmt.Errorf("load bound recipient: %w", err)
@@ -345,12 +425,13 @@ func loadRecipientForTenantAny(ctx context.Context, tx pgx.Tx, tenantID, recipie
 		       r.line_user_id_ciphertext, r.line_user_id_nonce,
 		       r.display_name_ciphertext, r.display_name_nonce,
 		       r.encryption_key_id, r.status, r.verified_at, r.created_at,
-		       coalesce(array_agg(p.report_key order by p.report_key) filter (where p.report_key is not null), '{}')
+		       coalesce(array_agg(p.report_key order by p.report_key) filter (where p.report_key is not null), '{}'),
+		       m.permissions_version
 		from tenant_memberships m
 		join line_recipients r on r.id = m.recipient_id
 		left join recipient_report_permissions p on p.tenant_id = m.tenant_id and p.recipient_id = m.recipient_id
 		where m.tenant_id = $1 and m.recipient_id = $2 and m.status <> 'REVOKED'
-		group by r.id, m.tenant_id`, tenantID, recipientID)
+		group by r.id, m.tenant_id, m.permissions_version`, tenantID, recipientID)
 	item, err := scanRecipient(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return recipient.StoredRecipient{}, recipient.ErrRecipientNotFound
@@ -369,7 +450,7 @@ func scanRecipient(row rowScanner) (recipient.StoredRecipient, error) {
 		&item.ID, &item.TenantID, &item.LineUserIDHash,
 		&item.LineUserID.Ciphertext, &item.LineUserID.Nonce,
 		&item.DisplayName.Ciphertext, &item.DisplayName.Nonce,
-		&keyID, &item.Status, &item.VerifiedAt, &item.CreatedAt, &keys,
+		&keyID, &item.Status, &item.VerifiedAt, &item.CreatedAt, &keys, &item.PermissionsVersion,
 	)
 	item.LineUserID.KeyID = keyID
 	item.DisplayName.KeyID = keyID

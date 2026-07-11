@@ -117,12 +117,13 @@ func validateFlexPreviewInput(input FlexPreviewInput) (FlexPreviewInput, error) 
 	default:
 		return FlexPreviewInput{}, &FlexPreviewValidationError{Field: "periodPreset", Code: "INVALID_PERIOD_PRESET"}
 	}
-	if len(input.ReportKeys) < 1 || len(input.ReportKeys) > 5 {
+	if len(input.ReportKeys) < 1 || len(input.ReportKeys) > 10 {
 		return FlexPreviewInput{}, &FlexPreviewValidationError{Field: "reportKeys", Code: "INVALID_REPORTS"}
 	}
 	seen := make(map[report.Key]struct{}, len(input.ReportKeys))
 	for _, key := range input.ReportKeys {
-		if _, ok := report.DefinitionFor(key); !ok {
+		definition, ok := report.DefinitionFor(key)
+		if !ok || !report.CanSelect(definition, false) {
 			return FlexPreviewInput{}, &FlexPreviewValidationError{Field: "reportKeys", Code: "INVALID_REPORTS"}
 		}
 		if _, duplicate := seen[key]; duplicate {

@@ -29,18 +29,27 @@ type Metric struct {
 	LabelTH string
 }
 
+type Status string
+
+const (
+	StatusActive     Status = "ACTIVE"
+	StatusDeprecated Status = "DEPRECATED"
+)
+
 type Definition struct {
-	Key            Key
-	Version        string
-	LabelTH        string
-	Category       string
-	Sensitive      bool
-	ParameterKind  ParameterKind
-	LineMetrics    []Metric
-	SummaryTimeout time.Duration
-	DetailTimeout  time.Duration
-	MaxRows        int
-	MaxRangeDays   int
+	Key             Key
+	Version         string
+	LabelTH         string
+	Category        string
+	CategoryLabelTH string
+	Status          Status
+	Sensitive       bool
+	ParameterKind   ParameterKind
+	LineMetrics     []Metric
+	SummaryTimeout  time.Duration
+	DetailTimeout   time.Duration
+	MaxRows         int
+	MaxRangeDays    int
 }
 
 var orderedDefinitions = []Definition{
@@ -65,18 +74,24 @@ var definitionsByKey = func() map[Key]Definition {
 }()
 
 func definition(key Key, label, category string, sensitive bool, parameterKind ParameterKind, firstMetricKey, firstMetricLabel, secondMetricKey, secondMetricLabel string) Definition {
+	categoryLabels := map[string]string{
+		"SALES": "ขาย", "PURCHASE": "ซื้อ", "GROSS_PROFIT": "กำไรขั้นต้น",
+		"INVENTORY": "สินค้าคงคลัง", "AR": "ลูกหนี้", "CASH_BANK": "เงินสดและธนาคาร",
+	}
 	return Definition{
-		Key:            key,
-		Version:        "1.0.0",
-		LabelTH:        label,
-		Category:       category,
-		Sensitive:      sensitive,
-		ParameterKind:  parameterKind,
-		LineMetrics:    []Metric{{Key: firstMetricKey, LabelTH: firstMetricLabel}, {Key: secondMetricKey, LabelTH: secondMetricLabel}},
-		SummaryTimeout: 30 * time.Second,
-		DetailTimeout:  120 * time.Second,
-		MaxRows:        200_000,
-		MaxRangeDays:   366,
+		Key:             key,
+		Version:         "1.0.0",
+		LabelTH:         label,
+		Category:        category,
+		CategoryLabelTH: categoryLabels[category],
+		Status:          StatusActive,
+		Sensitive:       sensitive,
+		ParameterKind:   parameterKind,
+		LineMetrics:     []Metric{{Key: firstMetricKey, LabelTH: firstMetricLabel}, {Key: secondMetricKey, LabelTH: secondMetricLabel}},
+		SummaryTimeout:  30 * time.Second,
+		DetailTimeout:   120 * time.Second,
+		MaxRows:         200_000,
+		MaxRangeDays:    366,
 	}
 }
 
@@ -95,4 +110,10 @@ func Definitions() []Definition {
 func DefinitionFor(key Key) (Definition, bool) {
 	definition, ok := definitionsByKey[key]
 	return definition, ok
+}
+
+// CanSelect keeps deprecated report keys readable in existing configuration
+// while preventing admins from adding them to new permission or schedule sets.
+func CanSelect(definition Definition, alreadySelected bool) bool {
+	return definition.Status == StatusActive || definition.Status == StatusDeprecated && alreadySelected
 }

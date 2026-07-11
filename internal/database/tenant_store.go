@@ -2,13 +2,16 @@ package database
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -20,11 +23,12 @@ import (
 )
 
 type TenantStore struct {
-	pool *pgxpool.Pool
+	pool        *pgxpool.Pool
+	slugEntropy io.Reader
 }
 
 func NewTenantStore(pool *pgxpool.Pool) *TenantStore {
-	return &TenantStore{pool: pool}
+	return &TenantStore{pool: pool, slugEntropy: rand.Reader}
 }
 
 func (store *TenantStore) Create(ctx context.Context, actorHash []byte, requestID, idempotencyKey string, input tenant.CreateInput, now time.Time) (tenant.Tenant, error) {
@@ -69,7 +73,7 @@ func (store *TenantStore) Create(ctx context.Context, actorHash []byte, requestI
 		return replay, nil
 	}
 
-	created, err := insertTenant(ctx, tx, input, now)
+	created, err := insertTenant(ctx, tx, input, now, store.slugEntropy)
 	if err != nil {
 		var postgresError *pgconn.PgError
 		if errors.As(err, &postgresError) && postgresError.Code == "23505" {
@@ -96,19 +100,61 @@ func (store *TenantStore) Create(ctx context.Context, actorHash []byte, requestI
 	return created, nil
 }
 
-func insertTenant(ctx context.Context, tx pgx.Tx, input tenant.CreateInput, now time.Time) (tenant.Tenant, error) {
+func insertTenant(ctx context.Context, tx pgx.Tx, input tenant.CreateInput, now time.Time, entropy io.Reader) (tenant.Tenant, error) {
+	if input.Slug != "" {
+		created, inserted, err := insertTenantRecord(ctx, tx, input, now)
+		if err != nil {
+			return tenant.Tenant{}, err
+		}
+		if !inserted {
+			return tenant.Tenant{}, tenant.ErrConflict
+		}
+		return created, nil
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		slug, err := generateTenantSlug(entropy)
+		if err != nil {
+			return tenant.Tenant{}, fmt.Errorf("generate tenant slug: %w", err)
+		}
+		input.Slug = slug
+		created, inserted, err := insertTenantRecord(ctx, tx, input, now)
+		if err != nil {
+			return tenant.Tenant{}, err
+		}
+		if inserted {
+			return created, nil
+		}
+	}
+	return tenant.Tenant{}, tenant.ErrConflict
+}
+
+func insertTenantRecord(ctx context.Context, tx pgx.Tx, input tenant.CreateInput, now time.Time) (tenant.Tenant, bool, error) {
 	var created tenant.Tenant
 	created.SMLReadiness = "UNCONFIGURED"
 	err := tx.QueryRow(ctx, `
 		insert into tenants (slug, name, timezone, status, access_ends_at, created_at, updated_at)
 		values ($1, $2, $3, $4, $5, $6, $6)
+		on conflict (slug) do nothing
 		returning id, slug, name, timezone, status, access_ends_at, version, created_at, updated_at`,
 		input.Slug, input.Name, input.Timezone, input.Status, input.AccessEndsAt, now,
 	).Scan(&created.ID, &created.Slug, &created.Name, &created.Timezone, &created.Status, &created.AccessEndsAt, &created.Version, &created.CreatedAt, &created.UpdatedAt)
-	if err != nil {
-		return tenant.Tenant{}, fmt.Errorf("insert tenant: %w", err)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tenant.Tenant{}, false, nil
 	}
-	return created, nil
+	if err != nil {
+		return tenant.Tenant{}, false, fmt.Errorf("insert tenant: %w", err)
+	}
+	return created, true, nil
+}
+
+var tenantSlugEncoding = base32.NewEncoding("0123456789abcdefghjkmnpqrstvwxyz").WithPadding(base32.NoPadding)
+
+func generateTenantSlug(entropy io.Reader) (string, error) {
+	value := make([]byte, 8)
+	if _, err := io.ReadFull(entropy, value); err != nil {
+		return "", err
+	}
+	return "shop-" + strings.ToLower(tenantSlugEncoding.EncodeToString(value)[:12]), nil
 }
 
 func (store *TenantStore) List(ctx context.Context, filter tenant.ListFilter, now time.Time) (tenant.Page, error) {

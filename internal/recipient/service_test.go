@@ -3,6 +3,7 @@ package recipient
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -30,8 +31,13 @@ func (store *memoryRecipientStore) List(context.Context, uuid.UUID, int, string)
 	return Page{Stored: []StoredRecipient{store.stored}}, nil
 }
 
-func (store *memoryRecipientStore) ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, time.Time) error {
-	return nil
+func (store *memoryRecipientStore) ReplacePermissions(_ context.Context, _ []byte, _ string, _ uuid.UUID, _ uuid.UUID, keys []report.Key, version int, _ time.Time) (StoredRecipient, error) {
+	if store.stored.PermissionsVersion != version {
+		return StoredRecipient{}, ErrVersionConflict
+	}
+	store.stored.ReportKeys = append([]report.Key(nil), keys...)
+	store.stored.PermissionsVersion++
+	return store.stored, nil
 }
 
 func (store *memoryRecipientStore) RedeemInvitation(_ context.Context, inviteHash, _ []byte, identity StoredRecipient, _ time.Time) (StoredRecipient, error) {
@@ -52,6 +58,13 @@ func (store *memoryRecipientStore) FindByLineHash(_ context.Context, lineHash []
 func (store *memoryRecipientStore) GetByID(_ context.Context, recipientID uuid.UUID) (StoredRecipient, error) {
 	if store.redeemed.ID == recipientID {
 		return store.redeemed, nil
+	}
+	return StoredRecipient{}, ErrRecipientNotFound
+}
+
+func (store *memoryRecipientStore) GetForTenant(_ context.Context, tenantID, recipientID uuid.UUID) (StoredRecipient, error) {
+	if store.stored.TenantID == tenantID && store.stored.ID == recipientID {
+		return store.stored, nil
 	}
 	return StoredRecipient{}, ErrRecipientNotFound
 }
@@ -98,6 +111,25 @@ func TestServiceReturnsEmptyReportKeyArraysForNewRecipients(t *testing.T) {
 	}
 	if len(page.Data) != 1 || page.Data[0].ReportKeys == nil || len(page.Data[0].ReportKeys) != 0 {
 		t.Fatalf("List() reportKeys = %#v, want non-nil empty array", page.Data)
+	}
+}
+
+func TestServiceUsesOptimisticPermissionVersioning(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 12)))
+	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{3}, 32), bytes.NewReader(nil), func() time.Time { return now })
+	store := &memoryRecipientStore{}
+	service := NewService(store, box, tokens, bytes.NewReader(bytes.Repeat([]byte{4}, 32)), "https://dashboard.nextstep-soft.com", func() time.Time { return now })
+	created, err := service.CreateInvitation(context.Background(), []byte("admin"), "request-1", "recipient-versioning", uuid.New(), "Owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.ReplacePermissions(context.Background(), []byte("admin"), "request-2", store.stored.TenantID, created.ID, []report.Key{report.SalesGoodsServices}, created.PermissionsVersion)
+	if err != nil || updated.PermissionsVersion != created.PermissionsVersion+1 {
+		t.Fatalf("ReplacePermissions() = %+v, %v", updated, err)
+	}
+	if _, err := service.ReplacePermissions(context.Background(), []byte("admin"), "request-3", store.stored.TenantID, created.ID, nil, created.PermissionsVersion); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale permission version error = %v", err)
 	}
 }
 

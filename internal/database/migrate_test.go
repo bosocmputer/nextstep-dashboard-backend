@@ -69,6 +69,22 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 		)`).Scan(&hasConfigFileName); err != nil || !hasConfigFileName {
 		t.Fatalf("tenant_sml_connections.config_file_name missing: exists=%v err=%v", hasConfigFileName, err)
 	}
+	var hasPermissionsVersion bool
+	if err := pool.QueryRow(ctx, `
+		select exists (
+		  select 1 from information_schema.columns
+		  where table_name = 'tenant_memberships' and column_name = 'permissions_version'
+		)`).Scan(&hasPermissionsVersion); err != nil || !hasPermissionsVersion {
+		t.Fatalf("tenant_memberships.permissions_version missing: exists=%v err=%v", hasPermissionsVersion, err)
+	}
+	var acceptsPositionTen bool
+	if err := pool.QueryRow(ctx, `
+		select pg_get_constraintdef(oid) ilike '%position >= 1%position <= 10%'
+		from pg_constraint
+		where conrelid = 'notification_schedule_reports'::regclass
+		  and conname = 'notification_schedule_reports_position_check'`).Scan(&acceptsPositionTen); err != nil || !acceptsPositionTen {
+		t.Fatalf("notification schedule position constraint is not 1..10: accepts=%v err=%v", acceptsPositionTen, err)
+	}
 
 	for _, table := range []string{
 		"admin_users",

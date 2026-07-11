@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/schedule"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -315,6 +316,24 @@ func getSchedule(ctx context.Context, queryer scheduleQuerier, tenantID, schedul
 }
 
 func replaceScheduleChildren(ctx context.Context, tx pgx.Tx, tenantID, scheduleID uuid.UUID, input schedule.Input) error {
+	var existingKeyValues []string
+	if err := tx.QueryRow(ctx, `
+		select coalesce(array_agg(report_key), '{}')
+		from notification_schedule_reports
+		where tenant_id = $1 and schedule_id = $2`, tenantID, scheduleID).Scan(&existingKeyValues); err != nil {
+		return fmt.Errorf("load existing schedule reports: %w", err)
+	}
+	existingKeys := make(map[report.Key]struct{}, len(existingKeyValues))
+	for _, key := range existingKeyValues {
+		existingKeys[report.Key(key)] = struct{}{}
+	}
+	for _, key := range input.ReportKeys {
+		definition, ok := report.DefinitionFor(key)
+		_, alreadySelected := existingKeys[key]
+		if !ok || !report.CanSelect(definition, alreadySelected) {
+			return &schedule.ValidationError{Field: "reportKeys", Code: "DEPRECATED_REPORT"}
+		}
+	}
 	if _, err := tx.Exec(ctx, `delete from notification_schedule_days where tenant_id = $1 and schedule_id = $2`, tenantID, scheduleID); err != nil {
 		return fmt.Errorf("clear schedule days: %w", err)
 	}
@@ -346,6 +365,23 @@ func replaceScheduleChildren(ctx context.Context, tx pgx.Tx, tenantID, scheduleI
 		select $1, $2, value from unnest($3::uuid[]) as value`, tenantID, scheduleID, input.RecipientIDs); err != nil {
 		return mapScheduleWriteError(err, "insert schedule recipients")
 	}
+	var missingPermission bool
+	if err := tx.QueryRow(ctx, `
+		select exists (
+		  select 1
+		  from notification_schedule_recipients sr
+		  join notification_schedule_reports scheduled on scheduled.schedule_id = sr.schedule_id
+		  left join recipient_report_permissions permission
+		    on permission.tenant_id = sr.tenant_id
+		   and permission.recipient_id = sr.recipient_id
+		   and permission.report_key = scheduled.report_key
+		  where sr.schedule_id = $1 and permission.report_key is null
+		)`, scheduleID).Scan(&missingPermission); err != nil {
+		return fmt.Errorf("validate schedule recipient permissions: %w", err)
+	}
+	if missingPermission {
+		return &schedule.ValidationError{Field: "recipientIds", Code: "RECIPIENT_PERMISSION_MISMATCH"}
+	}
 	return nil
 }
 
@@ -368,14 +404,12 @@ func scheduleReadiness(ctx context.Context, queryer scheduleQuerier, tenantID uu
 		         where sr.schedule_id = s.id and (m.status is distinct from 'ACTIVE' or r.status is distinct from 'ACTIVE')
 		       ) as recipient_not_active,
 		       exists (
-		         select 1 from notification_schedule_recipients sr
-		         where sr.schedule_id = s.id and not exists (
-		           select 1
-		           from notification_schedule_reports scheduled
-		           join recipient_report_permissions p
-		             on p.tenant_id = scheduled.tenant_id and p.report_key = scheduled.report_key and p.recipient_id = sr.recipient_id
-		           where scheduled.schedule_id = s.id
-		         )
+		         select 1
+		         from notification_schedule_recipients sr
+		         join notification_schedule_reports scheduled on scheduled.schedule_id = sr.schedule_id
+		         left join recipient_report_permissions p
+		           on p.tenant_id = sr.tenant_id and p.report_key = scheduled.report_key and p.recipient_id = sr.recipient_id
+		         where sr.schedule_id = s.id and p.report_key is null
 		       ) as permission_mismatch
 		from notification_schedules s
 		join tenants t on t.id = s.tenant_id

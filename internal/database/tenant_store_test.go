@@ -1,9 +1,11 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,5 +76,72 @@ func TestTenantStoreIdempotencyPaginationAndOptimisticUpdate(t *testing.T) {
 	}
 	if auditCount != 2 {
 		t.Fatalf("audit count = %d, want 2 (create + update)", auditCount)
+	}
+}
+
+func TestTenantStoreAutoSlugCollisionReplayAndConcurrentCreate(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("pgxpool.New() error = %v", err)
+	}
+	defer pool.Close()
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	collisionEntropy := bytes.Repeat([]byte{0}, 8)
+	collisionSlug, err := generateTenantSlug(bytes.NewReader(collisionEntropy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tenant.NewService(NewTenantStore(pool), func() time.Time { return now }).Create(
+		ctx, []byte("auto-slug-admin"), "seed-collision", "auto-slug-seed-001",
+		tenant.CreateInput{Slug: collisionSlug, Name: "ร้านทดสอบ collision"},
+	); err != nil {
+		t.Fatalf("seed collision slug: %v", err)
+	}
+
+	store := NewTenantStore(pool)
+	store.slugEntropy = bytes.NewReader(append(collisionEntropy, []byte{1, 2, 3, 4, 5, 6, 7, 8}...))
+	service := tenant.NewService(store, func() time.Time { return now })
+	created, err := service.Create(ctx, []byte("auto-slug-admin"), "auto-create", "auto-slug-create-001", tenant.CreateInput{Name: "ร้านชื่อไทย"})
+	if err != nil {
+		t.Fatalf("auto slug create: %v", err)
+	}
+	if created.Slug == collisionSlug || created.Timezone != "Asia/Bangkok" || created.Status != tenant.StatusDisabled {
+		t.Fatalf("auto slug defaults = %+v", created)
+	}
+	replayed, err := service.Create(ctx, []byte("auto-slug-admin"), "auto-replay", "auto-slug-create-001", tenant.CreateInput{Name: "ร้านชื่อไทย"})
+	if err != nil || replayed.ID != created.ID || replayed.Slug != created.Slug {
+		t.Fatalf("auto slug replay = %+v, %v", replayed, err)
+	}
+
+	concurrentService := tenant.NewService(NewTenantStore(pool), func() time.Time { return now })
+	results := make([]tenant.Tenant, 2)
+	errorsFound := make([]error, 2)
+	idempotencyKeys := []string{"auto-slug-concurrent-001", "auto-slug-concurrent-002"}
+	var wait sync.WaitGroup
+	for index := range results {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			results[index], errorsFound[index] = concurrentService.Create(
+				ctx, []byte("auto-slug-admin"), "concurrent-create", idempotencyKeys[index],
+				tenant.CreateInput{Name: "ร้านชื่อซ้ำ"},
+			)
+		}(index)
+	}
+	wait.Wait()
+	if errorsFound[0] != nil || errorsFound[1] != nil {
+		t.Fatalf("concurrent create errors = %v", errorsFound)
+	}
+	if results[0].ID == results[1].ID || results[0].Slug == results[1].Slug {
+		t.Fatalf("concurrent tenants are not unique: %+v", results)
 	}
 }
