@@ -183,16 +183,16 @@ func (store *NotificationStore) Publish(ctx context.Context, runID uuid.UUID, wo
 func loadNotificationWork(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now time.Time) (notification.Work, error) {
 	var work notification.Work
 	if err := tx.QueryRow(ctx, `
-		select n.id, n.tenant_id, n.schedule_id, tenant.name
+		select n.id, n.tenant_id, n.schedule_id, tenant.name, tenant.timezone
 		from notification_runs n
 		join tenants tenant on tenant.id = n.tenant_id
-		where n.id = $1`, runID).Scan(&work.ID, &work.TenantID, &work.ScheduleID, &work.TenantName); err != nil {
+		where n.id = $1`, runID).Scan(&work.ID, &work.TenantID, &work.ScheduleID, &work.TenantName, &work.Timezone); err != nil {
 		return notification.Work{}, fmt.Errorf("load notification work: %w", err)
 	}
 	rows, err := tx.Query(ctx, `
-		select report_run.report_key, report_run.status, report_run.period_preset,
+		select report_run.id, report_run.report_key, report_run.status, report_run.period_preset,
 		       report_run.period_from::text, report_run.period_to::text,
-		       report_run.summary_json, report_run.finished_at, report_run.expires_at
+		       report_run.summary_json, report_run.dashboard_json, report_run.finished_at, report_run.expires_at
 		from notification_run_reports linked
 		join notification_runs notification_run on notification_run.id = linked.notification_run_id
 		join report_runs report_run on report_run.id = linked.report_run_id
@@ -206,13 +206,14 @@ func loadNotificationWork(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now t
 	defer rows.Close()
 	terminalFailures := 0
 	for rows.Next() {
+		var reportRunID uuid.UUID
 		var key report.Key
 		var status report.RunStatus
 		var period report.Period
-		var summaryJSON []byte
+		var summaryJSON, dashboardJSON []byte
 		var finishedAt *time.Time
 		var expiresAt time.Time
-		if err := rows.Scan(&key, &status, &period.Preset, &period.DateFrom, &period.DateTo, &summaryJSON, &finishedAt, &expiresAt); err != nil {
+		if err := rows.Scan(&reportRunID, &key, &status, &period.Preset, &period.DateFrom, &period.DateTo, &summaryJSON, &dashboardJSON, &finishedAt, &expiresAt); err != nil {
 			return notification.Work{}, fmt.Errorf("scan notification report result: %w", err)
 		}
 		switch status {
@@ -227,7 +228,15 @@ func loadNotificationWork(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now t
 			if err := json.Unmarshal(summaryJSON, &metrics); err != nil {
 				return notification.Work{}, fmt.Errorf("decode notification report summary: %w", err)
 			}
-			work.Reports = append(work.Reports, notification.ReportResult{Key: key, Period: period, Metrics: metrics, FinishedAt: *finishedAt})
+			var dashboard *report.Dashboard
+			if string(dashboardJSON) != "{}" {
+				var decoded report.Dashboard
+				if err := json.Unmarshal(dashboardJSON, &decoded); err != nil {
+					return notification.Work{}, fmt.Errorf("decode notification report dashboard: %w", err)
+				}
+				dashboard = &decoded
+			}
+			work.Reports = append(work.Reports, notification.ReportResult{RunID: reportRunID, Key: key, Period: period, Metrics: metrics, Dashboard: dashboard, FinishedAt: *finishedAt})
 		default:
 			terminalFailures++
 		}

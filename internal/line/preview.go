@@ -31,9 +31,15 @@ type FlexPreviewMetric struct {
 }
 
 type FlexPreviewReport struct {
-	Key     report.Key          `json:"key"`
-	Label   string              `json:"label"`
-	Metrics []FlexPreviewMetric `json:"metrics"`
+	Key           report.Key                  `json:"key"`
+	Label         string                      `json:"label"`
+	CategoryLabel string                      `json:"categoryLabel"`
+	Metrics       []FlexPreviewMetric         `json:"metrics"`
+	Primary       FlexMetricPresentation      `json:"primary"`
+	Supporting    []FlexMetricPresentation    `json:"supporting"`
+	Comparison    *FlexComparisonPresentation `json:"comparison,omitempty"`
+	Attention     *FlexAttentionPresentation  `json:"attention,omitempty"`
+	ActionURL     string                      `json:"actionUrl"`
 }
 
 type FlexPreview struct {
@@ -81,7 +87,7 @@ func (service *FlexPreviewService) Preview(ctx context.Context, tenantID uuid.UU
 		return FlexPreview{}, err
 	}
 	actionURL := *service.publicBaseURL
-	actionURL.Path = strings.TrimRight(actionURL.Path, "/") + "/app"
+	actionURL.Path = strings.TrimRight(actionURL.Path, "/") + "/app/tenant/" + tenantID.String()
 	actionURL.RawQuery = ""
 	actionURL.Fragment = ""
 
@@ -96,19 +102,106 @@ func (service *FlexPreviewService) Preview(ctx context.Context, tenantID uuid.UU
 			metrics = append(metrics, FlexPreviewMetric{Label: metric.LabelTH, Value: value})
 			renderMetrics[metric.Key] = value
 		}
-		reports = append(reports, FlexPreviewReport{Key: key, Label: definition.LabelTH, Metrics: metrics})
-		renderReports = append(renderReports, FlexReport{Key: key, Metrics: renderMetrics})
+		reportURL := *service.publicBaseURL
+		reportURL.Path = strings.TrimRight(reportURL.Path, "/") + "/app/tenant/" + tenantID.String() + "/report/" + string(key)
+		reportURL.RawQuery = ""
+		reportURL.Fragment = ""
+		dashboard := previewDashboard(key, period)
+		renderReport := FlexReport{Key: key, Metrics: renderMetrics, Dashboard: &dashboard, ActionURL: reportURL.String()}
+		presentation, err := BuildFlexReportPresentation(renderReport)
+		if err != nil {
+			return FlexPreview{}, err
+		}
+		reports = append(reports, FlexPreviewReport{
+			Key: key, Label: definition.LabelTH, CategoryLabel: presentation.CategoryLabel, Metrics: metrics,
+			Primary: presentation.Primary, Supporting: presentation.Supporting, Comparison: presentation.Comparison,
+			Attention: presentation.Attention, ActionURL: presentation.ActionURL,
+		})
+		renderReports = append(renderReports, renderReport)
 	}
 	message, err := RenderFlex(FlexInput{
-		TenantName: item.Name, Period: period, GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: renderReports,
+		TenantName: item.Name, Timezone: item.Timezone, Period: period, GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: renderReports,
 	})
 	if err != nil {
 		return FlexPreview{}, err
 	}
 	return FlexPreview{
-		AltText: flexAltText(item.Name, period), TenantName: item.Name, Period: period, PeriodLabel: periodLabel(period),
+		AltText: flexAltText(item.Name, period, len(reports)), TenantName: item.Name, Period: period, PeriodLabel: periodLabel(period),
 		GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: reports, PayloadBytes: len(message), Message: message,
 	}, nil
+}
+
+func previewDashboard(key report.Key, period report.Period) report.Dashboard {
+	definition := flexPresentationDefinitions[key]
+	metricKeys := append([]string{definition.primary}, definition.supporting...)
+	metrics := make([]report.DashboardMetric, 0, len(metricKeys))
+	for index, metricKey := range metricKeys {
+		label, unit := previewMetricMetadata(key, metricKey)
+		comparison := report.MetricComparison{Availability: report.ComparisonUnavailable}
+		if report.ComparisonSupported(key, period) {
+			comparison = report.MetricComparison{Availability: report.ComparisonAvailable, PreviousValue: "100000.00", Delta: "-7800.00", Percent: "-7.82", Direction: report.DirectionDown}
+		}
+		metrics = append(metrics, report.DashboardMetric{Key: metricKey, Label: label, Value: previewDashboardValue(unit, index), Unit: unit, Comparison: comparison})
+	}
+	if key == report.ARDebtReceipt {
+		metrics = append(metrics, report.DashboardMetric{Key: "payment_split_missing_count", Label: "เอกสารแยกวิธีชำระไม่ครบ", Value: "0", Unit: report.UnitCount})
+	}
+	return report.Dashboard{ReportKey: key, Version: "1.0.0", Period: period, Timezone: "Asia/Bangkok", KPIs: metrics, Visualizations: []report.DashboardVisualization{}, Quality: report.DashboardQuality{Status: "OK", Warnings: []string{}}}
+}
+
+func previewMetricMetadata(reportKey report.Key, key string) (string, report.MetricUnit) {
+	metadata := map[string]struct {
+		label string
+		unit  report.MetricUnit
+	}{
+		"total_amount":          {"ยอดรวม", report.UnitTHB},
+		"document_count":        {"จำนวนเอกสาร", report.UnitCount},
+		"average_per_document":  {"ยอดเฉลี่ยต่อเอกสาร", report.UnitTHB},
+		"gross_profit_amount":   {"กำไรขั้นต้น", report.UnitTHB},
+		"gross_margin_percent":  {"อัตรากำไรขั้นต้น", report.UnitPercent},
+		"net_amount":            {"ยอดขายสุทธิ", report.UnitTHB},
+		"balance_amount":        {"มูลค่าสต็อกคงเหลือ", report.UnitTHB},
+		"item_count":            {"จำนวนสินค้า", report.UnitCount},
+		"reorder_item_count":    {"สินค้าที่ต้องสั่ง", report.UnitCount},
+		"shortage_qty":          {"จำนวนขาดรวม", report.UnitQuantity},
+		"net_movement_amount":   {"ยอดเคลื่อนไหวสุทธิ", report.UnitTHB},
+		"customer_count":        {"จำนวนลูกหนี้", report.UnitCount},
+		"total_received_amount": {"ยอดรับชำระ", report.UnitTHB},
+		"receipt_count":         {"จำนวนเอกสาร", report.UnitCount},
+		"average_per_receipt":   {"ยอดเฉลี่ยต่อเอกสาร", report.UnitTHB},
+	}
+	if item, ok := metadata[key]; ok {
+		if key == "total_amount" {
+			switch reportKey {
+			case report.SalesGoodsServices:
+				item.label = "ยอดขาย"
+			case report.PurchaseGoodsPayables:
+				item.label = "ยอดซื้อ"
+			case report.CashBankReceipts:
+				item.label = "ยอดรับเงิน"
+			case report.CashBankPayments:
+				item.label = "ยอดจ่ายเงิน"
+			}
+		}
+		return item.label, item.unit
+	}
+	return key, unitForMetricKey(key)
+}
+
+func previewDashboardValue(unit report.MetricUnit, index int) string {
+	switch unit {
+	case report.UnitCount:
+		return "128"
+	case report.UnitPercent:
+		return "24.75"
+	case report.UnitQuantity:
+		return "1250.1234"
+	default:
+		if index == 0 {
+			return "125000.00"
+		}
+		return "1234567.89"
+	}
 }
 
 func validateFlexPreviewInput(input FlexPreviewInput) (FlexPreviewInput, error) {

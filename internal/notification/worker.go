@@ -23,9 +23,11 @@ var (
 )
 
 type ReportResult struct {
+	RunID      uuid.UUID
 	Key        report.Key
 	Period     report.Period
 	Metrics    map[string]string
+	Dashboard  *report.Dashboard
 	FinishedAt time.Time
 }
 
@@ -39,6 +41,7 @@ type Work struct {
 	TenantID   uuid.UUID
 	ScheduleID uuid.UUID
 	TenantName string
+	Timezone   string
 	Pending    bool
 	Partial    bool
 	Reports    []ReportResult
@@ -95,6 +98,9 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 	if len(work.Targets) == 0 {
 		return worker.store.Fail(ctx, work.ID, worker.workerID, "NO_ELIGIBLE_RECIPIENTS", now)
 	}
+	if !validReportContext(work.Reports) {
+		return worker.store.Fail(ctx, work.ID, worker.workerID, "FLEX_REPORT_CONTEXT_INVALID", now)
+	}
 	prepared := make([]PreparedDelivery, 0, len(work.Targets))
 	for _, target := range work.Targets {
 		reports := permittedReports(work.Reports, target.ReportKeys)
@@ -107,22 +113,28 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 		if err != nil {
 			return worker.store.Fail(ctx, work.ID, worker.workerID, "DELIVERY_REFERENCE_FAILED", now)
 		}
-		actionURL := *worker.publicBaseURL
-		actionURL.Path = "/app"
-		query := actionURL.Query()
+		overviewURL := *worker.publicBaseURL
+		overviewURL.Path = "/app/tenant/" + work.TenantID.String()
+		query := overviewURL.Query()
 		query.Set("deliveryRef", reference)
-		actionURL.RawQuery = query.Encode()
+		overviewURL.RawQuery = query.Encode()
 		generatedAt := reports[0].FinishedAt
 		flexReports := make([]line.FlexReport, 0, len(reports))
 		for _, result := range reports {
 			if result.FinishedAt.After(generatedAt) {
 				generatedAt = result.FinishedAt
 			}
-			flexReports = append(flexReports, line.FlexReport{Key: result.Key, Metrics: result.Metrics})
+			reportURL := *worker.publicBaseURL
+			reportURL.Path = "/app/tenant/" + work.TenantID.String() + "/report/" + string(result.Key)
+			reportQuery := reportURL.Query()
+			reportQuery.Set("snapshotRunId", result.RunID.String())
+			reportQuery.Set("deliveryRef", reference)
+			reportURL.RawQuery = reportQuery.Encode()
+			flexReports = append(flexReports, line.FlexReport{Key: result.Key, Metrics: result.Metrics, Dashboard: result.Dashboard, ActionURL: reportURL.String()})
 		}
 		payload, err := worker.render(line.FlexInput{
-			TenantName: work.TenantName, Period: reports[0].Period, GeneratedAt: generatedAt,
-			ActionURL: actionURL.String(), Reports: flexReports,
+			TenantName: work.TenantName, Timezone: work.Timezone, Period: reports[0].Period, GeneratedAt: generatedAt,
+			ActionURL: overviewURL.String(), Reports: flexReports,
 		})
 		if err != nil {
 			return worker.store.Fail(ctx, work.ID, worker.workerID, "FLEX_RENDER_FAILED", now)
@@ -136,6 +148,22 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 		return worker.store.Fail(ctx, work.ID, worker.workerID, "NO_ELIGIBLE_RECIPIENTS", now)
 	}
 	return worker.store.Publish(ctx, work.ID, worker.workerID, prepared, work.Partial, now)
+}
+
+func validReportContext(reports []ReportResult) bool {
+	if len(reports) == 0 {
+		return false
+	}
+	period := reports[0].Period
+	for _, result := range reports {
+		if result.RunID == uuid.Nil || result.Period != period || result.FinishedAt.IsZero() {
+			return false
+		}
+		if result.Dashboard != nil && (result.Dashboard.ReportKey != result.Key || result.Dashboard.Period != result.Period) {
+			return false
+		}
+	}
+	return true
 }
 
 func (worker *Worker) issueDeliveryReference() (string, []byte, error) {

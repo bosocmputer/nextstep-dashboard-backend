@@ -59,7 +59,62 @@ func BuildDashboard(key Key, period, comparisonPeriod Period, currentSteps, prev
 		visualizations = []DashboardVisualization{}
 	}
 	dashboard.Visualizations = visualizations
+	if !ComparisonSupported(key, period) {
+		SetComparisonUnavailable(&dashboard, ComparisonUnavailableReason(key, period))
+	}
 	return dashboard, nil
+}
+
+func ComparisonUnavailableReason(key Key, period Period) string {
+	if key == StockReorder {
+		return "COMPARISON_UNAVAILABLE_FOR_REPORT"
+	}
+	if period.Preset == TodayToNow {
+		return "COMPARISON_TIME_WINDOW_UNAVAILABLE"
+	}
+	return "COMPARISON_UNAVAILABLE_FOR_PERIOD"
+}
+
+// ComparisonSupported prevents unlike time windows and current-only reports
+// from being presented as historical comparisons.
+func ComparisonSupported(key Key, period Period) bool {
+	if _, ok := DefinitionFor(key); !ok || key == StockReorder || period.Preset == TodayToNow {
+		return false
+	}
+	if period.Preset == AsOfRun {
+		return key == StockBalance || key == ARCustomerMovement
+	}
+	return period.Preset == Yesterday || period.Preset == MonthToDate || period.Preset == Custom
+}
+
+// SetComparisonUnavailable removes every previous-period value from a
+// dashboard while preserving the current-period KPIs and visualizations.
+func SetComparisonUnavailable(dashboard *Dashboard, warning string) {
+	if dashboard == nil {
+		return
+	}
+	for index := range dashboard.KPIs {
+		dashboard.KPIs[index].Comparison = MetricComparison{Availability: ComparisonUnavailable}
+	}
+	for visualizationIndex := range dashboard.Visualizations {
+		series := dashboard.Visualizations[visualizationIndex].Series[:0]
+		for _, item := range dashboard.Visualizations[visualizationIndex].Series {
+			if item.Key != "previous" {
+				series = append(series, item)
+			}
+		}
+		dashboard.Visualizations[visualizationIndex].Series = series
+	}
+	if warning == "" {
+		return
+	}
+	dashboard.Quality.Status = "WARNING"
+	for _, existing := range dashboard.Quality.Warnings {
+		if existing == warning {
+			return
+		}
+	}
+	dashboard.Quality.Warnings = append(dashboard.Quality.Warnings, warning)
 }
 
 func buildDashboardMetrics(key Key, current, previous SummaryResult, currentSteps, previousSteps map[string][]map[string]string) ([]dashboardMetricInput, error) {

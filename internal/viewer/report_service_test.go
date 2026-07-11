@@ -24,15 +24,16 @@ func (fake *fakeReportAccess) CanAccessReport(context.Context, uuid.UUID, uuid.U
 }
 
 type fakeViewerRunStore struct {
-	enqueued         report.EnqueueInput
-	run              report.Run
-	rows             report.RowsPage
-	dashboard        report.Dashboard
-	latest           []DashboardSnapshot
-	refresh          DashboardRefresh
-	refreshInputs    []report.EnqueueInput
-	refreshRecipient uuid.UUID
-	cancelled        bool
+	enqueued           report.EnqueueInput
+	run                report.Run
+	rows               report.RowsPage
+	dashboard          report.Dashboard
+	latest             []DashboardSnapshot
+	refresh            DashboardRefresh
+	refreshInputs      []report.EnqueueInput
+	refreshRecipient   uuid.UUID
+	scheduledRecipient uuid.UUID
+	cancelled          bool
 }
 
 func (fake *fakeViewerRunStore) Enqueue(_ context.Context, input report.EnqueueInput, _ time.Time) (report.Run, error) {
@@ -48,6 +49,10 @@ func (fake *fakeViewerRunStore) Enqueue(_ context.Context, input report.EnqueueI
 
 func (fake *fakeViewerRunStore) Get(context.Context, uuid.UUID, time.Time) (report.Run, error) {
 	return fake.run, nil
+}
+
+func (fake *fakeViewerRunStore) CanAccessScheduledRun(_ context.Context, recipientID, runID uuid.UUID) (bool, error) {
+	return fake.run.ID == runID && fake.scheduledRecipient == recipientID, nil
 }
 
 func (fake *fakeViewerRunStore) ListRows(context.Context, uuid.UUID, int, int, time.Time) (report.RowsPage, error) {
@@ -152,6 +157,32 @@ func TestReportServiceBindsRunReadsAndCancellationToRequestingRecipient(t *testi
 	}
 	if _, err := service.GetDashboard(context.Background(), otherRecipient, tenantID, report.StockBalance, runID); !errors.Is(err, ErrReportForbidden) {
 		t.Fatalf("cross-recipient GetDashboard() error = %v", err)
+	}
+}
+
+func TestReportServiceAllowsPermissionCheckedScheduledSnapshot(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	recipientID, tenantID, runID := uuid.New(), uuid.New(), uuid.New()
+	store := &fakeViewerRunStore{
+		run:                report.Run{ID: runID, TenantID: tenantID, ReportKey: report.SalesGoodsServices, Source: report.SourceSchedule, Status: report.StatusSucceeded},
+		dashboard:          report.Dashboard{ReportKey: report.SalesGoodsServices, Version: "1.0.0"},
+		scheduledRecipient: recipientID,
+	}
+	service := NewReportService(&fakeReportAccess{allowed: true}, store, func() time.Time { return now })
+	if _, err := service.Get(context.Background(), recipientID, tenantID, report.SalesGoodsServices, runID); err != nil {
+		t.Fatalf("scheduled Get() error = %v", err)
+	}
+	if _, err := service.GetDashboard(context.Background(), recipientID, tenantID, report.SalesGoodsServices, runID); err != nil {
+		t.Fatalf("scheduled GetDashboard() error = %v", err)
+	}
+	if _, err := service.Get(context.Background(), recipientID, uuid.New(), report.SalesGoodsServices, runID); !errors.Is(err, ErrReportForbidden) {
+		t.Fatalf("cross-tenant scheduled Get() error = %v", err)
+	}
+	if _, err := service.Get(context.Background(), recipientID, tenantID, report.StockBalance, runID); !errors.Is(err, ErrReportForbidden) {
+		t.Fatalf("wrong-report scheduled Get() error = %v", err)
+	}
+	if _, err := service.Get(context.Background(), uuid.New(), tenantID, report.SalesGoodsServices, runID); !errors.Is(err, ErrReportForbidden) {
+		t.Fatalf("wrong-recipient scheduled Get() error = %v", err)
 	}
 }
 

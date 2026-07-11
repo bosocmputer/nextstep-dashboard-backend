@@ -188,6 +188,32 @@ func TestReportWorkerDoesNotPublishFullPriorDayAsTodayToNowComparison(t *testing
 	}
 }
 
+func TestReportWorkerDoesNotQueryHistoricalComparisonForCurrentOnlyReorder(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	store := &fakeRunStore{run: report.Run{
+		ID: uuid.New(), TenantID: uuid.New(), ReportKey: report.StockReorder,
+		Source: report.SourceDashboard, Status: report.StatusClaimed, Attempt: 1,
+		Period: report.Period{Preset: report.AsOfRun, DateFrom: "2026-07-10", DateTo: "2026-07-10"},
+	}}
+	queries := 0
+	worker := NewReportWorker(store, connectionProviderFunc(func(context.Context, uuid.UUID) (sml.Connection, error) {
+		return sml.Connection{}, nil
+	}), queryClientFunc(func(context.Context, sml.Connection, string) ([]map[string]string, error) {
+		queries++
+		return []map[string]string{{"ic_code": "I1", "ic_name": "สินค้า 1", "balance_qty": "2", "purchase_point": "5"}}, nil
+	}), "worker-a", func() time.Time { return now })
+
+	if err := worker.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("ProcessOne() error = %v", err)
+	}
+	if store.completed == nil || store.completed.Dashboard == nil || queries != 1 {
+		t.Fatalf("completed=%+v queries=%d", store.completed, queries)
+	}
+	if got := store.completed.Dashboard.KPIs[0].Comparison.Availability; got != report.ComparisonUnavailable {
+		t.Fatalf("comparison availability = %s", got)
+	}
+}
+
 func TestReportWorkerFailsMalformedOutputAndSurfacesEmptyQueue(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	store := &fakeRunStore{run: report.Run{

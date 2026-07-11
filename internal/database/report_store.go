@@ -600,6 +600,25 @@ func (store *ReportStore) Get(ctx context.Context, runID uuid.UUID, now time.Tim
 	return run, nil
 }
 
+// CanAccessScheduledRun binds a scheduled snapshot to the LINE recipient that
+// received the notification containing its deep link. Tenant/report permission
+// checks remain in the viewer service and are intentionally evaluated as well.
+func (store *ReportStore) CanAccessScheduledRun(ctx context.Context, recipientID, runID uuid.UUID) (bool, error) {
+	var allowed bool
+	if err := store.pool.QueryRow(ctx, `
+		select exists (
+		  select 1
+		  from notification_run_reports linked
+		  join line_deliveries delivery
+		    on delivery.notification_run_id = linked.notification_run_id
+		   and delivery.recipient_id = $2
+		  where linked.report_run_id = $1
+		)`, runID, recipientID).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("check scheduled report recipient: %w", err)
+	}
+	return allowed, nil
+}
+
 func (store *ReportStore) ListRows(ctx context.Context, runID uuid.UUID, afterOrdinal, pageSize int, now time.Time) (report.RowsPage, error) {
 	if pageSize < 1 || pageSize > 100 || afterOrdinal < 0 {
 		return report.RowsPage{}, errors.New("invalid report row cursor")

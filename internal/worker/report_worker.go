@@ -115,9 +115,7 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	}
 	comparisonRows := emptyReportSteps(run.ReportKey)
 	comparisonWarning := ""
-	if run.Period.Preset == report.TodayToNow {
-		comparisonWarning = "COMPARISON_TIME_WINDOW_UNAVAILABLE"
-	} else {
+	if report.ComparisonSupported(run.ReportKey, run.Period) {
 		comparisonPlan, planErr := report.BuildQueryPlan(run.ReportKey, comparisonPeriod)
 		if planErr != nil {
 			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
@@ -134,20 +132,7 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
 	}
 	if comparisonWarning != "" {
-		dashboard.Quality.Status = "WARNING"
-		dashboard.Quality.Warnings = append(dashboard.Quality.Warnings, comparisonWarning)
-		for index := range dashboard.KPIs {
-			dashboard.KPIs[index].Comparison = report.MetricComparison{Availability: report.ComparisonUnavailable}
-		}
-		for visualizationIndex := range dashboard.Visualizations {
-			series := dashboard.Visualizations[visualizationIndex].Series[:0]
-			for _, item := range dashboard.Visualizations[visualizationIndex].Series {
-				if item.Key != "previous" {
-					series = append(series, item)
-				}
-			}
-			dashboard.Visualizations[visualizationIndex].Series = series
-		}
+		report.SetComparisonUnavailable(&dashboard, comparisonWarning)
 	}
 	summary.Dashboard = &dashboard
 	return summary, nil

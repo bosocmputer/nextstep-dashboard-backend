@@ -91,7 +91,11 @@ func TestBuildDashboardCoversEveryApprovedReport(t *testing.T) {
 				if metric.Key == "" || metric.Label == "" || metric.Unit == "" || metric.Value == "" {
 					t.Fatalf("invalid KPI = %+v", metric)
 				}
-				if metric.Comparison.Availability != ComparisonAvailable || metric.Comparison.PreviousValue == "" {
+				if key == StockReorder {
+					if metric.Comparison.Availability != ComparisonUnavailable || metric.Comparison.PreviousValue != "" {
+						t.Fatalf("unsupported comparison leaked for KPI = %+v", metric)
+					}
+				} else if metric.Comparison.Availability != ComparisonAvailable || metric.Comparison.PreviousValue == "" {
 					t.Fatalf("comparison missing for KPI = %+v", metric)
 				}
 			}
@@ -112,6 +116,72 @@ func TestBuildDashboardCoversEveryApprovedReport(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestComparisonSupportedUsesOnlyComparablePeriods(t *testing.T) {
+	tests := []struct {
+		name   string
+		key    Key
+		preset Preset
+		want   bool
+	}{
+		{name: "yesterday sales", key: SalesGoodsServices, preset: Yesterday, want: true},
+		{name: "month to date profit", key: GrossProfitByProduct, preset: MonthToDate, want: true},
+		{name: "custom cash", key: CashBankReceipts, preset: Custom, want: true},
+		{name: "today partial period", key: SalesGoodsServices, preset: TodayToNow, want: false},
+		{name: "as of stock balance", key: StockBalance, preset: AsOfRun, want: true},
+		{name: "as of receivable movement", key: ARCustomerMovement, preset: AsOfRun, want: true},
+		{name: "as of date range report", key: SalesGoodsServices, preset: AsOfRun, want: false},
+		{name: "reorder has no historical date", key: StockReorder, preset: Yesterday, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ComparisonSupported(test.key, Period{Preset: test.preset}); got != test.want {
+				t.Fatalf("ComparisonSupported(%s, %s) = %v, want %v", test.key, test.preset, got, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildDashboardRemovesUnsupportedComparisonFromMetricsAndCharts(t *testing.T) {
+	current, previous := dashboardFixture(SalesGoodsServices)
+	dashboard, err := BuildDashboard(
+		SalesGoodsServices,
+		Period{Preset: TodayToNow, DateFrom: "2026-07-10", DateTo: "2026-07-10"},
+		Period{Preset: Custom, DateFrom: "2026-07-09", DateTo: "2026-07-09"},
+		current,
+		previous,
+	)
+	if err != nil {
+		t.Fatalf("BuildDashboard() error = %v", err)
+	}
+	for _, metric := range dashboard.KPIs {
+		if metric.Comparison.Availability != ComparisonUnavailable || metric.Comparison.PreviousValue != "" || metric.Comparison.Delta != "" || metric.Comparison.Percent != "" || metric.Comparison.Direction != "" {
+			t.Fatalf("unsupported comparison leaked through KPI = %+v", metric)
+		}
+	}
+	for _, visualization := range dashboard.Visualizations {
+		for _, series := range visualization.Series {
+			if series.Key == "previous" {
+				t.Fatalf("unsupported comparison leaked through visualization = %+v", visualization)
+			}
+		}
+	}
+}
+
+func TestSetComparisonUnavailableClearsFailedComparison(t *testing.T) {
+	dashboard := Dashboard{
+		KPIs:           []DashboardMetric{{Comparison: MetricComparison{Availability: ComparisonAvailable, PreviousValue: "10.00", Delta: "5.00", Percent: "50.00", Direction: DirectionUp}}},
+		Visualizations: []DashboardVisualization{{Series: []VisualizationSeries{{Key: "current"}, {Key: "previous"}}}},
+		Quality:        DashboardQuality{Status: "OK", Warnings: []string{}},
+	}
+	SetComparisonUnavailable(&dashboard, "COMPARISON_QUERY_FAILED")
+	if dashboard.KPIs[0].Comparison.Availability != ComparisonUnavailable || dashboard.KPIs[0].Comparison.PreviousValue != "" || len(dashboard.Visualizations[0].Series) != 1 {
+		t.Fatalf("comparison was not cleared = %+v", dashboard)
+	}
+	if dashboard.Quality.Status != "WARNING" || len(dashboard.Quality.Warnings) != 1 || dashboard.Quality.Warnings[0] != "COMPARISON_QUERY_FAILED" {
+		t.Fatalf("quality warning missing = %+v", dashboard.Quality)
 	}
 }
 

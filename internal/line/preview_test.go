@@ -48,11 +48,15 @@ func TestFlexPreviewUsesTenantTimezoneAndExactRenderedMessage(t *testing.T) {
 		if len(item.Metrics) != 2 {
 			t.Fatalf("report %s metrics=%d", item.Key, len(item.Metrics))
 		}
-		for _, metric := range item.Metrics {
-			if !strings.Contains(string(preview.Message), metric.Label) || !strings.Contains(string(preview.Message), metric.Value) {
-				t.Fatalf("rendered message does not contain metric %+v", metric)
-			}
+		if item.Primary.Label == "" || item.Primary.Value == "" || item.CategoryLabel == "" || item.ActionURL == "" {
+			t.Fatalf("executive preview fields missing = %+v", item)
 		}
+		if !strings.Contains(string(preview.Message), item.Primary.Label) || !strings.Contains(string(preview.Message), item.Primary.Value) {
+			t.Fatalf("rendered message does not contain executive metric %+v", item.Primary)
+		}
+	}
+	if !strings.Contains(string(preview.Message), "เวลาไทย") || strings.Contains(string(preview.Message), "UTC") || !strings.Contains(preview.ActionURL, "/app/tenant/"+tenantID.String()) {
+		t.Fatalf("preview timezone/action mismatch: %+v message=%s", preview, preview.Message)
 	}
 	var message struct {
 		Type    string `json:"type"`

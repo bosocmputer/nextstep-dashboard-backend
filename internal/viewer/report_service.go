@@ -22,6 +22,7 @@ type ReportAccessControl interface {
 type ViewerRunStore interface {
 	Enqueue(context.Context, report.EnqueueInput, time.Time) (report.Run, error)
 	Get(context.Context, uuid.UUID, time.Time) (report.Run, error)
+	CanAccessScheduledRun(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	GetDashboard(context.Context, uuid.UUID, uuid.UUID) (report.Dashboard, error)
 	ListLatestDashboards(context.Context, uuid.UUID, []report.Key) ([]DashboardSnapshot, error)
 	CreateDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, string, []report.EnqueueInput, time.Time) (DashboardRefresh, error)
@@ -92,7 +93,18 @@ func (service *ReportService) Get(ctx context.Context, recipientID, tenantID uui
 	if err != nil {
 		return report.Run{}, err
 	}
-	if !runOwnedBy(run, recipientID, tenantID, reportKey) {
+	if !runMatchesRoute(run, tenantID, reportKey) {
+		return report.Run{}, ErrReportForbidden
+	}
+	if run.Source == report.SourceSchedule {
+		allowed, accessErr := service.store.CanAccessScheduledRun(ctx, recipientID, runID)
+		if accessErr != nil {
+			return report.Run{}, accessErr
+		}
+		if !allowed {
+			return report.Run{}, ErrReportForbidden
+		}
+	} else if run.Source != report.SourceDashboard || run.RequestedByRecipient == nil || *run.RequestedByRecipient != recipientID {
 		return report.Run{}, ErrReportForbidden
 	}
 	return run, nil
@@ -213,8 +225,12 @@ func (service *ReportService) GetDashboardRefresh(ctx context.Context, recipient
 }
 
 func (service *ReportService) Cancel(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID) (report.Run, error) {
-	if _, err := service.Get(ctx, recipientID, tenantID, reportKey, runID); err != nil {
+	run, err := service.Get(ctx, recipientID, tenantID, reportKey, runID)
+	if err != nil {
 		return report.Run{}, err
+	}
+	if run.Source != report.SourceDashboard || run.RequestedByRecipient == nil || *run.RequestedByRecipient != recipientID {
+		return report.Run{}, ErrReportForbidden
 	}
 	return service.store.Cancel(ctx, runID, service.now().UTC())
 }
@@ -256,9 +272,8 @@ func (service *ReportService) authorizeReport(ctx context.Context, recipientID, 
 	return nil
 }
 
-func runOwnedBy(run report.Run, recipientID, tenantID uuid.UUID, reportKey report.Key) bool {
-	return run.Source == report.SourceDashboard && run.TenantID == tenantID && run.ReportKey == reportKey &&
-		run.RequestedByRecipient != nil && *run.RequestedByRecipient == recipientID
+func runMatchesRoute(run report.Run, tenantID uuid.UUID, reportKey report.Key) bool {
+	return run.TenantID == tenantID && run.ReportKey == reportKey
 }
 
 func encodeReportCursor(ordinal int) string {

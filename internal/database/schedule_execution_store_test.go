@@ -175,6 +175,17 @@ func TestMaterializeDueScheduleIsAtomicAndSingleClaim(t *testing.T) {
 	if deliveryCount != 1 || outboxCount != 1 || linkCount != 1 || deliveredRecipientID != secondRecipientID {
 		t.Fatalf("deliveryCount=%d outboxCount=%d linkCount=%d recipient=%s", deliveryCount, outboxCount, linkCount, deliveredRecipientID)
 	}
+	reportStore := NewReportStore(pool)
+	for _, reportRunID := range execution.ReportRunIDs {
+		allowed, accessErr := reportStore.CanAccessScheduledRun(ctx, secondRecipientID, reportRunID)
+		if accessErr != nil || !allowed {
+			t.Fatalf("delivered recipient scheduled access = %v, %v", allowed, accessErr)
+		}
+		allowed, accessErr = reportStore.CanAccessScheduledRun(ctx, recipientID, reportRunID)
+		if accessErr != nil || allowed {
+			t.Fatalf("excluded recipient scheduled access = %v, %v", allowed, accessErr)
+		}
+	}
 	deliveryStore := NewDeliveryStore(pool)
 	deliveryWork, err := deliveryStore.Claim(ctx, "delivery-a", time.Minute, now.Add(8*time.Second))
 	if err != nil || deliveryWork.RetryKey == uuid.Nil || deliveryWork.Attempt != 1 || !deliveryWork.TenantActive {
