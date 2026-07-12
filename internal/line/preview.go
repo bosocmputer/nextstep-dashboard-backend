@@ -50,6 +50,7 @@ type FlexPreview struct {
 	TenantName          string              `json:"tenantName"`
 	Period              report.Period       `json:"period"`
 	PeriodLabel         string              `json:"periodLabel"`
+	ContextNote         string              `json:"contextNote,omitempty"`
 	GeneratedAt         time.Time           `json:"generatedAt"`
 	ActionURL           string              `json:"actionUrl"`
 	Reports             []FlexPreviewReport `json:"reports"`
@@ -131,7 +132,7 @@ func (service *FlexPreviewService) Preview(ctx context.Context, tenantID uuid.UU
 	return FlexPreview{
 		PresentationVersion: rendered.PresentationVersion,
 		AltText:             flexAltText(item.Name, period, len(reports)), TenantName: item.Name, Period: period, PeriodLabel: periodLabel(period),
-		GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: reports, PayloadBytes: rendered.PayloadBytes, Message: rendered.Message,
+		ContextNote: flexContextNote(period), GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: reports, PayloadBytes: rendered.PayloadBytes, Message: rendered.Message,
 	}, nil
 }
 

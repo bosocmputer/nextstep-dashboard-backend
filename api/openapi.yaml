@@ -1086,6 +1086,7 @@ components:
             dateFrom: {type: string, format: date}
             dateTo: {type: string, format: date}
         periodLabel: {type: string}
+        contextNote: {type: string, description: Optional executive context explaining an expected presentation limitation such as unavailable equal-time comparison.}
         generatedAt: {type: string, format: date-time}
         actionUrl: {type: string, format: uri}
         reports: {type: array, minItems: 1, maxItems: 10, items: {$ref: '#/components/schemas/FlexPreviewReport'}}

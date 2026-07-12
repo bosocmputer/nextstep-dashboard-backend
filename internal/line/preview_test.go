@@ -70,6 +70,25 @@ func TestFlexPreviewUsesTenantTimezoneAndExactRenderedMessage(t *testing.T) {
 	}
 }
 
+func TestFlexPreviewExposesTodayToNowContextUsedByRawMessage(t *testing.T) {
+	tenantID := uuid.New()
+	baseURL, _ := url.Parse("https://dashboard.nextstep-soft.com")
+	service := NewFlexPreviewService(previewTenantReader{item: tenant.Tenant{
+		ID: tenantID, Name: "ร้านตัวอย่าง", Timezone: "Asia/Bangkok",
+	}}, baseURL, func() time.Time { return time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC) })
+
+	preview, err := service.Preview(context.Background(), tenantID, FlexPreviewInput{
+		PeriodPreset: report.TodayToNow,
+		ReportKeys:   []report.Key{report.SalesGoodsServices},
+	})
+	if err != nil {
+		t.Fatalf("Preview() error = %v", err)
+	}
+	if preview.ContextNote != "วันนี้ยังไม่มีช่วงเวลาเปรียบเทียบที่เท่ากัน" || !strings.Contains(string(preview.Message), preview.ContextNote) {
+		t.Fatalf("structured/raw context mismatch: note=%q message=%s", preview.ContextNote, preview.Message)
+	}
+}
+
 func TestFlexPreviewRejectsInvalidReportsBeforeTenantLookup(t *testing.T) {
 	baseURL, _ := url.Parse("https://dashboard.nextstep-soft.com")
 	service := NewFlexPreviewService(previewTenantReader{err: errors.New("must not be called")}, baseURL, time.Now)

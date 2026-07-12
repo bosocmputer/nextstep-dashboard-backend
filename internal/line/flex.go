@@ -113,8 +113,8 @@ func RenderFlexWithStats(input FlexInput) (result FlexRenderResult, err error) {
 		flexText(periodLabel(input.Period), "sm", flexMutedColor, false, true, "sm"),
 		flexText(runeCountLabel(len(presentations)), "xs", "#94A3B8", false, true, "xs"),
 	}
-	if input.Period.Preset == report.TodayToNow {
-		bodyContents = append(bodyContents, flexText("วันนี้ยังไม่มีช่วงเวลาเปรียบเทียบที่เท่ากัน", "xs", flexMutedColor, false, true, "sm"))
+	if note := flexContextNote(input.Period); note != "" {
+		bodyContents = append(bodyContents, flexText(note, "xs", flexMutedColor, false, true, "sm"))
 	}
 	lastCategory := ""
 	for _, item := range presentations {
@@ -279,4 +279,11 @@ func flexAltText(tenantName string, period report.Period, reportCount int) strin
 	}
 	runes := []rune(text)
 	return string(runes[:397]) + "..."
+}
+
+func flexContextNote(period report.Period) string {
+	if period.Preset == report.TodayToNow {
+		return "วันนี้ยังไม่มีช่วงเวลาเปรียบเทียบที่เท่ากัน"
+	}
+	return ""
 }
