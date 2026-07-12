@@ -1065,12 +1065,15 @@ components:
         supporting: {type: array, maxItems: 2, items: {$ref: '#/components/schemas/FlexPreviewMetric'}}
         comparison: {$ref: '#/components/schemas/FlexPreviewComparison'}
         attention: {$ref: '#/components/schemas/FlexPreviewAttention'}
+        dataState: {type: string, enum: [DATA, ZERO], description: Optional presentation state; absent for legacy preview producers.}
+        stateText: {type: string, description: Backend-approved Thai state text when dataState is ZERO.}
         actionUrl: {type: string, format: uri}
     FlexPreview:
       type: object
       additionalProperties: false
       required: [altText, tenantName, period, periodLabel, generatedAt, actionUrl, reports, payloadBytes, message]
       properties:
+        presentationVersion: {type: string, description: Optional renderer presentation contract version; absent for legacy preview producers.}
         altText: {type: string}
         tenantName: {type: string}
         period:

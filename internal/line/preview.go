@@ -39,19 +39,22 @@ type FlexPreviewReport struct {
 	Supporting    []FlexMetricPresentation    `json:"supporting"`
 	Comparison    *FlexComparisonPresentation `json:"comparison,omitempty"`
 	Attention     *FlexAttentionPresentation  `json:"attention,omitempty"`
+	DataState     FlexDataState               `json:"dataState,omitempty"`
+	StateText     string                      `json:"stateText,omitempty"`
 	ActionURL     string                      `json:"actionUrl"`
 }
 
 type FlexPreview struct {
-	AltText      string              `json:"altText"`
-	TenantName   string              `json:"tenantName"`
-	Period       report.Period       `json:"period"`
-	PeriodLabel  string              `json:"periodLabel"`
-	GeneratedAt  time.Time           `json:"generatedAt"`
-	ActionURL    string              `json:"actionUrl"`
-	Reports      []FlexPreviewReport `json:"reports"`
-	PayloadBytes int                 `json:"payloadBytes"`
-	Message      json.RawMessage     `json:"message"`
+	PresentationVersion string              `json:"presentationVersion,omitempty"`
+	AltText             string              `json:"altText"`
+	TenantName          string              `json:"tenantName"`
+	Period              report.Period       `json:"period"`
+	PeriodLabel         string              `json:"periodLabel"`
+	GeneratedAt         time.Time           `json:"generatedAt"`
+	ActionURL           string              `json:"actionUrl"`
+	Reports             []FlexPreviewReport `json:"reports"`
+	PayloadBytes        int                 `json:"payloadBytes"`
+	Message             json.RawMessage     `json:"message"`
 }
 
 type FlexPreviewTenantReader interface {
@@ -115,19 +118,20 @@ func (service *FlexPreviewService) Preview(ctx context.Context, tenantID uuid.UU
 		reports = append(reports, FlexPreviewReport{
 			Key: key, Label: definition.LabelTH, CategoryLabel: presentation.CategoryLabel, Metrics: metrics,
 			Primary: presentation.Primary, Supporting: presentation.Supporting, Comparison: presentation.Comparison,
-			Attention: presentation.Attention, ActionURL: presentation.ActionURL,
+			Attention: presentation.Attention, DataState: presentation.DataState, StateText: presentation.StateText, ActionURL: presentation.ActionURL,
 		})
 		renderReports = append(renderReports, renderReport)
 	}
-	message, err := RenderFlex(FlexInput{
+	rendered, err := RenderFlexWithStats(FlexInput{
 		TenantName: item.Name, Timezone: item.Timezone, Period: period, GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: renderReports,
 	})
 	if err != nil {
 		return FlexPreview{}, err
 	}
 	return FlexPreview{
-		AltText: flexAltText(item.Name, period, len(reports)), TenantName: item.Name, Period: period, PeriodLabel: periodLabel(period),
-		GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: reports, PayloadBytes: len(message), Message: message,
+		PresentationVersion: rendered.PresentationVersion,
+		AltText:             flexAltText(item.Name, period, len(reports)), TenantName: item.Name, Period: period, PeriodLabel: periodLabel(period),
+		GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: reports, PayloadBytes: rendered.PayloadBytes, Message: rendered.Message,
 	}, nil
 }
 

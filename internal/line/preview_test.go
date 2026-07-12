@@ -44,6 +44,9 @@ func TestFlexPreviewUsesTenantTimezoneAndExactRenderedMessage(t *testing.T) {
 	if preview.PayloadBytes != len(preview.Message) || preview.PayloadBytes == 0 || len(preview.Reports) != 2 {
 		t.Fatalf("payloadBytes=%d message=%d reports=%d", preview.PayloadBytes, len(preview.Message), len(preview.Reports))
 	}
+	if preview.PresentationVersion != FlexPresentationVersion {
+		t.Fatalf("presentationVersion=%q", preview.PresentationVersion)
+	}
 	for _, item := range preview.Reports {
 		if len(item.Metrics) != 2 {
 			t.Fatalf("report %s metrics=%d", item.Key, len(item.Metrics))

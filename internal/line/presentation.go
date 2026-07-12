@@ -30,6 +30,13 @@ type FlexAttentionPresentation struct {
 	Text     string                `json:"text"`
 }
 
+type FlexDataState string
+
+const (
+	FlexDataData FlexDataState = "DATA"
+	FlexDataZero FlexDataState = "ZERO"
+)
+
 type FlexReportPresentation struct {
 	Key           report.Key                  `json:"key"`
 	Label         string                      `json:"label"`
@@ -38,25 +45,28 @@ type FlexReportPresentation struct {
 	Supporting    []FlexMetricPresentation    `json:"supporting"`
 	Comparison    *FlexComparisonPresentation `json:"comparison,omitempty"`
 	Attention     *FlexAttentionPresentation  `json:"attention,omitempty"`
+	DataState     FlexDataState               `json:"dataState"`
+	StateText     string                      `json:"stateText,omitempty"`
 	ActionURL     string                      `json:"actionUrl"`
 }
 
 type flexPresentationDefinition struct {
 	primary    string
 	supporting []string
+	zeroText   string
 }
 
 var flexPresentationDefinitions = map[report.Key]flexPresentationDefinition{
-	report.SalesGoodsServices:      {primary: "total_amount", supporting: []string{"document_count", "average_per_document"}},
-	report.PurchaseGoodsPayables:   {primary: "total_amount", supporting: []string{"document_count", "average_per_document"}},
-	report.GrossProfitByProduct:    {primary: "gross_profit_amount", supporting: []string{"gross_margin_percent", "net_amount"}},
-	report.GrossProfitByARCustomer: {primary: "gross_profit_amount", supporting: []string{"gross_margin_percent", "net_amount"}},
-	report.StockBalance:            {primary: "balance_amount", supporting: []string{"item_count"}},
-	report.StockReorder:            {primary: "reorder_item_count", supporting: []string{"shortage_qty"}},
-	report.ARCustomerMovement:      {primary: "net_movement_amount", supporting: []string{"customer_count"}},
-	report.ARDebtReceipt:           {primary: "total_received_amount", supporting: []string{"receipt_count", "average_per_receipt"}},
-	report.CashBankReceipts:        {primary: "total_amount", supporting: []string{"document_count", "average_per_document"}},
-	report.CashBankPayments:        {primary: "total_amount", supporting: []string{"document_count", "average_per_document"}},
+	report.SalesGoodsServices:      {primary: "total_amount", supporting: []string{"document_count", "average_per_document"}, zeroText: "ไม่มีรายการขายในช่วงนี้"},
+	report.PurchaseGoodsPayables:   {primary: "total_amount", supporting: []string{"document_count", "average_per_document"}, zeroText: "ไม่มีรายการซื้อในช่วงนี้"},
+	report.GrossProfitByProduct:    {primary: "gross_profit_amount", supporting: []string{"gross_margin_percent", "net_amount"}, zeroText: "ไม่มีรายการขายสำหรับคำนวณกำไร"},
+	report.GrossProfitByARCustomer: {primary: "gross_profit_amount", supporting: []string{"gross_margin_percent", "net_amount"}, zeroText: "ไม่มีรายการขายสำหรับคำนวณกำไร"},
+	report.StockBalance:            {primary: "balance_amount", supporting: []string{"item_count"}, zeroText: "ไม่พบสินค้าคงเหลือ"},
+	report.StockReorder:            {primary: "reorder_item_count", supporting: []string{"shortage_qty"}, zeroText: "ไม่มีสินค้าต่ำกว่าจุดสั่งซื้อ"},
+	report.ARCustomerMovement:      {primary: "net_movement_amount", supporting: []string{"customer_count"}, zeroText: "ไม่มีความเคลื่อนไหวลูกหนี้"},
+	report.ARDebtReceipt:           {primary: "total_received_amount", supporting: []string{"receipt_count", "average_per_receipt"}, zeroText: "ไม่มีรายการรับชำระหนี้"},
+	report.CashBankReceipts:        {primary: "total_amount", supporting: []string{"document_count", "average_per_document"}, zeroText: "ไม่มีรายการรับเงิน"},
+	report.CashBankPayments:        {primary: "total_amount", supporting: []string{"document_count", "average_per_document"}, zeroText: "ไม่มีรายการจ่ายเงิน"},
 }
 
 func BuildFlexReportPresentation(input FlexReport) (FlexReportPresentation, error) {
@@ -67,7 +77,7 @@ func BuildFlexReportPresentation(input FlexReport) (FlexReportPresentation, erro
 	}
 	presentation := FlexReportPresentation{
 		Key: input.Key, Label: definition.LabelTH, CategoryLabel: definition.CategoryLabelTH,
-		Supporting: []FlexMetricPresentation{}, ActionURL: input.ActionURL,
+		Supporting: []FlexMetricPresentation{}, DataState: FlexDataData, ActionURL: input.ActionURL,
 	}
 
 	if input.Dashboard == nil {
@@ -127,7 +137,48 @@ func BuildFlexReportPresentation(input FlexReport) (FlexReportPresentation, erro
 		presentation.Supporting = append(presentation.Supporting, formatted)
 	}
 	presentation.Attention = attentionFor(input.Key, metrics, input.Dashboard.Visualizations, input.Dashboard.Quality)
+	if trustedZeroDashboard(input.Dashboard, presentationDefinition, metrics) {
+		presentation.DataState = FlexDataZero
+		presentation.StateText = presentationDefinition.zeroText
+		if !comparisonHasChange(primary.Comparison) {
+			presentation.Comparison = nil
+		}
+	}
 	return presentation, nil
+}
+
+func trustedZeroDashboard(dashboard *report.Dashboard, definition flexPresentationDefinition, metrics map[string]report.DashboardMetric) bool {
+	if dashboard == nil || dashboard.Quality.Status != "OK" || len(dashboard.Quality.Warnings) != 0 {
+		return false
+	}
+	keys := append([]string{definition.primary}, definition.supporting...)
+	for _, key := range keys {
+		metric, exists := metrics[key]
+		if !exists {
+			return false
+		}
+		number, valid := new(big.Rat).SetString(normalizeNumber(metric.Value))
+		if !valid || number.Sign() != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func comparisonHasChange(comparison report.MetricComparison) bool {
+	if comparison.Availability != report.ComparisonAvailable {
+		return false
+	}
+	for _, value := range []string{comparison.Percent, comparison.Delta} {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		number, valid := new(big.Rat).SetString(normalizeNumber(value))
+		if valid && number.Sign() != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func legacyMetric(definition report.Definition, key string, metrics map[string]string) (report.DashboardMetric, bool) {

@@ -82,7 +82,7 @@ func TestWorkerPublishesOneCompleteCardPerRecipient(t *testing.T) {
 		t.Fatalf("published = %+v partial=%v", store.published, store.partial)
 	}
 	payload := string(store.published[0].Payload)
-	if !strings.Contains(payload, "รายงานสต็อกคงเหลือ") || !strings.Contains(payload, "ยอดขาย") || !strings.Contains(payload, "deliveryRef") || !strings.Contains(payload, salesRunID.String()) || !strings.Contains(payload, "/app/tenant/"+tenantID.String()) || !strings.Contains(payload, "15:00 เวลาไทย") || strings.Contains(payload, "UTC") {
+	if !strings.Contains(payload, "รายงานสต็อกคงเหลือ") || !strings.Contains(payload, "ยอดขาย") || !strings.Contains(payload, "deliveryRef") || !strings.Contains(payload, salesRunID.String()) || !strings.Contains(payload, "/app/tenant/"+tenantID.String()) || !strings.Contains(payload, "10 ก.ค. 2569 · 15:00 น. เวลาไทย") || strings.Contains(payload, "UTC") {
 		t.Fatalf("complete card rendering failed: %s", payload)
 	}
 	var decoded map[string]any

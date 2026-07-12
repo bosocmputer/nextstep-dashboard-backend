@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -62,8 +63,25 @@ func main() {
 		os.Exit(1)
 	}
 	notificationID := workerID + "-notification"
+	observedFlexRenderer := func(input line.FlexInput) (json.RawMessage, error) {
+		result, renderErr := line.RenderFlexWithStats(input)
+		if renderErr != nil {
+			logger.Warn("flex render failed",
+				"event", "flex_rendered", "presentationVersion", line.FlexPresentationVersion, "result", "ERROR",
+				"safeErrorCode", "FLEX_RENDER_FAILED", "reportCount", len(input.Reports),
+				"flexRenderTotal", 1, "flexRenderDurationMs", float64(result.Duration.Microseconds())/1000,
+			)
+			return nil, renderErr
+		}
+		logger.Info("flex render completed",
+			"event", "flex_rendered", "presentationVersion", result.PresentationVersion, "result", "SUCCESS",
+			"reportCount", result.ReportCount, "flexRenderTotal", 1, "flexPayloadBytes", result.PayloadBytes,
+			"flexZeroReportCount", result.ZeroReportCount, "flexRenderDurationMs", float64(result.Duration.Microseconds())/1000,
+		)
+		return result.Message, nil
+	}
 	notificationWorker := notification.NewWorker(
-		database.NewNotificationStore(pool), line.RenderFlex, sessionManager, rand.Reader,
+		database.NewNotificationStore(pool), observedFlexRenderer, sessionManager, rand.Reader,
 		cfg.PublicBaseURL, notificationID, time.Now,
 	)
 	recipientService := recipient.NewService(database.NewRecipientStore(pool), box, sessionManager, rand.Reader, cfg.PublicBaseURL.String(), time.Now)
@@ -85,7 +103,7 @@ func main() {
 	logger.Info("report worker started", "workerId", workerID, "concurrency", cfg.ReportWorkerConcurrency)
 	go heartbeatLoop(ctx, logger, pool, workerID, "REPORT", hostname, map[string]any{"concurrency": cfg.ReportWorkerConcurrency})
 	go heartbeatLoop(ctx, logger, pool, schedulerID, "SCHEDULER", hostname, map[string]any{"concurrency": 1})
-	go heartbeatLoop(ctx, logger, pool, notificationID, "DELIVERY", hostname, map[string]any{"stage": "prepare"})
+	go heartbeatLoop(ctx, logger, pool, notificationID, "DELIVERY", hostname, map[string]any{"stage": "prepare", "presentationVersion": line.FlexPresentationVersion})
 	go heartbeatLoop(ctx, logger, pool, deliveryID, "DELIVERY", hostname, map[string]any{"stage": "send", "concurrency": cfg.DeliveryWorkerConcurrency})
 	go heartbeatLoop(ctx, logger, pool, retentionID, "RETENTION", hostname, map[string]any{"snapshotDays": 90, "historyDays": 365})
 	go dueScheduleLoop(ctx, logger, dueWorker)

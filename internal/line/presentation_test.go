@@ -8,6 +8,112 @@ import (
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 )
 
+func TestBuildFlexReportPresentationCompactsTrustedZeroDataForEveryReport(t *testing.T) {
+	wantText := map[report.Key]string{
+		report.SalesGoodsServices:      "ไม่มีรายการขายในช่วงนี้",
+		report.PurchaseGoodsPayables:   "ไม่มีรายการซื้อในช่วงนี้",
+		report.GrossProfitByProduct:    "ไม่มีรายการขายสำหรับคำนวณกำไร",
+		report.GrossProfitByARCustomer: "ไม่มีรายการขายสำหรับคำนวณกำไร",
+		report.StockBalance:            "ไม่พบสินค้าคงเหลือ",
+		report.StockReorder:            "ไม่มีสินค้าต่ำกว่าจุดสั่งซื้อ",
+		report.ARCustomerMovement:      "ไม่มีความเคลื่อนไหวลูกหนี้",
+		report.ARDebtReceipt:           "ไม่มีรายการรับชำระหนี้",
+		report.CashBankReceipts:        "ไม่มีรายการรับเงิน",
+		report.CashBankPayments:        "ไม่มีรายการจ่ายเงิน",
+	}
+	for _, key := range report.Keys() {
+		dashboard := previewDashboard(key, report.Period{Preset: report.Yesterday, DateFrom: "2026-07-12", DateTo: "2026-07-12"})
+		for index := range dashboard.KPIs {
+			dashboard.KPIs[index].Value = []string{"0", "0.00", "-0.00"}[index%3]
+		}
+		presentation, err := BuildFlexReportPresentation(FlexReport{Key: key, Dashboard: &dashboard, ActionURL: "https://dashboard.nextstep-soft.com/app"})
+		if err != nil {
+			t.Fatalf("%s: BuildFlexReportPresentation() error = %v", key, err)
+		}
+		if presentation.DataState != FlexDataZero || presentation.StateText != wantText[key] {
+			t.Errorf("%s: state=%q text=%q", key, presentation.DataState, presentation.StateText)
+		}
+	}
+}
+
+func TestBuildFlexReportPresentationDoesNotHideUntrustedOrNonzeroData(t *testing.T) {
+	period := report.Period{Preset: report.Yesterday, DateFrom: "2026-07-12", DateTo: "2026-07-12"}
+	for _, test := range []struct {
+		name      string
+		dashboard *report.Dashboard
+	}{
+		{name: "legacy", dashboard: nil},
+		{name: "partial quality", dashboard: func() *report.Dashboard {
+			item := previewDashboard(report.SalesGoodsServices, period)
+			item.Quality.Status = "PARTIAL"
+			for i := range item.KPIs {
+				item.KPIs[i].Value = "0"
+			}
+			return &item
+		}()},
+		{name: "quality warning", dashboard: func() *report.Dashboard {
+			item := previewDashboard(report.SalesGoodsServices, period)
+			item.Quality.Warnings = []string{"COMPARISON_QUERY_FAILED"}
+			for i := range item.KPIs {
+				item.KPIs[i].Value = "0"
+			}
+			return &item
+		}()},
+		{name: "supporting nonzero", dashboard: func() *report.Dashboard {
+			item := previewDashboard(report.SalesGoodsServices, period)
+			for i := range item.KPIs {
+				item.KPIs[i].Value = "0"
+			}
+			item.KPIs[1].Value = "1"
+			return &item
+		}()},
+		{name: "negative", dashboard: func() *report.Dashboard {
+			item := previewDashboard(report.SalesGoodsServices, period)
+			for i := range item.KPIs {
+				item.KPIs[i].Value = "0"
+			}
+			item.KPIs[0].Value = "-0.01"
+			return &item
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := FlexReport{Key: report.SalesGoodsServices, Dashboard: test.dashboard, ActionURL: "https://dashboard.nextstep-soft.com/app"}
+			if test.dashboard == nil {
+				input.Metrics = map[string]string{"total_amount": "0", "document_count": "0"}
+			}
+			presentation, err := BuildFlexReportPresentation(input)
+			if err != nil {
+				t.Fatalf("BuildFlexReportPresentation() error = %v", err)
+			}
+			if presentation.DataState == FlexDataZero || presentation.StateText != "" {
+				t.Fatalf("untrusted/nonzero data was hidden: %+v", presentation)
+			}
+		})
+	}
+}
+
+func TestBuildFlexReportPresentationKeepsNonzeroComparisonForTrustedZeroData(t *testing.T) {
+	period := report.Period{Preset: report.Yesterday, DateFrom: "2026-07-12", DateTo: "2026-07-12"}
+	dashboard := previewDashboard(report.SalesGoodsServices, period)
+	for index := range dashboard.KPIs {
+		dashboard.KPIs[index].Value = "0"
+	}
+	dashboard.KPIs[0].Comparison = report.MetricComparison{
+		Availability:  report.ComparisonAvailable,
+		PreviousValue: "100.00",
+		Delta:         "-100.00",
+		Percent:       "-100.00",
+		Direction:     report.DirectionDown,
+	}
+	presentation, err := BuildFlexReportPresentation(FlexReport{Key: report.SalesGoodsServices, Dashboard: &dashboard, ActionURL: "https://dashboard.nextstep-soft.com/app"})
+	if err != nil {
+		t.Fatalf("BuildFlexReportPresentation() error = %v", err)
+	}
+	if presentation.DataState != FlexDataZero || presentation.Comparison == nil || presentation.Comparison.Text != "↓ 100.00% จากช่วงก่อน" {
+		t.Fatalf("zero state lost a meaningful comparison: %+v", presentation)
+	}
+}
+
 func TestBuildFlexReportPresentationUsesExecutiveSalesMetrics(t *testing.T) {
 	dashboard := report.Dashboard{
 		ReportKey: report.SalesGoodsServices,
