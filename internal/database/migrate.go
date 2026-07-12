@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,10 +26,11 @@ var migrationNamePattern = regexp.MustCompile(`^(\d{6})_[a-z0-9_]+\.sql$`)
 const migrationLockID int64 = 7_214_501_624
 
 type Migration struct {
-	Version  int
-	Name     string
-	Checksum string
-	SQL      string
+	Version       int
+	Name          string
+	Checksum      string
+	SQL           string
+	NoTransaction bool
 }
 
 func LoadMigrations() ([]Migration, error) {
@@ -55,10 +57,11 @@ func LoadMigrations() ([]Migration, error) {
 		}
 		sum := sha256.Sum256(contents)
 		migrations = append(migrations, Migration{
-			Version:  version,
-			Name:     entry.Name(),
-			Checksum: hex.EncodeToString(sum[:]),
-			SQL:      string(contents),
+			Version:       version,
+			Name:          entry.Name(),
+			Checksum:      hex.EncodeToString(sum[:]),
+			SQL:           string(contents),
+			NoTransaction: strings.HasPrefix(string(contents), "-- nextstep:no-transaction"),
 		})
 	}
 	sort.Slice(migrations, func(i, j int) bool { return migrations[i].Version < migrations[j].Version })
@@ -109,6 +112,15 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("read migration %06d status: %w", migration.Version, err)
 		}
 
+		if migration.NoTransaction {
+			if _, err := connection.Exec(ctx, migration.SQL); err != nil {
+				return fmt.Errorf("apply non-transactional migration %06d: %w", migration.Version, err)
+			}
+			if _, err := connection.Exec(ctx, `insert into schema_migrations (version, name, checksum) values ($1, $2, $3)`, migration.Version, migration.Name, migration.Checksum); err != nil {
+				return fmt.Errorf("record non-transactional migration %06d: %w", migration.Version, err)
+			}
+			continue
+		}
 		tx, err := connection.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin migration %06d: %w", migration.Version, err)

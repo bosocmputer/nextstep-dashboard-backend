@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ type fakeRunStore struct {
 	retriedCode string
 	failedCode  string
 	markRunning int
+	phases      []report.ProgressPhase
 }
 
 func (store *fakeRunStore) Claim(context.Context, string, time.Duration, time.Time) (report.Run, error) {
@@ -26,6 +28,10 @@ func (store *fakeRunStore) Claim(context.Context, string, time.Duration, time.Ti
 }
 func (store *fakeRunStore) MarkRunning(context.Context, uuid.UUID, string, time.Duration, time.Time) error {
 	store.markRunning++
+	return nil
+}
+func (store *fakeRunStore) UpdateProgress(_ context.Context, _ uuid.UUID, _ string, phase report.ProgressPhase, _, _ int, _ time.Time) error {
+	store.phases = append(store.phases, phase)
 	return nil
 }
 func (store *fakeRunStore) ExtendLease(context.Context, uuid.UUID, string, time.Duration, time.Time) error {
@@ -86,7 +92,7 @@ func TestReportWorkerCompletesFreshDashboardRunAndPersistsRows(t *testing.T) {
 	}
 }
 
-func TestReportWorkerRetriesRetryableSMLFailureWithoutPublishingRows(t *testing.T) {
+func TestReportWorkerDoesNotRetryTimeoutAfterQueryDispatch(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	store := &fakeRunStore{run: report.Run{
 		ID: uuid.New(), TenantID: uuid.New(), ReportKey: report.CashBankReceipts,
@@ -108,8 +114,34 @@ func TestReportWorkerRetriesRetryableSMLFailureWithoutPublishingRows(t *testing.
 	if err := worker.ProcessOne(context.Background()); err != nil {
 		t.Fatalf("ProcessOne() error = %v", err)
 	}
-	if !deadlineChecked || store.retriedCode != "SML_TIMEOUT" || store.failedCode != "" || store.completed != nil {
+	if !deadlineChecked || store.retriedCode != "" || store.failedCode != "SML_TIMEOUT" || store.completed != nil {
 		t.Fatalf("retry=%q failed=%q completed=%+v", store.retriedCode, store.failedCode, store.completed)
+	}
+}
+
+func TestReportWorkerPublishesMonotonicHonestProgressPhases(t *testing.T) {
+	now := time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC)
+	store := &fakeRunStore{run: report.Run{
+		ID: uuid.New(), TenantID: uuid.New(), ReportKey: report.StockReorder,
+		Source: report.SourceBackground, ResultKind: report.ResultSummary,
+		Status: report.StatusClaimed, Attempt: 1,
+		Period: report.Period{Preset: report.AsOfRun, DateFrom: "2026-07-12", DateTo: "2026-07-12"},
+	}}
+	worker := NewReportWorker(store, connectionProviderFunc(func(context.Context, uuid.UUID) (sml.Connection, error) {
+		return sml.Connection{}, nil
+	}), queryClientFunc(func(context.Context, sml.Connection, string) ([]map[string]string, error) {
+		return []map[string]string{{"ic_code": "I1", "ic_name": "สินค้า", "balance_qty": "0", "purchase_point": "1"}}, nil
+	}), "worker-a", func() time.Time { return now })
+
+	if err := worker.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("ProcessOne() error = %v", err)
+	}
+	want := []report.ProgressPhase{report.ProgressConnecting, report.ProgressQueryingCurrent, report.ProgressBuildingDashboard, report.ProgressSavingResult}
+	if !reflect.DeepEqual(store.phases, want) {
+		t.Fatalf("progress phases = %v, want %v", store.phases, want)
+	}
+	if store.persistRows {
+		t.Fatal("background summary persisted detail rows")
 	}
 }
 

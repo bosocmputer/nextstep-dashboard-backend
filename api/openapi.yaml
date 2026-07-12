@@ -209,6 +209,31 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/SMLConnectionStatus'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/dashboard-refresh-policy:
+    parameters: [{$ref: '#/components/parameters/TenantID'}]
+    get:
+      tags: [Admin configuration]
+      operationId: getDashboardRefreshPolicy
+      security: [{AdminSession: []}]
+      responses:
+        '200':
+          description: Effective per-tenant refresh intervals. Null disables the corresponding class.
+          content: {application/json: {schema: {$ref: '#/components/schemas/DashboardRefreshPolicy'}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Admin configuration]
+      operationId: replaceDashboardRefreshPolicy
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/DashboardRefreshPolicyInput'}}}
+      responses:
+        '200':
+          description: Refresh policy replaced with optimistic concurrency.
+          content: {application/json: {schema: {$ref: '#/components/schemas/DashboardRefreshPolicy'}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/tenants/{tenantId}/sml-connection/test:
     post:
       tags: [Admin configuration]
@@ -640,6 +665,24 @@ paths:
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
         '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/viewer/tenants/{tenantId}/executive-overview/revalidations:
+    post:
+      tags: [Viewer]
+      operationId: revalidateViewerExecutiveOverview
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/DashboardRefreshInput'}}}
+      responses:
+        '200':
+          description: Exact-period cache resolution and tenant-scoped background runs for due reports.
+          content: {application/json: {schema: {$ref: '#/components/schemas/OverviewRevalidation'}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes/{refreshId}:
     get:
       tags: [Viewer]
@@ -704,6 +747,41 @@ paths:
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
         '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/snapshots/latest:
+    get:
+      tags: [Viewer]
+      operationId: getLatestExactViewerSnapshot
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ReportKey'}
+        - {name: periodPreset, in: query, required: true, schema: {type: string, enum: [YESTERDAY, TODAY_TO_NOW, MONTH_TO_DATE, AS_OF_RUN, CUSTOM]}}
+        - {name: dateFrom, in: query, schema: {type: string, format: date}}
+        - {name: dateTo, in: query, schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Exact-period snapshot matching current report and SML connection versions.
+          content: {application/json: {schema: {$ref: '#/components/schemas/DashboardSnapshot'}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/revalidations:
+    post:
+      tags: [Viewer]
+      operationId: revalidateViewerReport
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ReportKey'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateReportRunInput'}}}
+      responses:
+        '200':
+          description: Cache resolution and optional tenant-scoped background run.
+          content: {application/json: {schema: {$ref: '#/components/schemas/ReportRevalidation'}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}:
     get:
       tags: [Viewer]
@@ -908,6 +986,25 @@ components:
       properties:
         data: {type: array, items: {$ref: '#/components/schemas/Tenant'}}
         page: {$ref: '#/components/schemas/PageInfo'}
+    DashboardRefreshPolicy:
+      type: object
+      additionalProperties: false
+      required: [tenantId, version]
+      properties:
+        tenantId: {type: string, format: uuid}
+        fastIntervalMinutes: {type: integer, enum: [5, 10, 15, 30, 60], nullable: true}
+        standardIntervalMinutes: {type: integer, enum: [15, 30, 60], nullable: true}
+        heavyIntervalMinutes: {type: integer, enum: [30, 60, 120], nullable: true}
+        version: {type: integer, minimum: 0}
+    DashboardRefreshPolicyInput:
+      type: object
+      additionalProperties: false
+      required: [fastIntervalMinutes, standardIntervalMinutes, heavyIntervalMinutes, version]
+      properties:
+        fastIntervalMinutes: {type: integer, enum: [5, 10, 15, 30, 60], nullable: true}
+        standardIntervalMinutes: {type: integer, enum: [15, 30, 60], nullable: true}
+        heavyIntervalMinutes: {type: integer, enum: [30, 60, 120], nullable: true}
+        version: {type: integer, minimum: 0}
     SMLConnectionInput:
       type: object
       additionalProperties: false
@@ -1148,6 +1245,7 @@ components:
         tenantName: {type: string, description: Present on Admin report history responses.}
         reportKey: {$ref: '#/components/schemas/ReportKey'}
         status: {$ref: '#/components/schemas/ReportRunStatus'}
+        resultKind: {type: string, enum: [SUMMARY, DETAIL]}
         periodPreset: {type: string}
         dateFrom: {type: string, format: date, nullable: true}
         dateTo: {type: string, format: date, nullable: true}
@@ -1162,6 +1260,22 @@ components:
         startedAt: {type: string, format: date-time, nullable: true}
         finishedAt: {type: string, format: date-time, nullable: true}
         expiresAt: {type: string, format: date-time}
+        progress: {$ref: '#/components/schemas/ReportRunProgress'}
+    ReportRunProgress:
+      type: object
+      additionalProperties: false
+      required: [phase, phaseSequence, completedSteps, totalSteps, attempt, sampleCount, elapsedMs]
+      properties:
+        phase: {type: string, enum: [QUEUED, CONNECTING, QUERYING_CURRENT, QUERYING_COMPARISON, BUILDING_DASHBOARD, SAVING_RESULT, WAITING_RETRY, COMPLETED]}
+        phaseSequence: {type: integer, minimum: 0}
+        completedSteps: {type: integer, minimum: 0}
+        totalSteps: {type: integer, minimum: 0}
+        attempt: {type: integer, minimum: 0}
+        updatedAt: {type: string, format: date-time, nullable: true}
+        expectedP50Ms: {type: integer, minimum: 1, nullable: true}
+        expectedP90Ms: {type: integer, minimum: 1, nullable: true}
+        sampleCount: {type: integer, minimum: 0}
+        elapsedMs: {type: integer, minimum: 0}
     ReportRunPage:
       type: object
       required: [data, page]
@@ -1279,6 +1393,17 @@ components:
       properties:
         runId: {type: string, format: uuid}
         dashboard: {$ref: '#/components/schemas/ReportDashboard'}
+        periodFrom: {type: string, format: date}
+        periodTo: {type: string, format: date}
+        sourceStartedAt: {type: string, format: date-time, nullable: true}
+        sourceFinishedAt: {type: string, format: date-time, nullable: true}
+        freshUntil: {type: string, format: date-time, nullable: true}
+        staleUntil: {type: string, format: date-time, nullable: true}
+        freshnessStatus: {type: string, enum: [FRESH, STALE, EXPIRED, MISSING, REFRESHING, REFRESH_FAILED]}
+        reportDefinitionVersion: {type: string}
+        dataSourceVersion: {type: integer, minimum: 0}
+        detailsAvailable: {type: boolean}
+        detailsExpiresAt: {type: string, format: date-time, nullable: true}
     ExecutiveOverview:
       type: object
       additionalProperties: false
@@ -1298,6 +1423,11 @@ components:
         reportKey: {$ref: '#/components/schemas/ReportKey'}
         runId: {type: string, format: uuid}
         status: {$ref: '#/components/schemas/ReportRunStatus'}
+        progressPhase: {type: string, enum: [QUEUED, CONNECTING, QUERYING_CURRENT, QUERYING_COMPARISON, BUILDING_DASHBOARD, SAVING_RESULT, WAITING_RETRY, COMPLETED]}
+        progressUpdatedAt: {type: string, format: date-time, nullable: true}
+        expectedP50Ms: {type: integer, minimum: 1}
+        expectedP90Ms: {type: integer, minimum: 1}
+        expectedSampleCount: {type: integer, minimum: 0}
     DashboardRefresh:
       type: object
       additionalProperties: false
@@ -1353,6 +1483,29 @@ components:
           type: array
           maxItems: 10
           items: {$ref: '#/components/schemas/DashboardRefreshFailure'}
+    RevalidationDisposition:
+      type: string
+      enum: [FRESH_CACHE, STALE_REFRESHING, MISSING_REFRESHING, JOINED, DISABLED, CIRCUIT_OPEN]
+    ReportRevalidation:
+      type: object
+      additionalProperties: false
+      required: [disposition, retryAfter]
+      properties:
+        disposition: {$ref: '#/components/schemas/RevalidationDisposition'}
+        snapshot: {$ref: '#/components/schemas/DashboardSnapshot'}
+        run: {$ref: '#/components/schemas/ReportRun'}
+        retryAfter: {type: integer, minimum: 0}
+        legacyFallback: {type: boolean, default: false}
+    OverviewRevalidation:
+      type: object
+      additionalProperties: false
+      required: [disposition, overview, runs, retryAfter]
+      properties:
+        disposition: {$ref: '#/components/schemas/RevalidationDisposition'}
+        overview: {$ref: '#/components/schemas/ExecutiveOverview'}
+        runs: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/ReportRun'}}
+        retryAfter: {type: integer, minimum: 0}
+        legacyFallback: {type: boolean, default: false}
     LineSessionInput:
       type: object
       additionalProperties: false

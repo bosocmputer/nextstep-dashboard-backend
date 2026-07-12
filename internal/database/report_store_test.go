@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -97,6 +98,41 @@ func TestReportStoreIdempotencyLeaseCompletionAndCursorRows(t *testing.T) {
 		}
 		if result.ID != concurrentRunID {
 			t.Fatalf("concurrent Enqueue() IDs differ: %s and %s", concurrentRunID, result.ID)
+		}
+	}
+	const concurrentViewers = 20
+	backgroundResults := make(chan report.Run, concurrentViewers)
+	backgroundErrors := make(chan error, concurrentViewers)
+	wait = sync.WaitGroup{}
+	for index := range concurrentViewers {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			run, enqueueErr := store.Enqueue(ctx, report.EnqueueInput{
+				TenantID: tenantID, ReportKey: report.StockBalance, Source: report.SourceBackground,
+				ResultKind: report.ResultSummary, Priority: 20, ExecutionKey: "shared-stock-summary-period",
+				IdempotencyKey: fmt.Sprintf("background-viewer-%03d", index),
+				Period:         report.Period{Preset: report.Custom, DateFrom: "2026-07-10", DateTo: "2026-07-10"},
+			}, now.Add(1500*time.Millisecond))
+			backgroundResults <- run
+			backgroundErrors <- enqueueErr
+		}(index)
+	}
+	wait.Wait()
+	close(backgroundResults)
+	close(backgroundErrors)
+	for enqueueErr := range backgroundErrors {
+		if enqueueErr != nil {
+			t.Fatalf("coalesced background Enqueue() error = %v", enqueueErr)
+		}
+	}
+	var sharedBackgroundRunID uuid.UUID
+	for result := range backgroundResults {
+		if sharedBackgroundRunID == uuid.Nil {
+			sharedBackgroundRunID = result.ID
+		}
+		if result.ID != sharedBackgroundRunID {
+			t.Fatalf("20 concurrent viewers created multiple background runs: %s and %s", sharedBackgroundRunID, result.ID)
 		}
 	}
 	changed := input

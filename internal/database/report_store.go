@@ -27,11 +27,31 @@ func (store *ReportStore) Enqueue(ctx context.Context, input report.EnqueueInput
 	if _, ok := report.DefinitionFor(input.ReportKey); !ok || len(input.IdempotencyKey) < 8 || len(input.IdempotencyKey) > 200 {
 		return report.Run{}, report.ErrRunIdempotencyConflict
 	}
+	if input.Source == report.SourceBackground && (input.RequestedByRecipient != nil || input.ExecutionKey == "" || input.ResultKind != report.ResultSummary) {
+		return report.Run{}, report.ErrRunForbidden
+	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return report.Run{}, fmt.Errorf("begin enqueue report: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if input.ResultKind == "" {
+		if input.Source == report.SourceSchedule || input.Source == report.SourceBackground {
+			input.ResultKind = report.ResultSummary
+		} else {
+			input.ResultKind = report.ResultDetail
+		}
+	}
+	if input.Priority == 0 {
+		switch input.Source {
+		case report.SourceSchedule:
+			input.Priority = 100
+		case report.SourceDashboard:
+			input.Priority = 80
+		default:
+			input.Priority = 20
+		}
+	}
 	lockScope := input.TenantID.String() + ":" + string(input.Source) + ":" + input.IdempotencyKey
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, lockScope); err != nil {
 		return report.Run{}, fmt.Errorf("lock report idempotency key: %w", err)
@@ -76,8 +96,67 @@ func (store *ReportStore) Enqueue(ctx context.Context, input report.EnqueueInput
 		}
 		return existing, nil
 	}
+	reserveHalfOpenProbe := false
+	if input.Source == report.SourceDashboard {
+		var openUntil *time.Time
+		var halfOpenRunID *uuid.UUID
+		circuitErr := tx.QueryRow(ctx, `
+			select open_until, half_open_run_id
+			from tenant_sml_circuits where tenant_id = $1
+			for update`, input.TenantID).Scan(&openUntil, &halfOpenRunID)
+		if circuitErr != nil && !errors.Is(circuitErr, pgx.ErrNoRows) {
+			return report.Run{}, fmt.Errorf("lock tenant SML circuit: %w", circuitErr)
+		}
+		if openUntil != nil && openUntil.After(now) {
+			if halfOpenRunID != nil {
+				return report.Run{}, report.ErrRunCircuitOpen
+			}
+			reserveHalfOpenProbe = true
+		}
+	}
+	if input.Source == report.SourceBackground {
+		active, activeErr := scanReportRun(tx.QueryRow(ctx, `
+			select `+reportRunColumns+` from report_runs
+			where tenant_id = $1 and source = 'BACKGROUND' and execution_key = $2
+			  and status in ('QUEUED', 'CLAIMED', 'RUNNING')
+			order by queued_at, id limit 1`, input.TenantID, input.ExecutionKey), now)
+		if activeErr == nil {
+			if err := tx.Commit(ctx); err != nil {
+				return report.Run{}, fmt.Errorf("commit background report join: %w", err)
+			}
+			return active, nil
+		}
+		if !errors.Is(activeErr, pgx.ErrNoRows) {
+			return report.Run{}, fmt.Errorf("find active background report: %w", activeErr)
+		}
+		var queuedBackground int
+		if err := tx.QueryRow(ctx, `select count(*) from report_runs where tenant_id = $1 and source = 'BACKGROUND' and status in ('QUEUED', 'CLAIMED', 'RUNNING')`, input.TenantID).Scan(&queuedBackground); err != nil {
+			return report.Run{}, fmt.Errorf("count background report runs: %w", err)
+		}
+		if queuedBackground >= 10 {
+			return report.Run{}, report.ErrRunConcurrencyLimit
+		}
+	}
 
 	if input.Source == report.SourceDashboard {
+		if input.RequestedByRecipient != nil {
+			recent, recentErr := scanReportRun(tx.QueryRow(ctx, `
+				select `+reportRunColumns+` from report_runs
+				where tenant_id = $1 and source = 'DASHBOARD' and requested_by_recipient_id = $2
+				  and report_key = $3 and period_from = $4::date and period_to = $5::date
+				  and status in ('QUEUED', 'CLAIMED', 'RUNNING') and created_at >= $6::timestamptz - interval '60 seconds'
+				order by created_at desc, id desc limit 1`, input.TenantID, input.RequestedByRecipient,
+				input.ReportKey, input.Period.DateFrom, input.Period.DateTo, now), now)
+			if recentErr == nil {
+				if err := tx.Commit(ctx); err != nil {
+					return report.Run{}, fmt.Errorf("commit recent dashboard report join: %w", err)
+				}
+				return recent, nil
+			}
+			if !errors.Is(recentErr, pgx.ErrNoRows) {
+				return report.Run{}, fmt.Errorf("find recent dashboard report: %w", recentErr)
+			}
+		}
 		var activeCount int
 		if err := tx.QueryRow(ctx, `
 			select count(*) from report_runs
@@ -90,25 +169,108 @@ func (store *ReportStore) Enqueue(ctx context.Context, input report.EnqueueInput
 		}
 	}
 
+	var reportDefinitionVersion string
+	var dataSourceVersion int
+	if err := tx.QueryRow(ctx, `
+		select d.version, coalesce(c.version, 0)
+		from report_definitions d
+		left join tenant_sml_connections c on c.tenant_id = $2
+		where d.report_key = $1`, input.ReportKey, input.TenantID).Scan(&reportDefinitionVersion, &dataSourceVersion); err != nil {
+		return report.Run{}, fmt.Errorf("load report execution versions: %w", err)
+	}
+	expectedP50MS, expectedP90MS, expectedSampleCount, err := loadDurationEstimate(ctx, tx, input.TenantID, input.ReportKey, input.Period)
+	if err != nil {
+		return report.Run{}, err
+	}
 	paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": input.Period.DateFrom, "dateTo": input.Period.DateTo})
 	row := tx.QueryRow(ctx, `
 		insert into report_runs (
 		  tenant_id, report_key, source, idempotency_key, status, period_preset,
 		  period_from, period_to, params_json, requested_by_recipient_id,
-		  queued_at, expires_at, created_at, updated_at
-		) values ($1, $2, $3, $4, 'QUEUED', $5, nullif($6, '')::date, nullif($7, '')::date, $8, $9, $10, $11, $10, $10)
+		  queued_at, expires_at, created_at, updated_at, result_kind, priority,
+		  execution_key, report_definition_version, data_source_version,
+		  progress_phase, progress_updated_at, expected_p50_ms, expected_p90_ms,
+		  expected_sample_count
+		) values ($1, $2, $3, $4, 'QUEUED', $5, nullif($6, '')::date, nullif($7, '')::date, $8, $9, $10, $11, $10, $10,
+		          $12, $13, nullif($14, ''), $15, $16, 'QUEUED', $10, nullif($17, 0), nullif($18, 0), $19)
+		on conflict do nothing
 		returning `+reportRunColumns,
 		input.TenantID, input.ReportKey, input.Source, input.IdempotencyKey, input.Period.Preset,
 		input.Period.DateFrom, input.Period.DateTo, paramsJSON, input.RequestedByRecipient, now, now.Add(24*time.Hour),
+		input.ResultKind, input.Priority, input.ExecutionKey, reportDefinitionVersion, dataSourceVersion,
+		expectedP50MS, expectedP90MS, expectedSampleCount,
 	)
 	created, err := scanReportRun(row, now)
+	if errors.Is(err, pgx.ErrNoRows) && input.Source == report.SourceBackground {
+		created, err = scanReportRun(tx.QueryRow(ctx, `
+			select `+reportRunColumns+` from report_runs
+			where tenant_id = $1 and source = 'BACKGROUND' and execution_key = $2
+			  and status in ('QUEUED', 'CLAIMED', 'RUNNING')
+			order by queued_at, id limit 1`, input.TenantID, input.ExecutionKey), now)
+	}
 	if err != nil {
 		return report.Run{}, fmt.Errorf("insert report run: %w", err)
+	}
+	if reserveHalfOpenProbe {
+		result, reserveErr := tx.Exec(ctx, `
+			update tenant_sml_circuits
+			set half_open_run_id = $2, updated_at = $3
+			where tenant_id = $1 and open_until > $3 and half_open_run_id is null`, input.TenantID, created.ID, now)
+		if reserveErr != nil {
+			return report.Run{}, fmt.Errorf("reserve tenant SML half-open probe: %w", reserveErr)
+		}
+		if result.RowsAffected() != 1 {
+			return report.Run{}, report.ErrRunCircuitOpen
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return report.Run{}, fmt.Errorf("commit enqueue report: %w", err)
 	}
 	return created, nil
+}
+
+func loadDurationEstimate(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, reportKey report.Key, period report.Period) (int64, int64, int, error) {
+	from, fromErr := time.Parse("2006-01-02", period.DateFrom)
+	to, toErr := time.Parse("2006-01-02", period.DateTo)
+	if fromErr != nil || toErr != nil {
+		return 0, 0, 0, nil
+	}
+	days := int(to.Sub(from).Hours()/24) + 1
+	minimum, maximum := 1, 1
+	switch {
+	case days <= 1:
+	case days <= 7:
+		minimum, maximum = 2, 7
+	case days <= 31:
+		minimum, maximum = 8, 31
+	case days <= 90:
+		minimum, maximum = 32, 90
+	default:
+		minimum, maximum = 91, 366
+	}
+	var count int
+	var p50, p90 float64
+	err := tx.QueryRow(ctx, `
+		with recent as (
+		  select extract(epoch from (finished_at - started_at)) * 1000 as duration_ms
+		  from report_runs
+		  where tenant_id = $1 and report_key = $2 and status = 'SUCCEEDED'
+		    and started_at is not null and finished_at is not null
+		    and period_from is not null and period_to is not null
+		    and (period_to - period_from + 1) between $3 and $4
+		  order by finished_at desc
+		  limit 30
+		)
+		select count(*), coalesce(percentile_cont(0.5) within group (order by duration_ms), 0),
+		       coalesce(percentile_cont(0.9) within group (order by duration_ms), 0)
+		from recent`, tenantID, reportKey, minimum, maximum).Scan(&count, &p50, &p90)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("load report duration estimate: %w", err)
+	}
+	if count < 5 {
+		return 0, 0, count, nil
+	}
+	return int64(p50), int64(p90), count, nil
 }
 
 func (store *ReportStore) Cancel(ctx context.Context, runID uuid.UUID, now time.Time) (report.Run, error) {
@@ -130,7 +292,7 @@ func (store *ReportStore) Cancel(ctx context.Context, runID uuid.UUID, now time.
 		}
 		return run, nil
 	}
-	if run.Status != report.StatusQueued && run.Status != report.StatusClaimed && run.Status != report.StatusRunning {
+	if run.Status != report.StatusQueued {
 		return report.Run{}, report.ErrRunNotCancellable
 	}
 	cancelled, err := scanReportRun(tx.QueryRow(ctx, `
@@ -157,7 +319,8 @@ func (store *ReportStore) Claim(ctx context.Context, workerID string, lease time
 	if _, err := tx.Exec(ctx, `
 		update report_runs
 		set status = 'QUEUED', claimed_by = null, claimed_at = null,
-		    lease_expires_at = null, updated_at = $1
+		    lease_expires_at = null, progress_phase = 'WAITING_RETRY',
+		    progress_sequence = progress_sequence + 1, progress_updated_at = $1, updated_at = $1
 		where status in ('CLAIMED', 'RUNNING') and lease_expires_at < $1`, now); err != nil {
 		return report.Run{}, fmt.Errorf("requeue expired report leases: %w", err)
 	}
@@ -171,7 +334,8 @@ func (store *ReportStore) Claim(ctx context.Context, workerID string, lease time
 		    where active.tenant_id = r.tenant_id and active.id <> r.id
 		      and active.status in ('CLAIMED', 'RUNNING')
 		  )
-		order by r.queued_at, r.id
+		order by greatest(r.priority, least(99, r.priority + floor(extract(epoch from ($1 - r.queued_at)) / 600)::integer)) desc,
+		         r.queued_at, r.id
 		for update skip locked
 		limit 1`, now).Scan(&runID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -215,13 +379,42 @@ func (store *ReportStore) ExtendLease(ctx context.Context, runID uuid.UUID, work
 	return nil
 }
 
+func (store *ReportStore) UpdateProgress(ctx context.Context, runID uuid.UUID, workerID string, phase report.ProgressPhase, completedSteps, totalSteps int, now time.Time) error {
+	result, err := store.pool.Exec(ctx, `
+		update report_runs
+		set progress_phase = $3, progress_sequence = progress_sequence + 1,
+		    progress_completed_steps = $4, progress_total_steps = $5,
+		    progress_updated_at = $6, updated_at = $6
+		where id = $1 and claimed_by = $2 and status = 'RUNNING'
+		  and lease_expires_at >= $6
+		  and case progress_phase
+		    when 'QUEUED' then 0 when 'WAITING_RETRY' then 0
+		    when 'CONNECTING' then 10 when 'QUERYING_CURRENT' then 20
+		    when 'QUERYING_COMPARISON' then 30 when 'BUILDING_DASHBOARD' then 40
+		    when 'SAVING_RESULT' then 50 when 'COMPLETED' then 60 else 0 end
+		  < case $3
+		    when 'CONNECTING' then 10 when 'QUERYING_CURRENT' then 20
+		    when 'QUERYING_COMPARISON' then 30 when 'BUILDING_DASHBOARD' then 40
+		    when 'SAVING_RESULT' then 50 when 'COMPLETED' then 60 else 0 end`,
+		runID, workerID, phase, completedSteps, totalSteps, now)
+	if err != nil {
+		return fmt.Errorf("update report progress: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return report.ErrRunLeaseLost
+	}
+	return nil
+}
+
 func (store *ReportStore) Retry(ctx context.Context, runID uuid.UUID, workerID, safeCode string, availableAt, now time.Time) error {
 	result, err := store.pool.Exec(ctx, `
 		update report_runs
 		set status = 'QUEUED', queued_at = $4, claimed_by = null, claimed_at = null,
 		    lease_expires_at = null, safe_error_code = $3, safe_error_message = null,
-		    updated_at = $5
-		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')`,
+		    progress_phase = 'WAITING_RETRY', progress_sequence = progress_sequence + 1,
+		    progress_updated_at = $5, updated_at = $5
+		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
+		  and lease_expires_at >= $5`,
 		runID, workerID, safeCode, availableAt, now)
 	if err != nil {
 		return fmt.Errorf("retry report run: %w", err)
@@ -311,7 +504,9 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 		update report_runs
 		set status = 'SUCCEEDED', row_count = $3, summary_json = $4,
 		    reconciliation_json = $5, dashboard_version = $6, dashboard_json = $7,
-		    finished_at = $8, expires_at = $9, lease_expires_at = null, updated_at = $8
+		    finished_at = $8, expires_at = $9, lease_expires_at = null,
+		    progress_phase = 'COMPLETED', progress_sequence = progress_sequence + 1,
+		    progress_completed_steps = progress_total_steps, progress_updated_at = $8, updated_at = $8
 		where id = $1 and claimed_by = $2 and status = 'RUNNING'`,
 		runID, workerID, summary.RowCount, summaryJSON, reconciliationJSON, dashboardVersion, dashboardJSON, now, expiresAt)
 	if err != nil {
@@ -319,6 +514,14 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 	}
 	if result.RowsAffected() != 1 {
 		return report.ErrRunLeaseLost
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into tenant_sml_circuits (tenant_id, consecutive_failures, window_started_at, open_until, half_open_run_id, updated_at)
+		values ($1, 0, null, null, null, $2)
+		on conflict (tenant_id) do update
+		set consecutive_failures = 0, window_started_at = null, open_until = null,
+		    half_open_run_id = null, updated_at = excluded.updated_at`, tenantID, now); err != nil {
+		return fmt.Errorf("reset tenant SML circuit: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit report completion: %w", err)
@@ -489,8 +692,14 @@ func (store *ReportStore) CreateDashboardRefresh(ctx context.Context, recipientI
 			insert into report_runs (
 			  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
 			  period_from, period_to, params_json, requested_by_recipient_id,
-			  queued_at, expires_at, created_at, updated_at
-			) values ($1, $2, $3, 'DASHBOARD', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9, $10, $11, $10, $10)`,
+			  queued_at, expires_at, created_at, updated_at, result_kind, priority,
+			  report_definition_version, data_source_version, progress_phase, progress_updated_at
+			)
+			select $1, $2, $3, 'DASHBOARD', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9,
+			       $10, $11, $10, $10, 'DETAIL', 80, d.version, coalesce(c.version, 0), 'QUEUED', $10
+			from report_definitions d
+			left join tenant_sml_connections c on c.tenant_id = $2
+			where d.report_key = $3`,
 			runID, tenantID, input.ReportKey, runIdempotency, input.Period.Preset, input.Period.DateFrom, input.Period.DateTo,
 			paramsJSON, recipientID, now, now.Add(24*time.Hour)); err != nil {
 			return viewer.DashboardRefresh{}, fmt.Errorf("insert dashboard refresh report run: %w", err)
@@ -615,7 +824,9 @@ func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, 
 		return viewer.DashboardRefresh{}, fmt.Errorf("get dashboard refresh: %w", err)
 	}
 	rows, err := store.pool.Query(ctx, `
-		select linked.report_key, linked.report_run_id, run.status
+		select linked.report_key, linked.report_run_id, run.status, run.progress_phase,
+		       run.progress_updated_at, coalesce(run.expected_p50_ms, 0),
+		       coalesce(run.expected_p90_ms, 0), run.expected_sample_count
 		from dashboard_refresh_runs linked
 		join report_runs run on run.id = linked.report_run_id
 		where linked.refresh_id = $1
@@ -628,7 +839,8 @@ func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, 
 	refresh.Runs = make([]viewer.DashboardRefreshRun, 0, refresh.Total)
 	for rows.Next() {
 		var item viewer.DashboardRefreshRun
-		if err := rows.Scan(&item.ReportKey, &item.RunID, &item.Status); err != nil {
+		if err := rows.Scan(&item.ReportKey, &item.RunID, &item.Status, &item.ProgressPhase,
+			&item.ProgressUpdatedAt, &item.ExpectedP50MS, &item.ExpectedP90MS, &item.ExpectedSampleCount); err != nil {
 			return viewer.DashboardRefresh{}, fmt.Errorf("scan dashboard refresh run: %w", err)
 		}
 		switch item.Status {
@@ -675,18 +887,56 @@ func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, 
 }
 
 func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID, safeCode, safeMessage string, now time.Time) error {
-	result, err := store.pool.Exec(ctx, `
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin fail report run: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var tenantID uuid.UUID
+	err = tx.QueryRow(ctx, `
 		update report_runs
 		set status = 'FAILED', safe_error_code = $3, safe_error_message = $4,
-		    finished_at = $5, lease_expires_at = null, updated_at = $5
-		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')`, runID, workerID, safeCode, safeMessage, now)
+		    finished_at = $5, lease_expires_at = null, progress_updated_at = $5, updated_at = $5
+		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
+		  and lease_expires_at >= $5
+		returning tenant_id`, runID, workerID, safeCode, safeMessage, now).Scan(&tenantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return report.ErrRunLeaseLost
+	}
 	if err != nil {
 		return fmt.Errorf("fail report run: %w", err)
 	}
-	if result.RowsAffected() != 1 {
-		return report.ErrRunLeaseLost
+	if isSMLCircuitFailure(safeCode) {
+		if _, err := tx.Exec(ctx, `
+			insert into tenant_sml_circuits (tenant_id, consecutive_failures, window_started_at, open_until, updated_at)
+			values ($1, 1, $2, null, $2)
+			on conflict (tenant_id) do update
+			set consecutive_failures = case
+			      when tenant_sml_circuits.window_started_at is null or tenant_sml_circuits.window_started_at < $2 - interval '10 minutes' then 1
+			      else tenant_sml_circuits.consecutive_failures + 1 end,
+			    window_started_at = case
+			      when tenant_sml_circuits.window_started_at is null or tenant_sml_circuits.window_started_at < $2 - interval '10 minutes' then $2
+			      else tenant_sml_circuits.window_started_at end,
+			    open_until = case
+			      when (case when tenant_sml_circuits.window_started_at is null or tenant_sml_circuits.window_started_at < $2 - interval '10 minutes' then 1 else tenant_sml_circuits.consecutive_failures + 1 end) >= 3
+			      then $2 + interval '15 minutes' else tenant_sml_circuits.open_until end,
+			    half_open_run_id = case
+			      when tenant_sml_circuits.window_started_at is null or tenant_sml_circuits.window_started_at < $2 - interval '10 minutes' then null
+			      else tenant_sml_circuits.half_open_run_id end,
+			    updated_at = $2`, tenantID, now); err != nil {
+			return fmt.Errorf("record tenant SML circuit failure: %w", err)
+		}
 	}
-	return nil
+	return tx.Commit(ctx)
+}
+
+func isSMLCircuitFailure(code string) bool {
+	switch code {
+	case "SML_TIMEOUT", "SML_UNREACHABLE", "SML_QUERY_FAILED", "SML_CONNECTION_LOAD_FAILED", "SML_RESPONSE_READ_FAILED":
+		return true
+	default:
+		return false
+	}
 }
 
 func (store *ReportStore) Get(ctx context.Context, runID uuid.UUID, now time.Time) (report.Run, error) {
@@ -696,6 +946,24 @@ func (store *ReportStore) Get(ctx context.Context, runID uuid.UUID, now time.Tim
 	}
 	if err != nil {
 		return report.Run{}, fmt.Errorf("get report run: %w", err)
+	}
+	if run.Status == report.StatusQueued {
+		if err := store.pool.QueryRow(ctx, `
+			with target as (
+			  select tenant_id, priority, queued_at, id,
+			         greatest(priority, least(99, priority + floor(extract(epoch from ($2 - queued_at)) / 600)::integer)) as effective_priority
+			  from report_runs where id = $1
+			)
+			select count(*) + 1
+			from report_runs candidate, target
+			where candidate.tenant_id = target.tenant_id and candidate.status = 'QUEUED' and candidate.id <> target.id
+			  and (
+			    greatest(candidate.priority, least(99, candidate.priority + floor(extract(epoch from ($2 - candidate.queued_at)) / 600)::integer)) > target.effective_priority
+			    or (greatest(candidate.priority, least(99, candidate.priority + floor(extract(epoch from ($2 - candidate.queued_at)) / 600)::integer)) = target.effective_priority
+			        and (candidate.queued_at, candidate.id) < (target.queued_at, target.id))
+			  )`, runID, now).Scan(&run.QueuePosition); err != nil {
+			return report.Run{}, fmt.Errorf("get report queue position: %w", err)
+		}
 	}
 	return run, nil
 }
@@ -790,12 +1058,15 @@ func findRunByIdempotency(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, so
 }
 
 const reportRunColumns = `
-id, tenant_id, report_key, source, idempotency_key, status, period_preset,
+id, tenant_id, report_key, source, result_kind, priority, coalesce(execution_key, ''), idempotency_key, status, period_preset,
 period_from::text, period_to::text, requested_by_recipient_id,
 coalesce(claimed_by, ''), lease_expires_at, attempt, row_count, is_truncated,
 summary_json, reconciliation_json, coalesce(safe_error_code, ''),
 coalesce(safe_error_message, ''), queued_at, started_at, finished_at,
-expires_at, created_at, updated_at`
+expires_at, created_at, updated_at, coalesce(report_definition_version, ''),
+coalesce(data_source_version, 0), progress_phase, progress_sequence,
+progress_completed_steps, progress_total_steps, progress_updated_at,
+coalesce(expected_p50_ms, 0), coalesce(expected_p90_ms, 0), expected_sample_count`
 
 func scanReportRun(row rowScanner, now time.Time) (report.Run, error) {
 	return scanReportRunWithExtras(row, now)
@@ -805,12 +1076,15 @@ func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ..
 	var run report.Run
 	var summaryJSON, reconciliationJSON []byte
 	destinations := []any{
-		&run.ID, &run.TenantID, &run.ReportKey, &run.Source, &run.IdempotencyKey,
+		&run.ID, &run.TenantID, &run.ReportKey, &run.Source, &run.ResultKind, &run.Priority, &run.ExecutionKey, &run.IdempotencyKey,
 		&run.Status, &run.Period.Preset, &run.Period.DateFrom, &run.Period.DateTo,
 		&run.RequestedByRecipient, &run.ClaimedBy, &run.LeaseExpiresAt, &run.Attempt,
 		&run.RowCount, &run.IsTruncated, &summaryJSON, &reconciliationJSON,
 		&run.SafeErrorCode, &run.SafeErrorMessage, &run.QueuedAt, &run.StartedAt,
 		&run.FinishedAt, &run.ExpiresAt, &run.CreatedAt, &run.UpdatedAt,
+		&run.ReportDefinitionVersion, &run.DataSourceVersion, &run.ProgressPhase, &run.ProgressSequence,
+		&run.ProgressCompletedSteps, &run.ProgressTotalSteps, &run.ProgressUpdatedAt,
+		&run.ExpectedP50MS, &run.ExpectedP90MS, &run.ExpectedSampleCount,
 	}
 	destinations = append(destinations, extraDestinations...)
 	err := row.Scan(destinations...)

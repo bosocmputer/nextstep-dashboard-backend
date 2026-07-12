@@ -135,9 +135,15 @@ test delivery succeeds.
 - Start with one worker, `REPORT_WORKER_CONCURRENCY=4`, and
   `DELIVERY_WORKER_CONCURRENCY=4`. Increase only after measuring SML latency,
   worker memory, PostgreSQL wait time, LINE 429 responses, and queue age.
-- Dashboard rows are paginated and expire after 24 hours. Opening an historical
-  date always queues a fresh tenant SQL query; it never serves a 90-day data
-  snapshot.
+- Dashboard detail rows are paginated and expire after 24 hours. Summary
+  snapshots are versioned by report definition and SML connection and may be
+  reused for their configured freshness window. Historical summaries remain
+  explicitly timestamped and readable for up to 90 days; expired detail rows
+  still require a new SML query when the user asks for row-level detail.
+- Snapshot-first rollout is feature-gated. Start with
+  `SNAPSHOT_FIRST_ENABLED=true` plus an explicit
+  `SNAPSHOT_FIRST_TENANT_IDS` allowlist, then observe cache hit ratio, queue age,
+  SML timeouts, and schedule latency before expanding the allowlist.
 
 ## Retention and privacy checks
 

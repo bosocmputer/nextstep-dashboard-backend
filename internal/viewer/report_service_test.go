@@ -104,6 +104,30 @@ func TestReportServiceCreatesFreshRunInTenantTimezone(t *testing.T) {
 	}
 }
 
+func TestReportServiceSnapshotFirstFeatureFlagFallsBackWithoutEnqueue(t *testing.T) {
+	now := time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC)
+	recipientID, tenantID := uuid.New(), uuid.New()
+	access := &fakeReportAccess{allowed: true, tenants: []TenantAccess{{
+		ID: tenantID, Timezone: "Asia/Bangkok", ReportKeys: []report.Key{report.SalesGoodsServices},
+	}}}
+	store := &fakeViewerRunStore{latest: []DashboardSnapshot{{
+		RunID: uuid.New(), Dashboard: report.Dashboard{ReportKey: report.SalesGoodsServices, Version: "1.0.0"},
+	}}}
+	service := NewReportService(access, store, func() time.Time { return now }).ConfigureSnapshotFirst(false, nil)
+
+	revalidation, err := service.Revalidate(context.Background(), recipientID, tenantID, report.SalesGoodsServices, CreateReportRunInput{PeriodPreset: report.MonthToDate})
+	if err != nil || !revalidation.LegacyFallback || revalidation.Disposition != RevalidationDisabled {
+		t.Fatalf("Revalidate() = %+v, %v", revalidation, err)
+	}
+	overview, err := service.RevalidateOverview(context.Background(), recipientID, tenantID, DashboardRefreshInput{})
+	if err != nil || !overview.LegacyFallback || len(overview.Overview.Items) != 1 {
+		t.Fatalf("RevalidateOverview() = %+v, %v", overview, err)
+	}
+	if store.enqueued.ReportKey != "" {
+		t.Fatalf("feature-disabled fallback enqueued %+v", store.enqueued)
+	}
+}
+
 func TestReportServiceRejectsAmbiguousAndUnauthorizedInputs(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	recipientID, tenantID := uuid.New(), uuid.New()

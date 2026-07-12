@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 const production = "production"
@@ -33,6 +35,8 @@ type Config struct {
 	DatabaseMinConnections    int
 	ReportWorkerConcurrency   int
 	DeliveryWorkerConcurrency int
+	SnapshotFirstEnabled      bool
+	SnapshotFirstTenantIDs    []uuid.UUID
 }
 
 func Load(lookup LookupFunc) (Config, error) {
@@ -128,6 +132,14 @@ func Load(lookup LookupFunc) (Config, error) {
 	if databaseMinConnections > databaseMaxConnections {
 		return Config{}, errors.New("DATABASE_MIN_CONNECTIONS must not exceed DATABASE_MAX_CONNECTIONS")
 	}
+	snapshotFirstEnabled, err := boolValue(lookup, "SNAPSHOT_FIRST_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	snapshotFirstTenantIDs, err := parseUUIDList(valueOrDefault(lookup, "SNAPSHOT_FIRST_TENANT_IDS", ""))
+	if err != nil {
+		return Config{}, err
+	}
 
 	sessionKey, err := decodeKey("SESSION_HMAC_KEY", values["SESSION_HMAC_KEY"], 32, false)
 	if err != nil {
@@ -156,7 +168,37 @@ func Load(lookup LookupFunc) (Config, error) {
 		DatabaseMinConnections:    databaseMinConnections,
 		ReportWorkerConcurrency:   workerConcurrency,
 		DeliveryWorkerConcurrency: deliveryConcurrency,
+		SnapshotFirstEnabled:      snapshotFirstEnabled,
+		SnapshotFirstTenantIDs:    snapshotFirstTenantIDs,
 	}, nil
+}
+
+func boolValue(lookup LookupFunc, name string, fallback bool) (bool, error) {
+	raw := valueOrDefault(lookup, name, strconv.FormatBool(fallback))
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false", name)
+	}
+	return value, nil
+}
+
+func parseUUIDList(raw string) ([]uuid.UUID, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []uuid.UUID{}, nil
+	}
+	result := make([]uuid.UUID, 0)
+	seen := make(map[uuid.UUID]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		id, err := uuid.Parse(strings.TrimSpace(part))
+		if err != nil {
+			return nil, errors.New("SNAPSHOT_FIRST_TENANT_IDS must contain comma-separated UUIDs")
+		}
+		if _, exists := seen[id]; !exists {
+			seen[id] = struct{}{}
+			result = append(result, id)
+		}
+	}
+	return result, nil
 }
 
 func parseAllowedHosts(raw string) ([]string, error) {

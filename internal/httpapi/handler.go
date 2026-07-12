@@ -32,19 +32,20 @@ type AdminAuthenticator interface {
 }
 
 type Dependencies struct {
-	Readiness      Readiness
-	AdminAuth      AdminAuthenticator
-	Tenants        TenantAPI
-	SMLConnections SMLAPI
-	Recipients     RecipientAPI
-	Schedules      ScheduleAPI
-	FlexPreviews   SchedulePreviewAPI
-	ScheduleTests  ScheduleTestSendAPI
-	Operations     OperationsAPI
-	ViewerAuth     ViewerAPI
-	ViewerReports  ViewerReportAPI
-	SecureCookies  bool
-	Logger         *slog.Logger
+	Readiness       Readiness
+	AdminAuth       AdminAuthenticator
+	Tenants         TenantAPI
+	SMLConnections  SMLAPI
+	Recipients      RecipientAPI
+	Schedules       ScheduleAPI
+	FlexPreviews    SchedulePreviewAPI
+	ScheduleTests   ScheduleTestSendAPI
+	Operations      OperationsAPI
+	ViewerAuth      ViewerAPI
+	ViewerReports   ViewerReportAPI
+	RefreshPolicies RefreshPolicyAPI
+	SecureCookies   bool
+	Logger          *slog.Logger
 }
 
 type problemEnvelope struct {
@@ -99,6 +100,9 @@ func NewHandler(dependencies Dependencies) http.Handler {
 		registerAdminReportRoutes(router, dependencies.AdminAuth)
 		if dependencies.Tenants != nil {
 			registerTenantRoutes(router, dependencies.AdminAuth, dependencies.Tenants)
+		}
+		if dependencies.RefreshPolicies != nil {
+			registerRefreshPolicyRoutes(router, dependencies.AdminAuth, dependencies.RefreshPolicies)
 		}
 		if dependencies.SMLConnections != nil {
 			registerSMLRoutes(router, dependencies.AdminAuth, dependencies.SMLConnections)
@@ -193,6 +197,9 @@ type ViewerReportAPI interface {
 	GetDashboardRefreshResult(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefreshResult, error)
 	ListRows(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID, string, int) (viewer.ReportRows, error)
 	Cancel(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error)
+	ExactSnapshot(context.Context, uuid.UUID, uuid.UUID, report.Key, viewer.CreateReportRunInput) (viewer.DashboardSnapshot, error)
+	Revalidate(context.Context, uuid.UUID, uuid.UUID, report.Key, viewer.CreateReportRunInput) (viewer.ReportRevalidation, error)
+	RevalidateOverview(context.Context, uuid.UUID, uuid.UUID, viewer.DashboardRefreshInput) (viewer.OverviewRevalidation, error)
 }
 
 type ViewerAPI interface {

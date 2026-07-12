@@ -13,6 +13,80 @@ import (
 )
 
 func registerViewerReportRoutes(router chi.Router, viewerAuth ViewerAPI, viewerReports ViewerReportAPI) {
+	router.Get("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/snapshots/latest", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, reportKey, ok := parseViewerReportPath(response, request)
+		if !ok {
+			return
+		}
+		input, ok := parseViewerPeriodQuery(response, request)
+		if !ok {
+			return
+		}
+		snapshot, err := viewerReports.ExactSnapshot(request.Context(), authenticated.RecipientID, tenantID, reportKey, input)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, snapshot)
+	})
+
+	router.Post("/api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/revalidations", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewerMutation(response, request, viewerAuth)
+		if !ok || !isJSONRequest(request) {
+			if ok {
+				writeProblem(response, request, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json.", false)
+			}
+			return
+		}
+		tenantID, reportKey, ok := parseViewerReportPath(response, request)
+		if !ok {
+			return
+		}
+		input, ok := decodeViewerPeriodBody(response, request)
+		if !ok {
+			return
+		}
+		result, err := viewerReports.Revalidate(request.Context(), authenticated.RecipientID, tenantID, reportKey, input)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, reportRevalidationResponse(result))
+	})
+
+	router.Post("/api/v1/viewer/tenants/{tenantId}/executive-overview/revalidations", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewerMutation(response, request, viewerAuth)
+		if !ok || !isJSONRequest(request) {
+			if ok {
+				writeProblem(response, request, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json.", false)
+			}
+			return
+		}
+		tenantID, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		var body struct {
+			PeriodPreset report.Preset `json:"periodPreset"`
+			DateFrom     *string       `json:"dateFrom"`
+			DateTo       *string       `json:"dateTo"`
+			ReportKeys   []report.Key  `json:"reportKeys"`
+		}
+		if err := decodeJSON(response, request, &body); err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Dashboard revalidation input is invalid.", false)
+			return
+		}
+		result, err := viewerReports.RevalidateOverview(request.Context(), authenticated.RecipientID, tenantID, viewer.DashboardRefreshInput{
+			PeriodPreset: body.PeriodPreset, DateFrom: body.DateFrom, DateTo: body.DateTo, ReportKeys: body.ReportKeys,
+		})
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, overviewRevalidationResponse(result))
+	})
+
 	router.Get("/api/v1/viewer/tenants/{tenantId}/executive-overview", func(response http.ResponseWriter, request *http.Request) {
 		authenticated, ok := authenticateViewer(response, request, viewerAuth)
 		if !ok {
@@ -217,6 +291,56 @@ func registerViewerReportRoutes(router chi.Router, viewerAuth ViewerAPI, viewerR
 	})
 }
 
+func decodeViewerPeriodBody(response http.ResponseWriter, request *http.Request) (viewer.CreateReportRunInput, bool) {
+	var body struct {
+		PeriodPreset report.Preset `json:"periodPreset"`
+		DateFrom     *string       `json:"dateFrom"`
+		DateTo       *string       `json:"dateTo"`
+	}
+	if err := decodeJSON(response, request, &body); err != nil {
+		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Report period input is invalid.", false)
+		return viewer.CreateReportRunInput{}, false
+	}
+	return viewer.CreateReportRunInput{PeriodPreset: body.PeriodPreset, DateFrom: body.DateFrom, DateTo: body.DateTo}, true
+}
+
+func parseViewerPeriodQuery(response http.ResponseWriter, request *http.Request) (viewer.CreateReportRunInput, bool) {
+	input := viewer.CreateReportRunInput{PeriodPreset: report.Preset(request.URL.Query().Get("periodPreset"))}
+	if value := request.URL.Query().Get("dateFrom"); value != "" {
+		input.DateFrom = &value
+	}
+	if value := request.URL.Query().Get("dateTo"); value != "" {
+		input.DateTo = &value
+	}
+	if input.PeriodPreset == "" {
+		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "periodPreset is required.", false)
+		return viewer.CreateReportRunInput{}, false
+	}
+	return input, true
+}
+
+func reportRevalidationResponse(result viewer.ReportRevalidation) map[string]any {
+	response := map[string]any{"disposition": result.Disposition, "retryAfter": result.RetryAfter, "legacyFallback": result.LegacyFallback}
+	if result.Snapshot != nil {
+		response["snapshot"] = result.Snapshot
+	}
+	if result.Run != nil {
+		response["run"] = reportRunResponse(*result.Run)
+	}
+	return response
+}
+
+func overviewRevalidationResponse(result viewer.OverviewRevalidation) map[string]any {
+	runs := make([]map[string]any, 0, len(result.Runs))
+	for _, run := range result.Runs {
+		runs = append(runs, reportRunResponse(run))
+	}
+	return map[string]any{
+		"disposition": result.Disposition, "overview": result.Overview,
+		"runs": runs, "retryAfter": result.RetryAfter, "legacyFallback": result.LegacyFallback,
+	}
+}
+
 func authenticateViewerMutation(response http.ResponseWriter, request *http.Request, viewerAuth ViewerAPI) (viewer.AuthenticatedViewer, bool) {
 	authenticated, ok := authenticateViewer(response, request, viewerAuth)
 	if !ok || !authorizeViewerCSRF(response, request, viewerAuth, authenticated) {
@@ -270,6 +394,9 @@ func handleViewerReportError(response http.ResponseWriter, request *http.Request
 	case errors.Is(err, report.ErrRunConcurrencyLimit):
 		response.Header().Set("Retry-After", "5")
 		writeProblem(response, request, http.StatusTooManyRequests, "REPORT_CONCURRENCY_LIMIT", "This store already has the maximum number of active report runs.", true)
+	case errors.Is(err, report.ErrRunCircuitOpen):
+		response.Header().Set("Retry-After", "60")
+		writeProblem(response, request, http.StatusTooManyRequests, "SML_CIRCUIT_OPEN", "This store is temporarily protected after repeated SML failures. Try again later.", true)
 	case errors.Is(err, report.ErrRunRowsExpired):
 		writeProblem(response, request, http.StatusGone, "REPORT_ROWS_EXPIRED", "Temporary report rows have expired. Run the report again.", false)
 	case errors.Is(err, report.ErrRunNotCancellable):
@@ -297,13 +424,37 @@ func reportRunResponse(run report.Run) map[string]any {
 		"summary": summary, "reconciliation": reconciliation,
 		"queuedAt": run.QueuedAt, "expiresAt": run.ExpiresAt,
 	}
+	result["resultKind"] = run.ResultKind
+	progressEnd := time.Now().UTC()
+	if run.FinishedAt != nil {
+		progressEnd = *run.FinishedAt
+	}
+	elapsedMS := max(int64(0), progressEnd.Sub(run.QueuedAt).Milliseconds())
+	result["progress"] = map[string]any{
+		"phase": run.ProgressPhase, "phaseSequence": run.ProgressSequence,
+		"completedSteps": run.ProgressCompletedSteps, "totalSteps": run.ProgressTotalSteps,
+		"attempt": run.Attempt, "updatedAt": nullableTime(run.ProgressUpdatedAt),
+		"expectedP50Ms": nullablePositive(run.ExpectedP50MS), "expectedP90Ms": nullablePositive(run.ExpectedP90MS),
+		"sampleCount": run.ExpectedSampleCount,
+		"elapsedMs":   elapsedMS,
+	}
 	result["dateFrom"] = nullableString(run.Period.DateFrom)
 	result["dateTo"] = nullableString(run.Period.DateTo)
 	result["safeErrorCode"] = nullableString(run.SafeErrorCode)
 	result["safeErrorMessage"] = nullableString(run.SafeErrorMessage)
+	if run.QueuePosition > 0 {
+		result["queuePosition"] = run.QueuePosition
+	}
 	result["startedAt"] = nullableTime(run.StartedAt)
 	result["finishedAt"] = nullableTime(run.FinishedAt)
 	return result
+}
+
+func nullablePositive(value int64) any {
+	if value <= 0 {
+		return nil
+	}
+	return value
 }
 
 func nullableString(value string) any {

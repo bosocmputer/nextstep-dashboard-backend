@@ -20,6 +20,7 @@ const (
 type ReportRunStore interface {
 	Claim(context.Context, string, time.Duration, time.Time) (report.Run, error)
 	MarkRunning(context.Context, uuid.UUID, string, time.Duration, time.Time) error
+	UpdateProgress(context.Context, uuid.UUID, string, report.ProgressPhase, int, int, time.Time) error
 	ExtendLease(context.Context, uuid.UUID, string, time.Duration, time.Time) error
 	Complete(context.Context, uuid.UUID, string, report.SummaryResult, bool, time.Time) error
 	Retry(context.Context, uuid.UUID, string, string, time.Time, time.Time) error
@@ -60,6 +61,13 @@ func (worker *ReportWorker) ProcessOne(ctx context.Context) error {
 	if err := worker.store.MarkRunning(ctx, run.ID, worker.workerID, reportLeaseDuration, worker.now().UTC()); err != nil {
 		return err
 	}
+	totalProgressSteps := 5
+	if report.ComparisonSupported(run.ReportKey, run.Period) {
+		totalProgressSteps = 6
+	}
+	if err := worker.store.UpdateProgress(ctx, run.ID, worker.workerID, report.ProgressConnecting, 1, totalProgressSteps, worker.now().UTC()); err != nil {
+		return err
+	}
 
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()
@@ -71,13 +79,18 @@ func (worker *ReportWorker) ProcessOne(ctx context.Context) error {
 	}
 	if failure != nil {
 		now = worker.now().UTC()
-		if failure.Retryable && run.Attempt < maximumReportAttempts {
+		if failure.Retryable && failure.Code != "SML_TIMEOUT" && run.Source != report.SourceBackground && run.Attempt < maximumReportAttempts {
 			backoff := 30 * time.Second * time.Duration(1<<(run.Attempt-1))
 			return worker.store.Retry(ctx, run.ID, worker.workerID, failure.Code, now.Add(backoff), now)
 		}
 		return worker.store.Fail(ctx, run.ID, worker.workerID, failure.Code, safeFailureMessage(failure.Code), now)
 	}
-	return worker.store.Complete(ctx, run.ID, worker.workerID, summary, run.Source == report.SourceDashboard, worker.now().UTC())
+	completedSteps := totalProgressSteps - 1
+	if err := worker.store.UpdateProgress(ctx, run.ID, worker.workerID, report.ProgressSavingResult, completedSteps, totalProgressSteps, worker.now().UTC()); err != nil {
+		return err
+	}
+	persistRows := run.Source == report.SourceDashboard && run.ResultKind != report.ResultSummary
+	return worker.store.Complete(ctx, run.ID, worker.workerID, summary, persistRows, worker.now().UTC())
 }
 
 func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report.SummaryResult, *executionFailure) {
@@ -100,6 +113,13 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	if err != nil {
 		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
 	}
+	totalProgressSteps := 5
+	if report.ComparisonSupported(run.ReportKey, run.Period) {
+		totalProgressSteps = 6
+	}
+	if err := worker.store.UpdateProgress(ctx, run.ID, worker.workerID, report.ProgressQueryingCurrent, 2, totalProgressSteps, worker.now().UTC()); err != nil {
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
+	}
 	stepRows, failure := worker.executePlan(ctx, run, definition, connection, plan)
 	if failure != nil {
 		return report.SummaryResult{}, failure
@@ -116,6 +136,9 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	comparisonRows := emptyReportSteps(run.ReportKey)
 	comparisonWarning := ""
 	if report.ComparisonSupported(run.ReportKey, run.Period) {
+		if err := worker.store.UpdateProgress(ctx, run.ID, worker.workerID, report.ProgressQueryingComparison, 3, totalProgressSteps, worker.now().UTC()); err != nil {
+			return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
+		}
 		comparisonPlan, planErr := report.BuildQueryPlan(run.ReportKey, comparisonPeriod)
 		if planErr != nil {
 			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
@@ -126,6 +149,13 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 			comparisonRows = emptyReportSteps(run.ReportKey)
 			comparisonWarning = "COMPARISON_QUERY_FAILED"
 		}
+	}
+	buildingStep := 3
+	if totalProgressSteps == 6 {
+		buildingStep = 4
+	}
+	if err := worker.store.UpdateProgress(ctx, run.ID, worker.workerID, report.ProgressBuildingDashboard, buildingStep, totalProgressSteps, worker.now().UTC()); err != nil {
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
 	}
 	dashboard, err := report.BuildDashboard(run.ReportKey, run.Period, comparisonPeriod, stepRows, comparisonRows)
 	if err != nil {
@@ -147,7 +177,7 @@ func (worker *ReportWorker) executePlan(ctx context.Context, run report.Run, def
 			return nil, &executionFailure{Code: "REPORT_QUERY_RENDER_FAILED"}
 		}
 		queryTimeout := definition.DetailTimeout
-		if run.Source == report.SourceSchedule {
+		if run.Source == report.SourceSchedule || run.Source == report.SourceBackground || run.ResultKind == report.ResultSummary {
 			queryTimeout = definition.SummaryTimeout
 		}
 		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
@@ -156,7 +186,7 @@ func (worker *ReportWorker) executePlan(ctx context.Context, run report.Run, def
 		if queryErr != nil {
 			var safeError *sml.SafeError
 			if errors.As(queryErr, &safeError) {
-				return nil, &executionFailure{Code: safeError.Code, Retryable: safeError.Retryable}
+				return nil, &executionFailure{Code: safeError.Code, Retryable: false}
 			}
 			if errors.Is(queryErr, context.DeadlineExceeded) {
 				return nil, &executionFailure{Code: "SML_TIMEOUT", Retryable: true}

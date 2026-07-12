@@ -25,6 +25,9 @@ func TestEmbeddedMigrationsAreSequential(t *testing.T) {
 			t.Fatalf("migration %q has empty checksum", migration.Name)
 		}
 	}
+	if len(migrations) < 14 || !migrations[12].NoTransaction || !migrations[13].NoTransaction {
+		t.Fatalf("snapshot indexes must use non-transactional concurrent migrations: %+v", migrations)
+	}
 }
 
 func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
@@ -91,6 +94,16 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 		  where table_name = 'tenant_memberships' and column_name = 'permissions_version'
 		)`).Scan(&hasPermissionsVersion); err != nil || !hasPermissionsVersion {
 		t.Fatalf("tenant_memberships.permissions_version missing: exists=%v err=%v", hasPermissionsVersion, err)
+	}
+	var hasProgressPhase, hasRefreshPolicy, acceptsBackground bool
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'report_runs' and column_name = 'progress_phase')`).Scan(&hasProgressPhase); err != nil || !hasProgressPhase {
+		t.Fatalf("report_runs.progress_phase missing: exists=%v err=%v", hasProgressPhase, err)
+	}
+	if err := pool.QueryRow(ctx, `select to_regclass('tenant_dashboard_refresh_policies') is not null`).Scan(&hasRefreshPolicy); err != nil || !hasRefreshPolicy {
+		t.Fatalf("refresh policy table missing: exists=%v err=%v", hasRefreshPolicy, err)
+	}
+	if err := pool.QueryRow(ctx, `select pg_get_constraintdef(oid) like '%BACKGROUND%' from pg_constraint where conrelid = 'report_runs'::regclass and conname = 'report_runs_source_check'`).Scan(&acceptsBackground); err != nil || !acceptsBackground {
+		t.Fatalf("report run source does not accept BACKGROUND: accepts=%v err=%v", acceptsBackground, err)
 	}
 	var acceptsPositionTen bool
 	if err := pool.QueryRow(ctx, `

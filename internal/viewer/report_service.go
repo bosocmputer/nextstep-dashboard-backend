@@ -33,6 +33,37 @@ type ViewerRunStore interface {
 	Cancel(context.Context, uuid.UUID, time.Time) (report.Run, error)
 }
 
+type ViewerSnapshotStore interface {
+	RevalidateSnapshot(context.Context, uuid.UUID, report.Key, report.Period, time.Time) (ReportRevalidation, error)
+	GetExactSnapshotForPeriod(context.Context, uuid.UUID, report.Key, report.Period, time.Time) (DashboardSnapshot, error)
+	GetExactSnapshotsForPeriods(context.Context, uuid.UUID, []SnapshotPeriodRequest, time.Time) (map[report.Key]DashboardSnapshot, error)
+}
+
+func (service *ReportService) ExactSnapshot(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, input CreateReportRunInput) (DashboardSnapshot, error) {
+	definition, ok := report.DefinitionFor(reportKey)
+	if !ok {
+		return DashboardSnapshot{}, ErrReportInputInvalid
+	}
+	now := service.now().UTC()
+	timezone, err := service.authorizedTimezone(ctx, recipientID, tenantID, reportKey)
+	if err != nil {
+		return DashboardSnapshot{}, err
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		return DashboardSnapshot{}, ErrReportInputInvalid
+	}
+	period, err := report.ResolvePeriod(input.PeriodPreset, location, now, input.DateFrom, input.DateTo)
+	if err != nil || !validViewerPeriod(definition.ParameterKind, input.PeriodPreset, period) || periodAfterToday(period, location, now) {
+		return DashboardSnapshot{}, ErrReportInputInvalid
+	}
+	store, ok := service.store.(ViewerSnapshotStore)
+	if !ok {
+		return DashboardSnapshot{}, errors.New("viewer snapshot store is unavailable")
+	}
+	return store.GetExactSnapshotForPeriod(ctx, tenantID, reportKey, period, now)
+}
+
 type CreateReportRunInput struct {
 	PeriodPreset report.Preset
 	DateFrom     *string
@@ -48,13 +79,35 @@ type ReportRows struct {
 }
 
 type ReportService struct {
-	access ReportAccessControl
-	store  ViewerRunStore
-	now    func() time.Time
+	access               ReportAccessControl
+	store                ViewerRunStore
+	now                  func() time.Time
+	snapshotFirstEnabled bool
+	snapshotFirstTenants map[uuid.UUID]struct{}
 }
 
 func NewReportService(access ReportAccessControl, store ViewerRunStore, now func() time.Time) *ReportService {
-	return &ReportService{access: access, store: store, now: now}
+	return &ReportService{access: access, store: store, now: now, snapshotFirstEnabled: true}
+}
+
+func (service *ReportService) ConfigureSnapshotFirst(enabled bool, tenantIDs []uuid.UUID) *ReportService {
+	service.snapshotFirstEnabled = enabled
+	service.snapshotFirstTenants = make(map[uuid.UUID]struct{}, len(tenantIDs))
+	for _, tenantID := range tenantIDs {
+		service.snapshotFirstTenants[tenantID] = struct{}{}
+	}
+	return service
+}
+
+func (service *ReportService) snapshotFirstAllowed(tenantID uuid.UUID) bool {
+	if !service.snapshotFirstEnabled {
+		return false
+	}
+	if len(service.snapshotFirstTenants) == 0 {
+		return true
+	}
+	_, ok := service.snapshotFirstTenants[tenantID]
+	return ok
 }
 
 func (service *ReportService) Create(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, idempotencyKey string, input CreateReportRunInput) (report.Run, error) {
@@ -99,17 +152,132 @@ func (service *ReportService) Get(ctx context.Context, recipientID, tenantID uui
 		return report.Run{}, ErrReportForbidden
 	}
 	if run.Source == report.SourceSchedule {
-		allowed, accessErr := service.store.CanAccessScheduledRun(ctx, recipientID, runID)
-		if accessErr != nil {
-			return report.Run{}, accessErr
+		if run.ResultKind != report.ResultSummary {
+			allowed, accessErr := service.store.CanAccessScheduledRun(ctx, recipientID, runID)
+			if accessErr != nil {
+				return report.Run{}, accessErr
+			}
+			if !allowed {
+				return report.Run{}, ErrReportForbidden
+			}
 		}
-		if !allowed {
-			return report.Run{}, ErrReportForbidden
-		}
+	} else if run.Source == report.SourceBackground && run.ResultKind == report.ResultSummary {
+		// Background summaries are tenant scoped; the current report permission above is the authorization boundary.
 	} else if run.Source != report.SourceDashboard || run.RequestedByRecipient == nil || *run.RequestedByRecipient != recipientID {
 		return report.Run{}, ErrReportForbidden
 	}
 	return run, nil
+}
+
+func (service *ReportService) Revalidate(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, input CreateReportRunInput) (ReportRevalidation, error) {
+	if !service.snapshotFirstAllowed(tenantID) {
+		if err := service.authorizeReport(ctx, recipientID, tenantID, reportKey); err != nil {
+			return ReportRevalidation{}, err
+		}
+		return ReportRevalidation{Disposition: RevalidationDisabled, LegacyFallback: true}, nil
+	}
+	definition, ok := report.DefinitionFor(reportKey)
+	if !ok {
+		return ReportRevalidation{}, ErrReportInputInvalid
+	}
+	now := service.now().UTC()
+	timezone, err := service.authorizedTimezone(ctx, recipientID, tenantID, reportKey)
+	if err != nil {
+		return ReportRevalidation{}, err
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		return ReportRevalidation{}, ErrReportInputInvalid
+	}
+	period, err := report.ResolvePeriod(input.PeriodPreset, location, now, input.DateFrom, input.DateTo)
+	if err != nil || !validViewerPeriod(definition.ParameterKind, input.PeriodPreset, period) || periodAfterToday(period, location, now) {
+		return ReportRevalidation{}, ErrReportInputInvalid
+	}
+	store, ok := service.store.(ViewerSnapshotStore)
+	if !ok {
+		return ReportRevalidation{}, errors.New("viewer snapshot store is unavailable")
+	}
+	return store.RevalidateSnapshot(ctx, tenantID, reportKey, period, now)
+}
+
+func (service *ReportService) RevalidateOverview(ctx context.Context, recipientID, tenantID uuid.UUID, input DashboardRefreshInput) (OverviewRevalidation, error) {
+	if !service.snapshotFirstAllowed(tenantID) {
+		overview, err := service.ExecutiveOverview(ctx, recipientID, tenantID)
+		return OverviewRevalidation{Disposition: RevalidationDisabled, Overview: overview, LegacyFallback: true}, err
+	}
+	tenant, err := service.authorizedTenant(ctx, recipientID, tenantID)
+	if err != nil {
+		return OverviewRevalidation{}, err
+	}
+	if !sameReportKeys(input.ReportKeys, tenant.ReportKeys) {
+		return OverviewRevalidation{}, ErrViewerContextChanged
+	}
+	location, err := time.LoadLocation(tenant.Timezone)
+	if err != nil {
+		return OverviewRevalidation{}, ErrReportInputInvalid
+	}
+	now := service.now().UTC()
+	selectedPeriod, err := report.ResolvePeriod(input.PeriodPreset, location, now, input.DateFrom, input.DateTo)
+	if err != nil || periodAfterToday(selectedPeriod, location, now) {
+		return OverviewRevalidation{}, ErrReportInputInvalid
+	}
+	store, ok := service.store.(ViewerSnapshotStore)
+	if !ok {
+		return OverviewRevalidation{}, errors.New("viewer snapshot store is unavailable")
+	}
+	periods := make([]SnapshotPeriodRequest, 0, len(tenant.ReportKeys))
+	for _, key := range tenant.ReportKeys {
+		definition, found := report.DefinitionFor(key)
+		if !found {
+			return OverviewRevalidation{}, ErrReportForbidden
+		}
+		period, resolveErr := dashboardRefreshPeriod(definition.ParameterKind, selectedPeriod, false, location, now)
+		if resolveErr != nil {
+			return OverviewRevalidation{}, ErrReportInputInvalid
+		}
+		periods = append(periods, SnapshotPeriodRequest{ReportKey: key, Period: period})
+	}
+	exactSnapshots, err := store.GetExactSnapshotsForPeriods(ctx, tenantID, periods, now)
+	if err != nil {
+		return OverviewRevalidation{}, err
+	}
+	result := OverviewRevalidation{Disposition: RevalidationFreshCache, Overview: ExecutiveOverview{TenantID: tenantID, Timezone: tenant.Timezone}}
+	for _, requested := range periods {
+		if snapshot, found := exactSnapshots[requested.ReportKey]; found && snapshot.FreshnessStatus == FreshnessFresh {
+			result.Overview.Items = append(result.Overview.Items, snapshot)
+			continue
+		}
+		item, revalidateErr := store.RevalidateSnapshot(ctx, tenantID, requested.ReportKey, requested.Period, now)
+		if revalidateErr != nil {
+			return OverviewRevalidation{}, revalidateErr
+		}
+		if item.Snapshot != nil && item.Snapshot.FreshnessStatus != FreshnessExpired {
+			result.Overview.Items = append(result.Overview.Items, *item.Snapshot)
+		}
+		if item.Run != nil {
+			result.Runs = append(result.Runs, *item.Run)
+		}
+		if item.RetryAfter > result.RetryAfter {
+			result.RetryAfter = item.RetryAfter
+		}
+		switch item.Disposition {
+		case RevalidationCircuitOpen:
+			result.Disposition = RevalidationCircuitOpen
+		case RevalidationMissingRefreshing:
+			if result.Disposition != RevalidationCircuitOpen {
+				result.Disposition = RevalidationMissingRefreshing
+			}
+		case RevalidationStaleRefreshing, RevalidationJoined:
+			if result.Disposition == RevalidationFreshCache {
+				result.Disposition = item.Disposition
+			}
+		case RevalidationDisabled:
+			if result.Disposition == RevalidationFreshCache {
+				result.Disposition = RevalidationDisabled
+			}
+		}
+	}
+	return result, nil
 }
 
 func (service *ReportService) ListRows(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID, cursor string, pageSize int) (ReportRows, error) {

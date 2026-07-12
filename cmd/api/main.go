@@ -17,6 +17,7 @@ import (
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/line"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/operations"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/recipient"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/schedule"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/secret"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sml"
@@ -48,6 +49,7 @@ func main() {
 	}
 	adminService := auth.NewAdminService(database.NewAdminStore(pool), sessionManager, cfg.AdminPasswordHash, rand.Reader, time.Now)
 	tenantService := tenant.NewService(database.NewTenantStore(pool), time.Now)
+	refreshPolicyService := report.NewRefreshPolicyService(database.NewRefreshPolicyStore(pool), time.Now)
 	secretBox, err := secret.NewBox(cfg.EncryptionMasterKey, cfg.EncryptionKeyID, rand.Reader)
 	if err != nil {
 		logger.Error("create secret box", "error", "encryption configuration rejected")
@@ -59,7 +61,8 @@ func main() {
 	recipientService := recipient.NewService(database.NewRecipientStore(pool), secretBox, sessionManager, rand.Reader, cfg.PublicBaseURL.String(), time.Now)
 	lineVerifier := line.NewIDTokenVerifier(cfg.LineLoginChannelID, line.DefaultIDTokenVerifyEndpoint, 10*time.Second, time.Now)
 	viewerService := viewer.NewService(lineVerifier, recipientService, database.NewViewerStore(pool), sessionManager, time.Now)
-	viewerReportService := viewer.NewReportService(viewerService, database.NewReportStore(pool), time.Now)
+	viewerReportService := viewer.NewReportService(viewerService, database.NewReportStore(pool), time.Now).
+		ConfigureSnapshotFirst(cfg.SnapshotFirstEnabled, cfg.SnapshotFirstTenantIDs)
 	scheduleService := schedule.NewService(database.NewScheduleStore(pool), cfg.LineMessagingAccessToken != "", time.Now)
 	scheduleTestService := schedule.NewTestSendService(database.NewScheduleStore(pool), cfg.LineMessagingAccessToken != "", time.Now)
 	flexPreviewService := line.NewFlexPreviewService(tenantService, cfg.PublicBaseURL, time.Now)
@@ -67,19 +70,20 @@ func main() {
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Dependencies{
-			Logger:         logger,
-			Readiness:      pool,
-			AdminAuth:      adminService,
-			Tenants:        tenantService,
-			SMLConnections: smlService,
-			Recipients:     recipientService,
-			ViewerAuth:     viewerService,
-			ViewerReports:  viewerReportService,
-			Schedules:      scheduleService,
-			FlexPreviews:   flexPreviewService,
-			ScheduleTests:  scheduleTestService,
-			Operations:     operations.NewService(database.NewOperationsStore(pool), recipientService),
-			SecureCookies:  cfg.Environment == "production",
+			Logger:          logger,
+			Readiness:       pool,
+			AdminAuth:       adminService,
+			Tenants:         tenantService,
+			SMLConnections:  smlService,
+			Recipients:      recipientService,
+			ViewerAuth:      viewerService,
+			ViewerReports:   viewerReportService,
+			RefreshPolicies: refreshPolicyService,
+			Schedules:       scheduleService,
+			FlexPreviews:    flexPreviewService,
+			ScheduleTests:   scheduleTestService,
+			Operations:      operations.NewService(database.NewOperationsStore(pool), recipientService),
+			SecureCookies:   cfg.Environment == "production",
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,

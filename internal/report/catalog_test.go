@@ -28,7 +28,7 @@ func TestCatalogKeepsStableTenReportContract(t *testing.T) {
 			t.Errorf("missing definition for %s", key)
 			continue
 		}
-		if definition.Version == "" || definition.LabelTH == "" || definition.CategoryLabelTH == "" || definition.Status != StatusActive || definition.MaxRows != 200_000 {
+		if definition.Version == "" || definition.LabelTH == "" || definition.CategoryLabelTH == "" || definition.Status != StatusActive || definition.MaxRows != 200_000 || definition.RefreshClass == "" || definition.MinimumRefreshInterval <= 0 {
 			t.Errorf("incomplete definition for %s: %+v", key, definition)
 		}
 		if len(definition.LineMetrics) != 2 {
@@ -37,6 +37,31 @@ func TestCatalogKeepsStableTenReportContract(t *testing.T) {
 	}
 	if _, ok := DefinitionFor(Key("unknown_report")); ok {
 		t.Fatal("unknown report key was accepted")
+	}
+}
+
+func TestReportDefinitionsExposeSafeRefreshClasses(t *testing.T) {
+	want := map[Key]RefreshClass{
+		SalesGoodsServices: RefreshFast, ARDebtReceipt: RefreshFast,
+		CashBankReceipts: RefreshFast, CashBankPayments: RefreshFast,
+		PurchaseGoodsPayables: RefreshStandard, GrossProfitByProduct: RefreshStandard,
+		GrossProfitByARCustomer: RefreshStandard, ARCustomerMovement: RefreshStandard,
+		StockReorder: RefreshStandard, StockBalance: RefreshHeavy,
+	}
+	for key, refreshClass := range want {
+		definition, ok := DefinitionFor(key)
+		if !ok || definition.RefreshClass != refreshClass {
+			t.Fatalf("DefinitionFor(%s).RefreshClass = %q, want %q", key, definition.RefreshClass, refreshClass)
+		}
+	}
+	if got := DefaultRefreshInterval(RefreshFast); got != 5*time.Minute {
+		t.Fatalf("fast refresh = %s", got)
+	}
+	if got := DefaultRefreshInterval(RefreshStandard); got != 15*time.Minute {
+		t.Fatalf("standard refresh = %s", got)
+	}
+	if got := DefaultRefreshInterval(RefreshHeavy); got != 30*time.Minute {
+		t.Fatalf("heavy refresh = %s", got)
 	}
 }
 

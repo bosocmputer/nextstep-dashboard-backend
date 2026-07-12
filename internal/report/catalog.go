@@ -25,6 +25,27 @@ const (
 	CurrentOnly ParameterKind = "CURRENT_ONLY"
 )
 
+type RefreshClass string
+
+const (
+	RefreshFast     RefreshClass = "FAST"
+	RefreshStandard RefreshClass = "STANDARD"
+	RefreshHeavy    RefreshClass = "HEAVY"
+)
+
+func DefaultRefreshInterval(class RefreshClass) time.Duration {
+	switch class {
+	case RefreshFast:
+		return 5 * time.Minute
+	case RefreshStandard:
+		return 15 * time.Minute
+	case RefreshHeavy:
+		return 30 * time.Minute
+	default:
+		return 0
+	}
+}
+
 type Metric struct {
 	Key     string
 	LabelTH string
@@ -38,19 +59,21 @@ const (
 )
 
 type Definition struct {
-	Key             Key
-	Version         string
-	LabelTH         string
-	Category        string
-	CategoryLabelTH string
-	Status          Status
-	Sensitive       bool
-	ParameterKind   ParameterKind
-	LineMetrics     []Metric
-	SummaryTimeout  time.Duration
-	DetailTimeout   time.Duration
-	MaxRows         int
-	MaxRangeDays    int
+	Key                    Key
+	Version                string
+	LabelTH                string
+	Category               string
+	CategoryLabelTH        string
+	Status                 Status
+	Sensitive              bool
+	ParameterKind          ParameterKind
+	LineMetrics            []Metric
+	SummaryTimeout         time.Duration
+	DetailTimeout          time.Duration
+	MaxRows                int
+	MaxRangeDays           int
+	RefreshClass           RefreshClass
+	MinimumRefreshInterval time.Duration
 }
 
 var orderedDefinitions = []Definition{
@@ -79,20 +102,28 @@ func definition(key Key, label, category string, sensitive bool, parameterKind P
 		"SALES": "ขาย", "PURCHASE": "ซื้อ", "GROSS_PROFIT": "กำไรขั้นต้น",
 		"INVENTORY": "สินค้าคงคลัง", "AR": "ลูกหนี้", "CASH_BANK": "เงินสดและธนาคาร",
 	}
+	refreshClass := RefreshStandard
+	if key == SalesGoodsServices || key == ARDebtReceipt || key == CashBankReceipts || key == CashBankPayments {
+		refreshClass = RefreshFast
+	} else if key == StockBalance {
+		refreshClass = RefreshHeavy
+	}
 	return Definition{
-		Key:             key,
-		Version:         "1.0.0",
-		LabelTH:         label,
-		Category:        category,
-		CategoryLabelTH: categoryLabels[category],
-		Status:          StatusActive,
-		Sensitive:       sensitive,
-		ParameterKind:   parameterKind,
-		LineMetrics:     []Metric{{Key: firstMetricKey, LabelTH: firstMetricLabel}, {Key: secondMetricKey, LabelTH: secondMetricLabel}},
-		SummaryTimeout:  30 * time.Second,
-		DetailTimeout:   120 * time.Second,
-		MaxRows:         200_000,
-		MaxRangeDays:    366,
+		Key:                    key,
+		Version:                "1.0.0",
+		LabelTH:                label,
+		Category:               category,
+		CategoryLabelTH:        categoryLabels[category],
+		Status:                 StatusActive,
+		Sensitive:              sensitive,
+		ParameterKind:          parameterKind,
+		LineMetrics:            []Metric{{Key: firstMetricKey, LabelTH: firstMetricLabel}, {Key: secondMetricKey, LabelTH: secondMetricLabel}},
+		SummaryTimeout:         30 * time.Second,
+		DetailTimeout:          120 * time.Second,
+		MaxRows:                200_000,
+		MaxRangeDays:           366,
+		RefreshClass:           refreshClass,
+		MinimumRefreshInterval: DefaultRefreshInterval(refreshClass),
 	}
 }
 

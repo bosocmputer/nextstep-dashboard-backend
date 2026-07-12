@@ -51,6 +51,8 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 		"LINE_MESSAGING_CHANNEL_ACCESS_TOKEN": strings.Repeat("x", 64),
 		"DATABASE_MAX_CONNECTIONS":            "24",
 		"DATABASE_MIN_CONNECTIONS":            "3",
+		"SNAPSHOT_FIRST_ENABLED":              "true",
+		"SNAPSHOT_FIRST_TENANT_IDS":           "a904bc92-a89b-463b-bc2a-565f09cbef44",
 	}
 
 	cfg, err := Load(func(key string) (string, bool) {
@@ -83,6 +85,9 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 	}
 	if len(cfg.SMLAllowedHosts) != 1 || cfg.SMLAllowedHosts[0] != "sml-shop.example.com" {
 		t.Fatalf("SMLAllowedHosts = %#v", cfg.SMLAllowedHosts)
+	}
+	if !cfg.SnapshotFirstEnabled || len(cfg.SnapshotFirstTenantIDs) != 1 {
+		t.Fatalf("snapshot first config = enabled:%v tenants:%v", cfg.SnapshotFirstEnabled, cfg.SnapshotFirstTenantIDs)
 	}
 }
 

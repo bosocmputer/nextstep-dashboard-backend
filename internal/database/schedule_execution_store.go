@@ -100,8 +100,13 @@ func (store *ScheduleStore) MaterializeTest(ctx context.Context, actorHash []byt
 		if _, err := tx.Exec(ctx, `
 			insert into report_runs (
 			  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
-			  period_from, period_to, params_json, queued_at, expires_at, created_at, updated_at
-			) values ($1, $2, $3, 'SCHEDULE', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9, $10, $9, $9)`,
+			  period_from, period_to, params_json, queued_at, expires_at, created_at, updated_at,
+			  result_kind, priority, report_definition_version, data_source_version, progress_phase, progress_updated_at
+			)
+			select $1, $2, $3, 'SCHEDULE', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9, $10, $9, $9,
+			       'SUMMARY', 100, d.version, coalesce(c.version, 0), 'QUEUED', $9
+			from report_definitions d left join tenant_sml_connections c on c.tenant_id = $2
+			where d.report_key = $3`,
 			reportRunID, tenantID, reportKey, reportIdempotencyKey, period.Preset, period.DateFrom, period.DateTo,
 			paramsJSON, now, now.AddDate(0, 3, 0)); err != nil {
 			return schedule.Execution{}, fmt.Errorf("enqueue test report %s: %w", reportKey, err)
@@ -212,8 +217,13 @@ func (store *ScheduleStore) MaterializeDue(ctx context.Context, workerID string,
 		if _, err := tx.Exec(ctx, `
 			insert into report_runs (
 			  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
-			  period_from, period_to, params_json, queued_at, expires_at, created_at, updated_at
-			) values ($1, $2, $3, 'SCHEDULE', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9, $10, $9, $9)`,
+			  period_from, period_to, params_json, queued_at, expires_at, created_at, updated_at,
+			  result_kind, priority, report_definition_version, data_source_version, progress_phase, progress_updated_at
+			)
+			select $1, $2, $3, 'SCHEDULE', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9, $10, $9, $9,
+			       'SUMMARY', 100, d.version, coalesce(c.version, 0), 'QUEUED', $9
+			from report_definitions d left join tenant_sml_connections c on c.tenant_id = $2
+			where d.report_key = $3`,
 			reportRunID, item.TenantID, reportKey, idempotencyKey, period.Preset, period.DateFrom, period.DateTo,
 			paramsJSON, now, now.AddDate(0, 3, 0)); err != nil {
 			return schedule.Execution{}, fmt.Errorf("enqueue scheduled report %s: %w", reportKey, err)

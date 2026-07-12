@@ -14,23 +14,38 @@ import (
 )
 
 type fakeViewerReportAPI struct {
-	created       report.Run
-	createErr     error
-	got           report.Run
-	getErr        error
-	rows          viewer.ReportRows
-	rowsErr       error
-	dashboard     report.Dashboard
-	dashboardErr  error
-	overview      viewer.ExecutiveOverview
-	overviewErr   error
-	refresh       viewer.DashboardRefresh
-	refreshInput  *viewer.DashboardRefreshInput
-	refreshResult viewer.DashboardRefreshResult
-	refreshErr    error
-	cancelled     report.Run
-	cancelErr     error
-	createCall    int
+	created              report.Run
+	createErr            error
+	got                  report.Run
+	getErr               error
+	rows                 viewer.ReportRows
+	rowsErr              error
+	dashboard            report.Dashboard
+	dashboardErr         error
+	overview             viewer.ExecutiveOverview
+	overviewErr          error
+	refresh              viewer.DashboardRefresh
+	refreshInput         *viewer.DashboardRefreshInput
+	refreshResult        viewer.DashboardRefreshResult
+	refreshErr           error
+	cancelled            report.Run
+	cancelErr            error
+	createCall           int
+	snapshot             viewer.DashboardSnapshot
+	revalidation         viewer.ReportRevalidation
+	overviewRevalidation viewer.OverviewRevalidation
+}
+
+func (fake *fakeViewerReportAPI) ExactSnapshot(context.Context, uuid.UUID, uuid.UUID, report.Key, viewer.CreateReportRunInput) (viewer.DashboardSnapshot, error) {
+	return fake.snapshot, fake.getErr
+}
+
+func (fake *fakeViewerReportAPI) Revalidate(context.Context, uuid.UUID, uuid.UUID, report.Key, viewer.CreateReportRunInput) (viewer.ReportRevalidation, error) {
+	return fake.revalidation, fake.createErr
+}
+
+func (fake *fakeViewerReportAPI) RevalidateOverview(context.Context, uuid.UUID, uuid.UUID, viewer.DashboardRefreshInput) (viewer.OverviewRevalidation, error) {
+	return fake.overviewRevalidation, fake.refreshErr
 }
 
 func (fake *fakeViewerReportAPI) Create(context.Context, uuid.UUID, uuid.UUID, report.Key, string, viewer.CreateReportRunInput) (report.Run, error) {
@@ -97,6 +112,32 @@ func TestViewerCreatesFreshReportRunWithCSRFAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestViewerRevalidationReturnsCachedSnapshotAndHonestProgress(t *testing.T) {
+	recipientID, tenantID, runID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	reportAPI := &fakeViewerReportAPI{revalidation: viewer.ReportRevalidation{
+		Disposition: viewer.RevalidationStaleRefreshing,
+		Snapshot:    &viewer.DashboardSnapshot{RunID: uuid.New(), FreshnessStatus: viewer.FreshnessRefreshing, DetailsAvailable: false},
+		Run: &report.Run{ID: runID, TenantID: tenantID, ReportKey: report.StockBalance, Source: report.SourceBackground,
+			ResultKind: report.ResultSummary, Status: report.StatusRunning, Period: report.Period{Preset: report.Custom, DateFrom: "2026-07-12", DateTo: "2026-07-12"},
+			QueuedAt: now.Add(-40 * time.Second), ExpiresAt: now.Add(24 * time.Hour), ProgressPhase: report.ProgressQueryingCurrent,
+			ExpectedP50MS: 45_000, ExpectedP90MS: 47_000, ExpectedSampleCount: 11},
+	}}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), ViewerAuth: &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: recipientID}}, ViewerReports: reportAPI})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/viewer/tenants/"+tenantID.String()+"/reports/stock_balance/revalidations", strings.NewReader(`{"periodPreset":"CUSTOM","dateFrom":"2026-07-12","dateTo":"2026-07-12"}`))
+	request.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", "viewer-csrf")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, `"disposition":"STALE_REFRESHING"`) || !strings.Contains(body, `"phase":"QUERYING_CURRENT"`) || !strings.Contains(body, `"expectedP90Ms":47000`) {
+		t.Fatalf("status=%d body=%s", response.Code, body)
+	}
+}
+
 func TestViewerReportRunRejectsMissingIdempotencyBeforeQueueing(t *testing.T) {
 	tenantID := uuid.New()
 	authAPI := &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: uuid.New()}}
@@ -112,6 +153,18 @@ func TestViewerReportRunRejectsMissingIdempotencyBeforeQueueing(t *testing.T) {
 
 	if response.Code != http.StatusUnprocessableEntity || reportAPI.createCall != 0 {
 		t.Fatalf("status = %d calls=%d body=%s", response.Code, reportAPI.createCall, response.Body.String())
+	}
+}
+
+func TestViewerReportCircuitOpenReturnsRetryableRateLimit(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/viewer/tenants/test/reports/test/runs", nil)
+	response := httptest.NewRecorder()
+
+	if !handleViewerReportError(response, request, report.ErrRunCircuitOpen) {
+		t.Fatal("handleViewerReportError() did not handle circuit-open error")
+	}
+	if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "60" || !strings.Contains(response.Body.String(), "SML_CIRCUIT_OPEN") {
+		t.Fatalf("response = status %d retry-after %q body %s", response.Code, response.Header().Get("Retry-After"), response.Body.String())
 	}
 }
 

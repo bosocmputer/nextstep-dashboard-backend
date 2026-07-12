@@ -73,7 +73,7 @@ func (store *RetentionStore) Run(ctx context.Context, policy retention.Policy, n
 	if counts.ReportRuns, err = execRetention(ctx, tx, `
 		delete from report_runs where id in (
 		  select id from report_runs
-		  where source = 'DASHBOARD' and created_at <= $1
+		  where source in ('DASHBOARD', 'BACKGROUND') and created_at <= $1
 		  order by created_at limit $2
 		)`, snapshotCutoff, policy.BatchSize); err != nil {
 		return retention.Counts{}, err
