@@ -192,6 +192,7 @@ type ViewerReportAPI interface {
 	Get(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error)
 	GetDashboard(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Dashboard, error)
 	ExecutiveOverview(context.Context, uuid.UUID, uuid.UUID) (viewer.ExecutiveOverview, error)
+	ExactOverview(context.Context, uuid.UUID, uuid.UUID, viewer.DashboardRefreshInput) (viewer.ExecutiveOverview, error)
 	CreateDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, string, *viewer.DashboardRefreshInput) (viewer.DashboardRefresh, error)
 	GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefresh, error)
 	GetDashboardRefreshResult(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefreshResult, error)

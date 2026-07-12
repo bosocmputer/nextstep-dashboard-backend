@@ -35,6 +35,9 @@ type fakeViewerRunStore struct {
 	refreshRecipient   uuid.UUID
 	scheduledRecipient uuid.UUID
 	cancelled          bool
+	exactSnapshots     map[report.Key]DashboardSnapshot
+	exactRequests      []SnapshotPeriodRequest
+	revalidationCalls  int
 }
 
 func (fake *fakeViewerRunStore) Enqueue(_ context.Context, input report.EnqueueInput, _ time.Time) (report.Run, error) {
@@ -86,6 +89,49 @@ func (fake *fakeViewerRunStore) Cancel(context.Context, uuid.UUID, time.Time) (r
 	fake.cancelled = true
 	fake.run.Status = report.StatusCancelled
 	return fake.run, nil
+}
+
+func (fake *fakeViewerRunStore) RevalidateSnapshot(context.Context, uuid.UUID, report.Key, report.Period, time.Time) (ReportRevalidation, error) {
+	fake.revalidationCalls++
+	return ReportRevalidation{}, nil
+}
+
+func (fake *fakeViewerRunStore) GetExactSnapshotForPeriod(_ context.Context, _ uuid.UUID, key report.Key, _ report.Period, _ time.Time) (DashboardSnapshot, error) {
+	if snapshot, ok := fake.exactSnapshots[key]; ok {
+		return snapshot, nil
+	}
+	return DashboardSnapshot{}, report.ErrRunNotFound
+}
+
+func (fake *fakeViewerRunStore) GetExactSnapshotsForPeriods(_ context.Context, _ uuid.UUID, requests []SnapshotPeriodRequest, _ time.Time) (map[report.Key]DashboardSnapshot, error) {
+	fake.exactRequests = append([]SnapshotPeriodRequest(nil), requests...)
+	return fake.exactSnapshots, nil
+}
+
+func TestReportServiceExactOverviewReadsCacheWithoutEnqueueing(t *testing.T) {
+	now := time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC)
+	recipientID, tenantID := uuid.New(), uuid.New()
+	access := &fakeReportAccess{allowed: true, tenants: []TenantAccess{{
+		ID: tenantID, Timezone: "Asia/Bangkok", ReportKeys: []report.Key{report.SalesGoodsServices, report.StockBalance},
+	}}}
+	salesSnapshot := DashboardSnapshot{RunID: uuid.New(), Dashboard: report.Dashboard{ReportKey: report.SalesGoodsServices}}
+	store := &fakeViewerRunStore{exactSnapshots: map[report.Key]DashboardSnapshot{report.SalesGoodsServices: salesSnapshot}}
+	service := NewReportService(access, store, func() time.Time { return now })
+
+	overview, err := service.ExactOverview(context.Background(), recipientID, tenantID, DashboardRefreshInput{
+		PeriodPreset: report.MonthToDate,
+		ReportKeys:   []report.Key{report.SalesGoodsServices, report.StockBalance},
+	})
+
+	if err != nil || len(overview.Items) != 1 || overview.Items[0].RunID != salesSnapshot.RunID {
+		t.Fatalf("ExactOverview() = %+v, %v", overview, err)
+	}
+	if len(store.exactRequests) != 2 || store.exactRequests[0].Period.DateFrom != "2026-07-01" || store.exactRequests[0].Period.DateTo != "2026-07-12" || store.exactRequests[1].Period.DateFrom != "2026-07-12" || store.exactRequests[1].Period.DateTo != "2026-07-12" {
+		t.Fatalf("exact requests = %+v", store.exactRequests)
+	}
+	if store.revalidationCalls != 0 || store.enqueued.ReportKey != "" {
+		t.Fatalf("cache-only lookup caused work: revalidations=%d enqueued=%+v", store.revalidationCalls, store.enqueued)
+	}
 }
 
 func TestReportServiceCreatesFreshRunInTenantTimezone(t *testing.T) {

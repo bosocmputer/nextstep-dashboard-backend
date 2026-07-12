@@ -200,6 +200,55 @@ func (service *ReportService) Revalidate(ctx context.Context, recipientID, tenan
 	return store.RevalidateSnapshot(ctx, tenantID, reportKey, period, now)
 }
 
+// ExactOverview resolves only snapshots that already exist for the requested
+// periods. It never enqueues or joins SML work, so navigation and cache lookup
+// remain read-only operations.
+func (service *ReportService) ExactOverview(ctx context.Context, recipientID, tenantID uuid.UUID, input DashboardRefreshInput) (ExecutiveOverview, error) {
+	tenant, err := service.authorizedTenant(ctx, recipientID, tenantID)
+	if err != nil {
+		return ExecutiveOverview{}, err
+	}
+	if !sameReportKeys(input.ReportKeys, tenant.ReportKeys) {
+		return ExecutiveOverview{}, ErrViewerContextChanged
+	}
+	location, err := time.LoadLocation(tenant.Timezone)
+	if err != nil {
+		return ExecutiveOverview{}, ErrReportInputInvalid
+	}
+	now := service.now().UTC()
+	selectedPeriod, err := report.ResolvePeriod(input.PeriodPreset, location, now, input.DateFrom, input.DateTo)
+	if err != nil || periodAfterToday(selectedPeriod, location, now) {
+		return ExecutiveOverview{}, ErrReportInputInvalid
+	}
+	store, ok := service.store.(ViewerSnapshotStore)
+	if !ok {
+		return ExecutiveOverview{}, errors.New("viewer snapshot store is unavailable")
+	}
+	periods := make([]SnapshotPeriodRequest, 0, len(tenant.ReportKeys))
+	for _, key := range tenant.ReportKeys {
+		definition, found := report.DefinitionFor(key)
+		if !found {
+			return ExecutiveOverview{}, ErrReportForbidden
+		}
+		period, resolveErr := dashboardRefreshPeriod(definition.ParameterKind, selectedPeriod, false, location, now)
+		if resolveErr != nil {
+			return ExecutiveOverview{}, ErrReportInputInvalid
+		}
+		periods = append(periods, SnapshotPeriodRequest{ReportKey: key, Period: period})
+	}
+	exactSnapshots, err := store.GetExactSnapshotsForPeriods(ctx, tenantID, periods, now)
+	if err != nil {
+		return ExecutiveOverview{}, err
+	}
+	overview := ExecutiveOverview{TenantID: tenantID, Timezone: tenant.Timezone}
+	for _, requested := range periods {
+		if snapshot, found := exactSnapshots[requested.ReportKey]; found && snapshot.FreshnessStatus != FreshnessExpired {
+			overview.Items = append(overview.Items, snapshot)
+		}
+	}
+	return overview, nil
+}
+
 func (service *ReportService) RevalidateOverview(ctx context.Context, recipientID, tenantID uuid.UUID, input DashboardRefreshInput) (OverviewRevalidation, error) {
 	if !service.snapshotFirstAllowed(tenantID) {
 		overview, err := service.ExecutiveOverview(ctx, recipientID, tenantID)

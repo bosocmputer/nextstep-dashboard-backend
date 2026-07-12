@@ -24,6 +24,9 @@ type fakeViewerReportAPI struct {
 	dashboardErr         error
 	overview             viewer.ExecutiveOverview
 	overviewErr          error
+	exactOverview        viewer.ExecutiveOverview
+	exactOverviewInput   viewer.DashboardRefreshInput
+	exactOverviewCalls   int
 	refresh              viewer.DashboardRefresh
 	refreshInput         *viewer.DashboardRefreshInput
 	refreshResult        viewer.DashboardRefreshResult
@@ -67,6 +70,12 @@ func (fake *fakeViewerReportAPI) GetDashboard(context.Context, uuid.UUID, uuid.U
 
 func (fake *fakeViewerReportAPI) ExecutiveOverview(context.Context, uuid.UUID, uuid.UUID) (viewer.ExecutiveOverview, error) {
 	return fake.overview, fake.overviewErr
+}
+
+func (fake *fakeViewerReportAPI) ExactOverview(_ context.Context, _ uuid.UUID, _ uuid.UUID, input viewer.DashboardRefreshInput) (viewer.ExecutiveOverview, error) {
+	fake.exactOverviewCalls++
+	fake.exactOverviewInput = input
+	return fake.exactOverview, fake.overviewErr
 }
 
 func (fake *fakeViewerReportAPI) CreateDashboardRefresh(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string, input *viewer.DashboardRefreshInput) (viewer.DashboardRefresh, error) {
@@ -135,6 +144,51 @@ func TestViewerRevalidationReturnsCachedSnapshotAndHonestProgress(t *testing.T) 
 	body := response.Body.String()
 	if response.Code != http.StatusOK || !strings.Contains(body, `"disposition":"STALE_REFRESHING"`) || !strings.Contains(body, `"phase":"QUERYING_CURRENT"`) || !strings.Contains(body, `"expectedP90Ms":47000`) {
 		t.Fatalf("status=%d body=%s", response.Code, body)
+	}
+}
+
+func TestViewerExecutiveOverviewExactPeriodLookupDoesNotRevalidate(t *testing.T) {
+	recipientID, tenantID := uuid.New(), uuid.New()
+	reportAPI := &fakeViewerReportAPI{exactOverview: viewer.ExecutiveOverview{
+		TenantID: tenantID, Timezone: "Asia/Bangkok",
+		Items: []viewer.DashboardSnapshot{{RunID: uuid.New(), Dashboard: report.Dashboard{ReportKey: report.SalesGoodsServices}}},
+	}}
+	handler := NewHandler(Dependencies{
+		Readiness:     readinessFunc(func(context.Context) error { return nil }),
+		ViewerAuth:    &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: recipientID}},
+		ViewerReports: reportAPI,
+	})
+	path := "/api/v1/viewer/tenants/" + tenantID.String() + "/executive-overview?periodPreset=MONTH_TO_DATE&reportKey=sales_goods_services&reportKey=stock_balance"
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || reportAPI.exactOverviewCalls != 1 || reportAPI.exactOverviewInput.PeriodPreset != report.MonthToDate || len(reportAPI.exactOverviewInput.ReportKeys) != 2 {
+		t.Fatalf("status=%d calls=%d input=%+v body=%s", response.Code, reportAPI.exactOverviewCalls, reportAPI.exactOverviewInput, response.Body.String())
+	}
+	if reportAPI.overviewRevalidation.Overview.TenantID != uuid.Nil {
+		t.Fatalf("cache-only GET touched revalidation: %+v", reportAPI.overviewRevalidation)
+	}
+}
+
+func TestViewerExecutiveOverviewRejectsPartialExactPeriodQuery(t *testing.T) {
+	tenantID := uuid.New()
+	reportAPI := &fakeViewerReportAPI{}
+	handler := NewHandler(Dependencies{
+		Readiness:     readinessFunc(func(context.Context) error { return nil }),
+		ViewerAuth:    &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: uuid.New()}},
+		ViewerReports: reportAPI,
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/viewer/tenants/"+tenantID.String()+"/executive-overview?reportKey=sales_goods_services", nil)
+	request.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnprocessableEntity || reportAPI.exactOverviewCalls != 0 {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, reportAPI.exactOverviewCalls, response.Body.String())
 	}
 }
 

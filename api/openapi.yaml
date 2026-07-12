@@ -633,10 +633,29 @@ paths:
       tags: [Viewer]
       operationId: getViewerExecutiveOverview
       security: [{ViewerSession: []}]
-      parameters: [{$ref: '#/components/parameters/TenantID'}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - name: periodPreset
+          in: query
+          description: When present, resolve exact-period snapshots without starting SML work.
+          schema: {type: string, enum: [YESTERDAY, TODAY_TO_NOW, MONTH_TO_DATE, CUSTOM]}
+        - name: dateFrom
+          in: query
+          schema: {type: string, format: date}
+        - name: dateTo
+          in: query
+          schema: {type: string, format: date}
+        - name: reportKey
+          in: query
+          description: Repeat once for every currently authorized report when periodPreset is present.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: {$ref: '#/components/schemas/ReportKey'}
       responses:
         '200':
-          description: Latest compact dashboards for reports authorized to the verified viewer.
+          description: Latest dashboards, or exact-period cached snapshots when period parameters are supplied. This endpoint never enqueues SML work.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ExecutiveOverview'}

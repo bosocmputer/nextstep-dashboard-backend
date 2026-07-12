@@ -96,7 +96,19 @@ func registerViewerReportRoutes(router chi.Router, viewerAuth ViewerAPI, viewerR
 		if !ok {
 			return
 		}
-		overview, err := viewerReports.ExecutiveOverview(request.Context(), authenticated.RecipientID, tenantID)
+		var overview viewer.ExecutiveOverview
+		var err error
+		query := request.URL.Query()
+		hasExactPeriodQuery := query.Has("periodPreset") || query.Has("dateFrom") || query.Has("dateTo") || query.Has("reportKey")
+		if hasExactPeriodQuery {
+			input, valid := parseViewerOverviewPeriodQuery(response, request)
+			if !valid {
+				return
+			}
+			overview, err = viewerReports.ExactOverview(request.Context(), authenticated.RecipientID, tenantID, input)
+		} else {
+			overview, err = viewerReports.ExecutiveOverview(request.Context(), authenticated.RecipientID, tenantID)
+		}
 		if handleViewerReportError(response, request, err) {
 			return
 		}
@@ -315,6 +327,32 @@ func parseViewerPeriodQuery(response http.ResponseWriter, request *http.Request)
 	if input.PeriodPreset == "" {
 		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "periodPreset is required.", false)
 		return viewer.CreateReportRunInput{}, false
+	}
+	return input, true
+}
+
+func parseViewerOverviewPeriodQuery(response http.ResponseWriter, request *http.Request) (viewer.DashboardRefreshInput, bool) {
+	query := request.URL.Query()
+	input := viewer.DashboardRefreshInput{
+		PeriodPreset: report.Preset(query.Get("periodPreset")),
+		ReportKeys:   make([]report.Key, 0, len(query["reportKey"])),
+	}
+	for _, value := range query["reportKey"] {
+		if value == "" {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "reportKey is invalid.", false)
+			return viewer.DashboardRefreshInput{}, false
+		}
+		input.ReportKeys = append(input.ReportKeys, report.Key(value))
+	}
+	if value := query.Get("dateFrom"); value != "" {
+		input.DateFrom = &value
+	}
+	if value := query.Get("dateTo"); value != "" {
+		input.DateTo = &value
+	}
+	if input.PeriodPreset == "" || len(input.ReportKeys) == 0 {
+		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "periodPreset and reportKey are required.", false)
+		return viewer.DashboardRefreshInput{}, false
 	}
 	return input, true
 }
