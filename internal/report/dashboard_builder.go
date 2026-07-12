@@ -60,19 +60,9 @@ func BuildDashboard(key Key, period, comparisonPeriod Period, currentSteps, prev
 	}
 	dashboard.Visualizations = visualizations
 	if !ComparisonSupported(key, period) {
-		SetComparisonUnavailable(&dashboard, ComparisonUnavailableReason(key, period))
+		SetComparisonUnavailable(&dashboard, "")
 	}
 	return dashboard, nil
-}
-
-func ComparisonUnavailableReason(key Key, period Period) string {
-	if key == StockReorder {
-		return "COMPARISON_UNAVAILABLE_FOR_REPORT"
-	}
-	if period.Preset == TodayToNow {
-		return "COMPARISON_TIME_WINDOW_UNAVAILABLE"
-	}
-	return "COMPARISON_UNAVAILABLE_FOR_PERIOD"
 }
 
 // ComparisonSupported prevents unlike time windows and current-only reports

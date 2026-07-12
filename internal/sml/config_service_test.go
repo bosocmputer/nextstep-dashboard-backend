@@ -78,7 +78,7 @@ func TestConnectionServiceEncryptsSecretsAndReturnsOnlyRedactedStatus(t *testing
 	if err != nil {
 		t.Fatalf("Replace() error = %v", err)
 	}
-	if status.EndpointHost != "10.0.0.8:8080" || status.DatabaseName != "sml1_2026" || status.Version != 1 {
+	if status.EndpointURL != "http://10.0.0.8:8080" || status.EndpointHost != "10.0.0.8:8080" || status.DatabaseName != "sml1_2026" || status.Version != 1 {
 		t.Fatalf("status = %+v", status)
 	}
 	serialized := string(store.stored.Username.Ciphertext) + string(store.stored.Password.Ciphertext)
@@ -87,6 +87,13 @@ func TestConnectionServiceEncryptsSecretsAndReturnsOnlyRedactedStatus(t *testing
 	}
 	if got := strings.Join([]string{status.EndpointHost, status.DatabaseName, status.LastSafeErrorCode}, "|"); strings.Contains(got, "sml-user") || strings.Contains(got, "sml-password") {
 		t.Fatal("redacted status exposed credential")
+	}
+}
+
+func TestConnectionStatusPreservesCustomEndpointPathForSafeEditing(t *testing.T) {
+	status := redactedStatus(StoredConnection{EndpointURL: "https://sml.example.com/custom/service", Version: 3})
+	if status.EndpointURL != "https://sml.example.com/custom/service" || status.EndpointHost != "sml.example.com" {
+		t.Fatalf("status = %+v", status)
 	}
 }
 

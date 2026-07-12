@@ -113,6 +113,9 @@ func RenderFlexWithStats(input FlexInput) (result FlexRenderResult, err error) {
 		flexText(periodLabel(input.Period), "sm", flexMutedColor, false, true, "sm"),
 		flexText(runeCountLabel(len(presentations)), "xs", "#94A3B8", false, true, "xs"),
 	}
+	if input.Period.Preset == report.TodayToNow {
+		bodyContents = append(bodyContents, flexText("วันนี้ยังไม่มีช่วงเวลาเปรียบเทียบที่เท่ากัน", "xs", flexMutedColor, false, true, "sm"))
+	}
 	lastCategory := ""
 	for _, item := range presentations {
 		if item.CategoryLabel != lastCategory {

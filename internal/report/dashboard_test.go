@@ -168,6 +168,9 @@ func TestBuildDashboardRemovesUnsupportedComparisonFromMetricsAndCharts(t *testi
 			}
 		}
 	}
+	if dashboard.Quality.Status != "OK" || len(dashboard.Quality.Warnings) != 0 {
+		t.Fatalf("expected comparison policy was treated as a data-quality warning = %+v", dashboard.Quality)
+	}
 }
 
 func TestSetComparisonUnavailableClearsFailedComparison(t *testing.T) {

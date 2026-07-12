@@ -53,6 +53,7 @@ type StoredConnection struct {
 
 type ConnectionStatus struct {
 	IsConfigured      bool       `json:"isConfigured"`
+	EndpointURL       string     `json:"endpointUrl"`
 	EndpointHost      string     `json:"endpointHost"`
 	DatabaseName      string     `json:"databaseName"`
 	ConfigFileName    string     `json:"configFileName"`
@@ -228,12 +229,19 @@ func validationError(field, code string) *ValidationError {
 }
 
 func redactedStatus(stored StoredConnection) ConnectionStatus {
-	host := ""
+	host, editableURL := "", ""
 	if endpoint, err := url.Parse(stored.EndpointURL); err == nil {
 		host = endpoint.Host
+		editableURL = stored.EndpointURL
+		if strings.EqualFold(endpoint.Path, "/SMLJavaWebService/DotNetFrameWork") {
+			base := *endpoint
+			base.Path = ""
+			base.RawPath = ""
+			editableURL = strings.TrimSuffix(base.String(), "/")
+		}
 	}
 	return ConnectionStatus{
-		IsConfigured: true, EndpointHost: host, DatabaseName: stored.DatabaseName, ConfigFileName: stored.ConfigFileName,
+		IsConfigured: true, EndpointURL: editableURL, EndpointHost: host, DatabaseName: stored.DatabaseName, ConfigFileName: stored.ConfigFileName,
 		Readiness: stored.Readiness, LastTestedAt: stored.LastTestedAt, LastSafeErrorCode: stored.LastSafeErrorCode, Version: stored.Version,
 	}
 }

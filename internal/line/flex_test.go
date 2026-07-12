@@ -68,6 +68,26 @@ func TestThaiPeriodLabelHandlesSingleDayMonthAndYearBoundaries(t *testing.T) {
 	}
 }
 
+func TestRenderFlexExplainsTodayToNowWithoutTreatingItAsBrokenData(t *testing.T) {
+	item := flexReport(report.PurchaseGoodsPayables)
+	period := report.Period{Preset: report.TodayToNow, DateFrom: "2026-07-12", DateTo: "2026-07-12"}
+	dashboard := previewDashboard(report.PurchaseGoodsPayables, period)
+	for index := range dashboard.KPIs {
+		dashboard.KPIs[index].Value = "0"
+	}
+	item.Dashboard = &dashboard
+	payload, err := RenderFlex(FlexInput{
+		TenantName: "ร้านตัวอย่าง", Timezone: "Asia/Bangkok", Period: period,
+		GeneratedAt: time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC), ActionURL: "https://dashboard.nextstep-soft.com/app", Reports: []FlexReport{item},
+	})
+	if err != nil {
+		t.Fatalf("RenderFlex() error = %v", err)
+	}
+	if !strings.Contains(string(payload), "วันนี้ยังไม่มีช่วงเวลาเปรียบเทียบที่เท่ากัน") || !strings.Contains(string(payload), "ไม่มีรายการซื้อในช่วงนี้") {
+		t.Fatalf("today-to-now context or trusted ZERO state missing: %s", payload)
+	}
+}
+
 func TestRenderFlexWithStatsReportsSafeBoundedTelemetry(t *testing.T) {
 	item := flexReport(report.SalesGoodsServices)
 	dashboard := previewDashboard(report.SalesGoodsServices, report.Period{DateFrom: "2026-07-12", DateTo: "2026-07-12"})

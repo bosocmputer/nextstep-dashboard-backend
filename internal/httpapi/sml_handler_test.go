@@ -32,7 +32,7 @@ func (fake *fakeSMLAPI) Test(context.Context, []byte, string, uuid.UUID) (sml.Co
 
 func TestReplaceSMLConnectionNeverEchoesCredentials(t *testing.T) {
 	adminAuth := &fakeAdminAuth{admin: auth.AuthenticatedAdmin{Username: "superadmin"}}
-	smlAPI := &fakeSMLAPI{status: sml.ConnectionStatus{IsConfigured: true, EndpointHost: "10.0.0.8:8080", DatabaseName: "demo", ConfigFileName: "SMLConfigDATA.xml", Version: 1}}
+	smlAPI := &fakeSMLAPI{status: sml.ConnectionStatus{IsConfigured: true, EndpointURL: "http://10.0.0.8:8080", EndpointHost: "10.0.0.8:8080", DatabaseName: "demo", ConfigFileName: "SMLConfigDATA.xml", Version: 1}}
 	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: adminAuth, SMLConnections: smlAPI})
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/tenants/4a06e1c2-29cd-4b5a-81d4-b2a26c2e11ec/sml-connection", strings.NewReader(`{"endpointUrl":"http://10.0.0.8/service","configFileName":"SMLConfigDATA.xml","databaseName":"demo","username":"sml-user","password":"sml-password","version":0}`))
 	request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "session"})
@@ -43,7 +43,7 @@ func TestReplaceSMLConnectionNeverEchoesCredentials(t *testing.T) {
 	handler.ServeHTTP(response, request)
 
 	body := response.Body.String()
-	if response.Code != http.StatusOK || strings.Contains(body, "sml-user") || strings.Contains(body, "sml-password") {
+	if response.Code != http.StatusOK || !strings.Contains(body, `"endpointUrl":"http://10.0.0.8:8080"`) || strings.Contains(body, "sml-user") || strings.Contains(body, "sml-password") {
 		t.Fatalf("status = %d, body = %s", response.Code, body)
 	}
 }

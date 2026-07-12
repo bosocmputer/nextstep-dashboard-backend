@@ -171,7 +171,7 @@ func TestReportWorkerDoesNotPublishFullPriorDayAsTodayToNowComparison(t *testing
 		t.Fatalf("completed=%+v queries=%d", store.completed, queries)
 	}
 	dashboard := store.completed.Dashboard
-	if dashboard.Quality.Status != "WARNING" || len(dashboard.Quality.Warnings) != 1 || dashboard.Quality.Warnings[0] != "COMPARISON_TIME_WINDOW_UNAVAILABLE" {
+	if dashboard.Quality.Status != "OK" || len(dashboard.Quality.Warnings) != 0 {
 		t.Fatalf("quality = %+v", dashboard.Quality)
 	}
 	for _, metric := range dashboard.KPIs {

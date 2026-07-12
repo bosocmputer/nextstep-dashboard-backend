@@ -899,6 +899,7 @@ components:
       required: [isConfigured, readinessStatus, version]
       properties:
         isConfigured: {type: boolean}
+        endpointUrl: {type: string, format: uri, nullable: true, description: Safe editable JavaWS URL; credentials are never returned. Standard SML service paths are reduced to the base URL.}
         endpointHost: {type: string, nullable: true}
         databaseName: {type: string, nullable: true}
         configFileName: {type: string, nullable: true}
