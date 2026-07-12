@@ -36,11 +36,12 @@ type TenantAccess struct {
 }
 
 type ReportAccess struct {
-	Key         report.Key `json:"reportKey"`
-	Version     string     `json:"version"`
-	Label       string     `json:"label"`
-	Category    string     `json:"category"`
-	IsSensitive bool       `json:"isSensitive"`
+	Key         report.Key           `json:"reportKey"`
+	Version     string               `json:"version"`
+	Label       string               `json:"label"`
+	Category    string               `json:"category"`
+	IsSensitive bool                 `json:"isSensitive"`
+	PeriodMode  report.ParameterKind `json:"periodMode"`
 }
 
 type Store interface {
@@ -177,7 +178,18 @@ func (service *Service) ListTenants(ctx context.Context, recipientID uuid.UUID) 
 }
 
 func (service *Service) ListReports(ctx context.Context, recipientID, tenantID uuid.UUID) ([]ReportAccess, error) {
-	return service.store.ListReports(ctx, recipientID, tenantID, service.now().UTC())
+	items, err := service.store.ListReports(ctx, recipientID, tenantID, service.now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		definition, ok := report.DefinitionFor(items[index].Key)
+		if !ok {
+			return nil, ErrReportForbidden
+		}
+		items[index].PeriodMode = definition.ParameterKind
+	}
+	return items, nil
 }
 
 func (service *Service) CanAccessReport(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key) (bool, error) {

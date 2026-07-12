@@ -1,6 +1,7 @@
 package viewer
 
 import (
+	"errors"
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
@@ -45,3 +46,26 @@ type DashboardRefresh struct {
 	CreatedAt  time.Time              `json:"createdAt"`
 	FinishedAt *time.Time             `json:"finishedAt,omitempty"`
 }
+
+type DashboardRefreshInput struct {
+	PeriodPreset report.Preset
+	DateFrom     *string
+	DateTo       *string
+	ReportKeys   []report.Key
+}
+
+type DashboardRefreshFailure struct {
+	ReportKey     report.Key       `json:"reportKey"`
+	Status        report.RunStatus `json:"status"`
+	SafeErrorCode string           `json:"safeErrorCode,omitempty"`
+}
+
+type DashboardRefreshResult struct {
+	RefreshID uuid.UUID                 `json:"refreshId"`
+	TenantID  uuid.UUID                 `json:"tenantId"`
+	Status    DashboardRefreshStatus    `json:"status"`
+	Items     []DashboardSnapshot       `json:"items"`
+	Failures  []DashboardRefreshFailure `json:"failures"`
+}
+
+var ErrDashboardRefreshNotReady = errors.New("dashboard refresh result is not ready")

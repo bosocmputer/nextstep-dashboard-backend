@@ -20,8 +20,9 @@ const (
 type ParameterKind string
 
 const (
-	DateRange ParameterKind = "DATE_RANGE"
-	AsOfDate  ParameterKind = "AS_OF_DATE"
+	DateRange   ParameterKind = "DATE_RANGE"
+	AsOfDate    ParameterKind = "AS_OF_DATE"
+	CurrentOnly ParameterKind = "CURRENT_ONLY"
 )
 
 type Metric struct {
@@ -58,7 +59,7 @@ var orderedDefinitions = []Definition{
 	definition(GrossProfitByProduct, "กำไรขั้นต้นตามสินค้า", "GROSS_PROFIT", true, DateRange, "gross_profit_amount", "กำไรขั้นต้น", "gross_margin_percent", "อัตรากำไร"),
 	definition(GrossProfitByARCustomer, "กำไรขั้นต้นตามลูกหนี้", "GROSS_PROFIT", true, DateRange, "gross_profit_amount", "กำไรขั้นต้น", "gross_margin_percent", "อัตรากำไร"),
 	definition(StockBalance, "รายงานสต็อกคงเหลือ", "INVENTORY", true, AsOfDate, "item_count", "สินค้า", "balance_amount", "มูลค่าคงเหลือ"),
-	definition(StockReorder, "รายงานสินค้าถึงจุดสั่งซื้อ", "INVENTORY", false, AsOfDate, "reorder_item_count", "สินค้าต้องสั่ง", "shortage_qty", "จำนวนขาด"),
+	definition(StockReorder, "รายงานสินค้าถึงจุดสั่งซื้อ", "INVENTORY", false, CurrentOnly, "reorder_item_count", "สินค้าต้องสั่ง", "shortage_qty", "จำนวนขาด"),
 	definition(ARCustomerMovement, "รายงานความเคลื่อนไหวลูกหนี้", "AR", true, AsOfDate, "customer_count", "ลูกหนี้", "net_movement_amount", "ยอดเคลื่อนไหวสุทธิ"),
 	definition(ARDebtReceipt, "รายงานรับชำระหนี้", "AR", true, DateRange, "receipt_count", "เอกสาร", "total_received_amount", "ยอดรับชำระ"),
 	definition(CashBankReceipts, "รายงานรับเงิน", "CASH_BANK", true, DateRange, "document_count", "เอกสาร", "total_amount", "ยอดรับเงิน"),

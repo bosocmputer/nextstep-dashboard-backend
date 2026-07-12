@@ -38,11 +38,50 @@ func registerViewerReportRoutes(router chi.Router, viewerAuth ViewerAPI, viewerR
 		if !ok {
 			return
 		}
-		refresh, err := viewerReports.CreateDashboardRefresh(request.Context(), authenticated.RecipientID, tenantID, request.Header.Get("Idempotency-Key"))
+		var input *viewer.DashboardRefreshInput
+		if request.ContentLength != 0 {
+			if !isJSONRequest(request) {
+				writeProblem(response, request, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json.", false)
+				return
+			}
+			var body struct {
+				PeriodPreset report.Preset `json:"periodPreset"`
+				DateFrom     *string       `json:"dateFrom"`
+				DateTo       *string       `json:"dateTo"`
+				ReportKeys   []report.Key  `json:"reportKeys"`
+			}
+			if err := decodeJSON(response, request, &body); err != nil {
+				writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Dashboard refresh input is invalid.", false)
+				return
+			}
+			input = &viewer.DashboardRefreshInput{PeriodPreset: body.PeriodPreset, DateFrom: body.DateFrom, DateTo: body.DateTo, ReportKeys: body.ReportKeys}
+		}
+		refresh, err := viewerReports.CreateDashboardRefresh(request.Context(), authenticated.RecipientID, tenantID, request.Header.Get("Idempotency-Key"), input)
 		if handleViewerReportError(response, request, err) {
 			return
 		}
 		writeJSON(response, http.StatusAccepted, refresh)
+	})
+
+	router.Get("/api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes/{refreshId}/result", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		refreshID, err := uuid.Parse(chi.URLParam(request, "refreshId"))
+		if err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Dashboard refresh ID must be a UUID.", false)
+			return
+		}
+		result, err := viewerReports.GetDashboardRefreshResult(request.Context(), authenticated.RecipientID, tenantID, refreshID)
+		if handleViewerReportError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, result)
 	})
 
 	router.Get("/api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes/{refreshId}", func(response http.ResponseWriter, request *http.Request) {
@@ -221,6 +260,11 @@ func handleViewerReportError(response http.ResponseWriter, request *http.Request
 		writeProblem(response, request, http.StatusForbidden, "REPORT_ACCESS_FORBIDDEN", "This report is not available to the verified LINE identity.", false)
 	case errors.Is(err, viewer.ErrReportInputInvalid):
 		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Report request input is invalid.", false)
+	case errors.Is(err, viewer.ErrViewerContextChanged):
+		writeProblem(response, request, http.StatusConflict, "VIEWER_CONTEXT_CHANGED", "Viewer store or report access changed before the refresh started.", false)
+	case errors.Is(err, viewer.ErrDashboardRefreshNotReady):
+		response.Header().Set("Retry-After", "2")
+		writeProblem(response, request, http.StatusConflict, "DASHBOARD_REFRESH_NOT_READY", "Dashboard refresh result is not ready yet.", true)
 	case errors.Is(err, report.ErrRunIdempotencyConflict):
 		writeProblem(response, request, http.StatusConflict, "IDEMPOTENCY_CONFLICT", "Idempotency key was already used with different report input.", false)
 	case errors.Is(err, report.ErrRunConcurrencyLimit):

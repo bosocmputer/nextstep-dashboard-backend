@@ -30,6 +30,7 @@ type fakeViewerRunStore struct {
 	dashboard          report.Dashboard
 	latest             []DashboardSnapshot
 	refresh            DashboardRefresh
+	refreshResult      DashboardRefreshResult
 	refreshInputs      []report.EnqueueInput
 	refreshRecipient   uuid.UUID
 	scheduledRecipient uuid.UUID
@@ -77,6 +78,10 @@ func (fake *fakeViewerRunStore) GetDashboardRefresh(context.Context, uuid.UUID, 
 	return fake.refresh, nil
 }
 
+func (fake *fakeViewerRunStore) GetDashboardRefreshResult(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (DashboardRefreshResult, error) {
+	return fake.refreshResult, nil
+}
+
 func (fake *fakeViewerRunStore) Cancel(context.Context, uuid.UUID, time.Time) (report.Run, error) {
 	fake.cancelled = true
 	fake.run.Status = report.StatusCancelled
@@ -103,6 +108,7 @@ func TestReportServiceRejectsAmbiguousAndUnauthorizedInputs(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	recipientID, tenantID := uuid.New(), uuid.New()
 	from, to := "2026-07-01", "2026-07-10"
+	future := "2026-07-11"
 	for _, test := range []struct {
 		name   string
 		access *fakeReportAccess
@@ -115,6 +121,10 @@ func TestReportServiceRejectsAmbiguousAndUnauthorizedInputs(t *testing.T) {
 		{name: "unknown report", access: &fakeReportAccess{allowed: true, tenants: []TenantAccess{{ID: tenantID, Timezone: "Asia/Bangkok"}}}, key: report.Key("unknown"), idem: "viewer-run-003", input: CreateReportRunInput{PeriodPreset: report.Yesterday}},
 		{name: "dates with preset", access: &fakeReportAccess{allowed: true, tenants: []TenantAccess{{ID: tenantID, Timezone: "Asia/Bangkok"}}}, key: report.SalesGoodsServices, idem: "viewer-run-004", input: CreateReportRunInput{PeriodPreset: report.Yesterday, DateFrom: &from, DateTo: &to}},
 		{name: "short idempotency", access: &fakeReportAccess{allowed: true, tenants: []TenantAccess{{ID: tenantID, Timezone: "Asia/Bangkok"}}}, key: report.SalesGoodsServices, idem: "short", input: CreateReportRunInput{PeriodPreset: report.Yesterday}},
+		{name: "future custom date", access: &fakeReportAccess{allowed: true, tenants: []TenantAccess{{ID: tenantID, Timezone: "Asia/Bangkok"}}}, key: report.SalesGoodsServices, idem: "viewer-run-005", input: CreateReportRunInput{PeriodPreset: report.Custom, DateFrom: &future, DateTo: &future}},
+		{name: "date range rejects as of", access: &fakeReportAccess{allowed: true, tenants: []TenantAccess{{ID: tenantID, Timezone: "Asia/Bangkok"}}}, key: report.SalesGoodsServices, idem: "viewer-run-006", input: CreateReportRunInput{PeriodPreset: report.AsOfRun}},
+		{name: "as of rejects range preset", access: &fakeReportAccess{allowed: true, tenants: []TenantAccess{{ID: tenantID, Timezone: "Asia/Bangkok"}}}, key: report.StockBalance, idem: "viewer-run-007", input: CreateReportRunInput{PeriodPreset: report.MonthToDate}},
+		{name: "current only rejects historical", access: &fakeReportAccess{allowed: true, tenants: []TenantAccess{{ID: tenantID, Timezone: "Asia/Bangkok"}}}, key: report.StockReorder, idem: "viewer-run-008", input: CreateReportRunInput{PeriodPreset: report.Custom, DateFrom: &from, DateTo: &to}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service := NewReportService(test.access, &fakeViewerRunStore{}, func() time.Time { return now })
@@ -191,11 +201,15 @@ func TestReportServiceBuildsPermissionFilteredExecutiveOverviewAndRefresh(t *tes
 	recipientID, tenantID, refreshID := uuid.New(), uuid.New(), uuid.New()
 	access := &fakeReportAccess{allowed: true, tenants: []TenantAccess{{
 		ID: tenantID, Name: "วาวา", Timezone: "Asia/Bangkok",
-		ReportKeys: []report.Key{report.SalesGoodsServices, report.StockBalance},
+		ReportKeys: []report.Key{report.SalesGoodsServices, report.StockBalance, report.StockReorder},
 	}}}
 	store := &fakeViewerRunStore{
 		latest:  []DashboardSnapshot{{RunID: uuid.New(), Dashboard: report.Dashboard{ReportKey: report.SalesGoodsServices, Version: "1.0.0"}}},
-		refresh: DashboardRefresh{ID: refreshID, TenantID: tenantID, Status: DashboardRefreshQueued, Total: 2},
+		refresh: DashboardRefresh{ID: refreshID, TenantID: tenantID, Status: DashboardRefreshQueued, Total: 3},
+		refreshResult: DashboardRefreshResult{
+			RefreshID: refreshID, TenantID: tenantID, Status: DashboardRefreshSucceeded,
+			Items: []DashboardSnapshot{{RunID: uuid.New(), Dashboard: report.Dashboard{ReportKey: report.SalesGoodsServices, Version: "1.0.0"}}},
+		},
 	}
 	service := NewReportService(access, store, func() time.Time { return now })
 
@@ -203,15 +217,45 @@ func TestReportServiceBuildsPermissionFilteredExecutiveOverviewAndRefresh(t *tes
 	if err != nil || overview.TenantID != tenantID || overview.Timezone != "Asia/Bangkok" || len(overview.Items) != 1 {
 		t.Fatalf("ExecutiveOverview() = %+v, %v", overview, err)
 	}
-	refresh, err := service.CreateDashboardRefresh(context.Background(), recipientID, tenantID, "overview-refresh-001")
-	if err != nil || refresh.ID != refreshID || store.refreshRecipient != recipientID || len(store.refreshInputs) != 2 {
+	from, to := "2026-07-01", "2026-07-09"
+	refresh, err := service.CreateDashboardRefresh(context.Background(), recipientID, tenantID, "overview-refresh-001", &DashboardRefreshInput{
+		PeriodPreset: report.Custom, DateFrom: &from, DateTo: &to,
+		ReportKeys: []report.Key{report.SalesGoodsServices, report.StockBalance, report.StockReorder},
+	})
+	if err != nil || refresh.ID != refreshID || store.refreshRecipient != recipientID || len(store.refreshInputs) != 3 {
 		t.Fatalf("CreateDashboardRefresh() = %+v, %v inputs=%+v", refresh, err, store.refreshInputs)
 	}
-	if store.refreshInputs[0].Period.Preset != report.MonthToDate || store.refreshInputs[1].Period.Preset != report.AsOfRun {
+	if store.refreshInputs[0].Period != (report.Period{Preset: report.Custom, DateFrom: from, DateTo: to}) ||
+		store.refreshInputs[1].Period != (report.Period{Preset: report.Custom, DateFrom: to, DateTo: to}) ||
+		store.refreshInputs[2].Period.Preset != report.AsOfRun {
 		t.Fatalf("refresh periods = %+v", store.refreshInputs)
+	}
+	if _, err := service.CreateDashboardRefresh(context.Background(), recipientID, tenantID, "overview-refresh-002", &DashboardRefreshInput{}); !errors.Is(err, ErrReportInputInvalid) {
+		t.Fatalf("empty refresh input error = %v", err)
+	}
+	if _, err := service.CreateDashboardRefresh(context.Background(), recipientID, tenantID, "overview-refresh-003", &DashboardRefreshInput{PeriodPreset: report.MonthToDate, ReportKeys: []report.Key{report.SalesGoodsServices}}); !errors.Is(err, ErrViewerContextChanged) {
+		t.Fatalf("changed report context error = %v", err)
 	}
 	got, err := service.GetDashboardRefresh(context.Background(), recipientID, tenantID, refreshID)
 	if err != nil || got.ID != refreshID {
 		t.Fatalf("GetDashboardRefresh() = %+v, %v", got, err)
+	}
+	result, err := service.GetDashboardRefreshResult(context.Background(), recipientID, tenantID, refreshID)
+	if err != nil || result.RefreshID != refreshID || len(result.Items) != 1 {
+		t.Fatalf("GetDashboardRefreshResult() = %+v, %v", result, err)
+	}
+}
+
+func TestReportServiceRejectsRefreshResultAfterPermissionChange(t *testing.T) {
+	recipientID, tenantID, refreshID := uuid.New(), uuid.New(), uuid.New()
+	store := &fakeViewerRunStore{refreshResult: DashboardRefreshResult{
+		RefreshID: refreshID, TenantID: tenantID, Status: DashboardRefreshSucceeded,
+		Items: []DashboardSnapshot{{RunID: uuid.New(), Dashboard: report.Dashboard{ReportKey: report.StockBalance, Version: "1.0.0"}}},
+	}}
+	service := NewReportService(&fakeReportAccess{allowed: true, tenants: []TenantAccess{{
+		ID: tenantID, Timezone: "Asia/Bangkok", ReportKeys: []report.Key{report.SalesGoodsServices},
+	}}}, store, time.Now)
+	if _, err := service.GetDashboardRefreshResult(context.Background(), recipientID, tenantID, refreshID); !errors.Is(err, ErrReportForbidden) {
+		t.Fatalf("GetDashboardRefreshResult() error = %v", err)
 	}
 }

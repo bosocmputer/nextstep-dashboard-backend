@@ -150,7 +150,7 @@ func TestServiceReturnsPermissionFilteredNavigation(t *testing.T) {
 		t.Fatalf("ListTenants() = %+v, %v", tenantList, err)
 	}
 	reportList, err := service.ListReports(context.Background(), recipientID, tenantID)
-	if err != nil || len(reportList) != 1 || reportList[0].Key != report.SalesGoodsServices {
+	if err != nil || len(reportList) != 1 || reportList[0].Key != report.SalesGoodsServices || reportList[0].PeriodMode != report.DateRange {
 		t.Fatalf("ListReports() = %+v, %v", reportList, err)
 	}
 }

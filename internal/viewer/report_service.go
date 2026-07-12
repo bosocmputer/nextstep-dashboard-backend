@@ -13,6 +13,7 @@ import (
 )
 
 var ErrReportInputInvalid = errors.New("viewer report input is invalid")
+var ErrViewerContextChanged = errors.New("viewer report context changed")
 
 type ReportAccessControl interface {
 	ListTenants(context.Context, uuid.UUID) ([]TenantAccess, error)
@@ -27,6 +28,7 @@ type ViewerRunStore interface {
 	ListLatestDashboards(context.Context, uuid.UUID, []report.Key) ([]DashboardSnapshot, error)
 	CreateDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, string, []report.EnqueueInput, time.Time) (DashboardRefresh, error)
 	GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) (DashboardRefresh, error)
+	GetDashboardRefreshResult(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (DashboardRefreshResult, error)
 	ListRows(context.Context, uuid.UUID, int, int, time.Time) (report.RowsPage, error)
 	Cancel(context.Context, uuid.UUID, time.Time) (report.Run, error)
 }
@@ -76,7 +78,7 @@ func (service *ReportService) Create(ctx context.Context, recipientID, tenantID 
 	if err != nil {
 		return report.Run{}, ErrReportInputInvalid
 	}
-	if definition.ParameterKind == report.AsOfDate && input.PeriodPreset == report.Custom && period.DateFrom != period.DateTo {
+	if !validViewerPeriod(definition.ParameterKind, input.PeriodPreset, period) || periodAfterToday(period, location, now) {
 		return report.Run{}, ErrReportInputInvalid
 	}
 	return service.store.Enqueue(ctx, report.EnqueueInput{
@@ -181,7 +183,7 @@ func (service *ReportService) ExecutiveOverview(ctx context.Context, recipientID
 	return ExecutiveOverview{TenantID: tenantID, Timezone: tenant.Timezone, Items: items}, nil
 }
 
-func (service *ReportService) CreateDashboardRefresh(ctx context.Context, recipientID, tenantID uuid.UUID, idempotencyKey string) (DashboardRefresh, error) {
+func (service *ReportService) CreateDashboardRefresh(ctx context.Context, recipientID, tenantID uuid.UUID, idempotencyKey string, input *DashboardRefreshInput) (DashboardRefresh, error) {
 	if len(idempotencyKey) < 8 || len(idempotencyKey) > 200 {
 		return DashboardRefresh{}, ErrReportInputInvalid
 	}
@@ -194,17 +196,27 @@ func (service *ReportService) CreateDashboardRefresh(ctx context.Context, recipi
 		return DashboardRefresh{}, ErrReportInputInvalid
 	}
 	now := service.now().UTC()
+	legacy := input == nil
+	if input == nil {
+		input = &DashboardRefreshInput{PeriodPreset: report.MonthToDate, ReportKeys: append([]report.Key(nil), tenant.ReportKeys...)}
+	}
+	if len(input.ReportKeys) == 0 || input.PeriodPreset != report.Custom && (input.DateFrom != nil || input.DateTo != nil) {
+		return DashboardRefresh{}, ErrReportInputInvalid
+	}
+	selectedPeriod, err := report.ResolvePeriod(input.PeriodPreset, location, now, input.DateFrom, input.DateTo)
+	if err != nil || periodAfterToday(selectedPeriod, location, now) {
+		return DashboardRefresh{}, ErrReportInputInvalid
+	}
+	if !sameReportKeys(input.ReportKeys, tenant.ReportKeys) {
+		return DashboardRefresh{}, ErrViewerContextChanged
+	}
 	inputs := make([]report.EnqueueInput, 0, len(tenant.ReportKeys))
 	for _, key := range tenant.ReportKeys {
 		definition, ok := report.DefinitionFor(key)
 		if !ok {
 			return DashboardRefresh{}, ErrReportForbidden
 		}
-		preset := report.MonthToDate
-		if definition.ParameterKind == report.AsOfDate {
-			preset = report.AsOfRun
-		}
-		period, resolveErr := report.ResolvePeriod(preset, location, now, nil, nil)
+		period, resolveErr := dashboardRefreshPeriod(definition.ParameterKind, selectedPeriod, legacy, location, now)
 		if resolveErr != nil {
 			return DashboardRefresh{}, ErrReportInputInvalid
 		}
@@ -217,11 +229,97 @@ func (service *ReportService) CreateDashboardRefresh(ctx context.Context, recipi
 	return service.store.CreateDashboardRefresh(ctx, recipientID, tenantID, idempotencyKey, inputs, now)
 }
 
+func validViewerPeriod(kind report.ParameterKind, preset report.Preset, period report.Period) bool {
+	switch kind {
+	case report.DateRange:
+		return preset == report.Yesterday || preset == report.TodayToNow || preset == report.MonthToDate || preset == report.Custom
+	case report.AsOfDate:
+		return (preset == report.AsOfRun || preset == report.Custom) && period.DateFrom == period.DateTo
+	case report.CurrentOnly:
+		return preset == report.AsOfRun && period.DateFrom == period.DateTo
+	default:
+		return false
+	}
+}
+
+func periodAfterToday(period report.Period, location *time.Location, now time.Time) bool {
+	today := now.In(location).Format(time.DateOnly)
+	return period.DateFrom > today || period.DateTo > today
+}
+
+func sameReportKeys(left, right []report.Key) bool {
+	if len(left) == 0 || len(left) != len(right) {
+		return false
+	}
+	counts := make(map[report.Key]int, len(left))
+	for _, key := range left {
+		if _, ok := report.DefinitionFor(key); !ok {
+			return false
+		}
+		counts[key]++
+	}
+	for _, key := range right {
+		counts[key]--
+	}
+	for _, count := range counts {
+		if count != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func dashboardRefreshPeriod(kind report.ParameterKind, selected report.Period, legacy bool, location *time.Location, now time.Time) (report.Period, error) {
+	switch kind {
+	case report.DateRange:
+		return selected, nil
+	case report.AsOfDate:
+		if legacy || selected.DateTo == now.In(location).Format(time.DateOnly) {
+			return report.ResolvePeriod(report.AsOfRun, location, now, nil, nil)
+		}
+		date := selected.DateTo
+		return report.ResolvePeriod(report.Custom, location, now, &date, &date)
+	case report.CurrentOnly:
+		return report.ResolvePeriod(report.AsOfRun, location, now, nil, nil)
+	default:
+		return report.Period{}, ErrReportInputInvalid
+	}
+}
+
 func (service *ReportService) GetDashboardRefresh(ctx context.Context, recipientID, tenantID, refreshID uuid.UUID) (DashboardRefresh, error) {
 	if _, err := service.authorizedTenant(ctx, recipientID, tenantID); err != nil {
 		return DashboardRefresh{}, err
 	}
 	return service.store.GetDashboardRefresh(ctx, recipientID, tenantID, refreshID, service.now().UTC())
+}
+
+func (service *ReportService) GetDashboardRefreshResult(ctx context.Context, recipientID, tenantID, refreshID uuid.UUID) (DashboardRefreshResult, error) {
+	tenant, err := service.authorizedTenant(ctx, recipientID, tenantID)
+	if err != nil {
+		return DashboardRefreshResult{}, err
+	}
+	result, err := service.store.GetDashboardRefreshResult(ctx, recipientID, tenantID, refreshID)
+	if err != nil {
+		return DashboardRefreshResult{}, err
+	}
+	if result.TenantID != tenantID {
+		return DashboardRefreshResult{}, ErrReportForbidden
+	}
+	allowed := make(map[report.Key]struct{}, len(tenant.ReportKeys))
+	for _, key := range tenant.ReportKeys {
+		allowed[key] = struct{}{}
+	}
+	for _, item := range result.Items {
+		if _, ok := allowed[item.Dashboard.ReportKey]; !ok {
+			return DashboardRefreshResult{}, ErrReportForbidden
+		}
+	}
+	for _, failure := range result.Failures {
+		if _, ok := allowed[failure.ReportKey]; !ok {
+			return DashboardRefreshResult{}, ErrReportForbidden
+		}
+	}
+	return result, nil
 }
 
 func (service *ReportService) Cancel(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID) (report.Run, error) {

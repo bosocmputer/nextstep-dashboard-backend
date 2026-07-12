@@ -14,21 +14,23 @@ import (
 )
 
 type fakeViewerReportAPI struct {
-	created      report.Run
-	createErr    error
-	got          report.Run
-	getErr       error
-	rows         viewer.ReportRows
-	rowsErr      error
-	dashboard    report.Dashboard
-	dashboardErr error
-	overview     viewer.ExecutiveOverview
-	overviewErr  error
-	refresh      viewer.DashboardRefresh
-	refreshErr   error
-	cancelled    report.Run
-	cancelErr    error
-	createCall   int
+	created       report.Run
+	createErr     error
+	got           report.Run
+	getErr        error
+	rows          viewer.ReportRows
+	rowsErr       error
+	dashboard     report.Dashboard
+	dashboardErr  error
+	overview      viewer.ExecutiveOverview
+	overviewErr   error
+	refresh       viewer.DashboardRefresh
+	refreshInput  *viewer.DashboardRefreshInput
+	refreshResult viewer.DashboardRefreshResult
+	refreshErr    error
+	cancelled     report.Run
+	cancelErr     error
+	createCall    int
 }
 
 func (fake *fakeViewerReportAPI) Create(context.Context, uuid.UUID, uuid.UUID, report.Key, string, viewer.CreateReportRunInput) (report.Run, error) {
@@ -52,12 +54,17 @@ func (fake *fakeViewerReportAPI) ExecutiveOverview(context.Context, uuid.UUID, u
 	return fake.overview, fake.overviewErr
 }
 
-func (fake *fakeViewerReportAPI) CreateDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, string) (viewer.DashboardRefresh, error) {
+func (fake *fakeViewerReportAPI) CreateDashboardRefresh(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string, input *viewer.DashboardRefreshInput) (viewer.DashboardRefresh, error) {
+	fake.refreshInput = input
 	return fake.refresh, fake.refreshErr
 }
 
 func (fake *fakeViewerReportAPI) GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefresh, error) {
 	return fake.refresh, fake.refreshErr
+}
+
+func (fake *fakeViewerReportAPI) GetDashboardRefreshResult(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefreshResult, error) {
+	return fake.refreshResult, fake.refreshErr
 }
 
 func (fake *fakeViewerReportAPI) Cancel(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error) {
@@ -149,8 +156,9 @@ func TestViewerExecutiveOverviewAndRefreshEndpoints(t *testing.T) {
 	tenantID, refreshID := uuid.New(), uuid.New()
 	authAPI := &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: uuid.New()}}
 	reportAPI := &fakeViewerReportAPI{
-		overview: viewer.ExecutiveOverview{TenantID: tenantID, Timezone: "Asia/Bangkok", Items: []viewer.DashboardSnapshot{}},
-		refresh:  viewer.DashboardRefresh{ID: refreshID, TenantID: tenantID, Status: viewer.DashboardRefreshQueued, Total: 10},
+		overview:      viewer.ExecutiveOverview{TenantID: tenantID, Timezone: "Asia/Bangkok", Items: []viewer.DashboardSnapshot{}},
+		refresh:       viewer.DashboardRefresh{ID: refreshID, TenantID: tenantID, Status: viewer.DashboardRefreshQueued, Total: 10},
+		refreshResult: viewer.DashboardRefreshResult{RefreshID: refreshID, TenantID: tenantID, Status: viewer.DashboardRefreshSucceeded, Items: []viewer.DashboardSnapshot{}},
 	}
 	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), ViewerAuth: authAPI, ViewerReports: reportAPI})
 
@@ -171,6 +179,20 @@ func TestViewerExecutiveOverviewAndRefreshEndpoints(t *testing.T) {
 	if refreshResponse.Code != http.StatusAccepted || !strings.Contains(refreshResponse.Body.String(), refreshID.String()) {
 		t.Fatalf("refresh status=%d body=%s", refreshResponse.Code, refreshResponse.Body.String())
 	}
+	if reportAPI.refreshInput != nil {
+		t.Fatalf("legacy refresh input = %+v, want nil", reportAPI.refreshInput)
+	}
+
+	inputRequest := httptest.NewRequest(http.MethodPost, "/api/v1/viewer/tenants/"+tenantID.String()+"/executive-overview/refreshes", strings.NewReader(`{"periodPreset":"CUSTOM","dateFrom":"2026-07-01","dateTo":"2026-07-10","reportKeys":["sales_goods_services"]}`))
+	inputRequest.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	inputRequest.Header.Set("Content-Type", "application/json")
+	inputRequest.Header.Set("X-CSRF-Token", "viewer-csrf")
+	inputRequest.Header.Set("Idempotency-Key", "overview-refresh-002")
+	inputResponse := httptest.NewRecorder()
+	handler.ServeHTTP(inputResponse, inputRequest)
+	if inputResponse.Code != http.StatusAccepted || reportAPI.refreshInput == nil || reportAPI.refreshInput.PeriodPreset != report.Custom || len(reportAPI.refreshInput.ReportKeys) != 1 {
+		t.Fatalf("input refresh status=%d input=%+v body=%s", inputResponse.Code, reportAPI.refreshInput, inputResponse.Body.String())
+	}
 
 	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/viewer/tenants/"+tenantID.String()+"/executive-overview/refreshes/"+refreshID.String(), nil)
 	statusRequest.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
@@ -178,6 +200,14 @@ func TestViewerExecutiveOverviewAndRefreshEndpoints(t *testing.T) {
 	handler.ServeHTTP(statusResponse, statusRequest)
 	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"total":10`) {
 		t.Fatalf("status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+
+	resultRequest := httptest.NewRequest(http.MethodGet, "/api/v1/viewer/tenants/"+tenantID.String()+"/executive-overview/refreshes/"+refreshID.String()+"/result", nil)
+	resultRequest.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	resultResponse := httptest.NewRecorder()
+	handler.ServeHTTP(resultResponse, resultRequest)
+	if resultResponse.Code != http.StatusOK || !strings.Contains(resultResponse.Body.String(), `"status":"SUCCEEDED"`) {
+		t.Fatalf("result status=%d body=%s", resultResponse.Code, resultResponse.Body.String())
 	}
 }
 

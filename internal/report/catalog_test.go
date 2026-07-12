@@ -93,3 +93,24 @@ func TestResolveCustomPeriodRejectsMissingReverseAndOversizedRange(t *testing.T)
 		t.Fatal("missing custom range was accepted")
 	}
 }
+
+func TestReportDefinitionsExposePeriodModes(t *testing.T) {
+	want := map[Key]ParameterKind{
+		SalesGoodsServices:      DateRange,
+		PurchaseGoodsPayables:   DateRange,
+		GrossProfitByProduct:    DateRange,
+		GrossProfitByARCustomer: DateRange,
+		StockBalance:            AsOfDate,
+		StockReorder:            CurrentOnly,
+		ARCustomerMovement:      AsOfDate,
+		ARDebtReceipt:           DateRange,
+		CashBankReceipts:        DateRange,
+		CashBankPayments:        DateRange,
+	}
+	for key, periodMode := range want {
+		definition, ok := DefinitionFor(key)
+		if !ok || definition.ParameterKind != periodMode {
+			t.Fatalf("DefinitionFor(%s).ParameterKind = %q, want %q", key, definition.ParameterKind, periodMode)
+		}
+	}
+}

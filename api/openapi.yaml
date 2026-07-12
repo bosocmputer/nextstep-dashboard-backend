@@ -625,6 +625,11 @@ paths:
         - {$ref: '#/components/parameters/TenantID'}
         - {$ref: '#/components/parameters/CSRFToken'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DashboardRefreshInput'}
       responses:
         '202':
           description: A bounded refresh of all authorized reports was queued.
@@ -654,6 +659,26 @@ paths:
               schema: {$ref: '#/components/schemas/DashboardRefresh'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/viewer/tenants/{tenantId}/executive-overview/refreshes/{refreshId}/result:
+    get:
+      tags: [Viewer]
+      operationId: getViewerDashboardRefreshResult
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - name: refreshId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Exact dashboards and failures produced by a terminal dashboard refresh.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DashboardRefreshResult'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs:
     post:
       tags: [Viewer]
@@ -956,6 +981,7 @@ components:
         label: {type: string}
         category: {type: string}
         isSensitive: {type: boolean}
+        periodMode: {type: string, enum: [DATE_RANGE, AS_OF_DATE, CURRENT_ONLY]}
     AdminReportDefinition:
       type: object
       required: [reportKey, version, label, category, categoryLabel, status]
@@ -1289,6 +1315,44 @@ components:
           items: {$ref: '#/components/schemas/DashboardRefreshRun'}
         createdAt: {type: string, format: date-time}
         finishedAt: {type: string, format: date-time, nullable: true}
+    DashboardRefreshInput:
+      type: object
+      additionalProperties: false
+      required: [periodPreset, reportKeys]
+      properties:
+        periodPreset: {type: string, enum: [YESTERDAY, TODAY_TO_NOW, MONTH_TO_DATE, CUSTOM]}
+        dateFrom: {type: string, format: date}
+        dateTo: {type: string, format: date}
+        reportKeys:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/ReportKey'}
+    DashboardRefreshFailure:
+      type: object
+      additionalProperties: false
+      required: [reportKey, status]
+      properties:
+        reportKey: {$ref: '#/components/schemas/ReportKey'}
+        status: {$ref: '#/components/schemas/ReportRunStatus'}
+        safeErrorCode: {type: string}
+    DashboardRefreshResult:
+      type: object
+      additionalProperties: false
+      required: [refreshId, tenantId, status, items, failures]
+      properties:
+        refreshId: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid}
+        status: {type: string, enum: [PARTIAL, SUCCEEDED, FAILED]}
+        items:
+          type: array
+          maxItems: 10
+          items: {$ref: '#/components/schemas/DashboardSnapshot'}
+        failures:
+          type: array
+          maxItems: 10
+          items: {$ref: '#/components/schemas/DashboardRefreshFailure'}
     LineSessionInput:
       type: object
       additionalProperties: false

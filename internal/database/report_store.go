@@ -423,6 +423,13 @@ func (store *ReportStore) CreateDashboardRefresh(ctx context.Context, recipientI
 		select id from dashboard_refreshes
 		where tenant_id = $1 and requested_by_recipient_id = $2 and idempotency_key = $3`, tenantID, recipientID, idempotencyKey).Scan(&existingID)
 	if err == nil {
+		matches, matchErr := dashboardRefreshInputsMatch(ctx, tx, existingID, inputs)
+		if matchErr != nil {
+			return viewer.DashboardRefresh{}, matchErr
+		}
+		if !matches {
+			return viewer.DashboardRefresh{}, report.ErrRunIdempotencyConflict
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return viewer.DashboardRefresh{}, fmt.Errorf("commit dashboard refresh replay: %w", err)
 		}
@@ -498,6 +505,99 @@ func (store *ReportStore) CreateDashboardRefresh(ctx context.Context, recipientI
 		return viewer.DashboardRefresh{}, fmt.Errorf("commit dashboard refresh: %w", err)
 	}
 	return store.GetDashboardRefresh(ctx, recipientID, tenantID, refreshID, now)
+}
+
+func (store *ReportStore) GetDashboardRefreshResult(ctx context.Context, recipientID, tenantID, refreshID uuid.UUID) (viewer.DashboardRefreshResult, error) {
+	rows, err := store.pool.Query(ctx, `
+		select refresh.id, refresh.tenant_id, linked.report_key, linked.report_run_id,
+		       run.status, coalesce(run.safe_error_code, ''), run.dashboard_json
+		from dashboard_refreshes refresh
+		join dashboard_refresh_runs linked on linked.refresh_id = refresh.id
+		join report_runs run on run.id = linked.report_run_id
+		where refresh.id = $1 and refresh.tenant_id = $2 and refresh.requested_by_recipient_id = $3
+		order by linked.report_key`, refreshID, tenantID, recipientID)
+	if err != nil {
+		return viewer.DashboardRefreshResult{}, fmt.Errorf("get dashboard refresh result: %w", err)
+	}
+	defer rows.Close()
+	result := viewer.DashboardRefreshResult{Items: []viewer.DashboardSnapshot{}, Failures: []viewer.DashboardRefreshFailure{}}
+	queued, running := 0, 0
+	for rows.Next() {
+		var reportKey report.Key
+		var runID uuid.UUID
+		var status report.RunStatus
+		var safeCode string
+		var dashboardJSON []byte
+		if err := rows.Scan(&result.RefreshID, &result.TenantID, &reportKey, &runID, &status, &safeCode, &dashboardJSON); err != nil {
+			return viewer.DashboardRefreshResult{}, fmt.Errorf("scan dashboard refresh result: %w", err)
+		}
+		switch status {
+		case report.StatusQueued:
+			queued++
+		case report.StatusClaimed, report.StatusRunning:
+			running++
+		case report.StatusSucceeded:
+			var dashboard report.Dashboard
+			if err := json.Unmarshal(dashboardJSON, &dashboard); err != nil || dashboard.ReportKey != reportKey || dashboard.Version == "" {
+				return viewer.DashboardRefreshResult{}, fmt.Errorf("decode dashboard refresh result for %s", reportKey)
+			}
+			result.Items = append(result.Items, viewer.DashboardSnapshot{RunID: runID, Dashboard: dashboard})
+		case report.StatusFailed, report.StatusCancelled, report.StatusExpired:
+			result.Failures = append(result.Failures, viewer.DashboardRefreshFailure{ReportKey: reportKey, Status: status, SafeErrorCode: safeCode})
+		default:
+			return viewer.DashboardRefreshResult{}, fmt.Errorf("dashboard refresh result has unknown run status %q", status)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return viewer.DashboardRefreshResult{}, fmt.Errorf("iterate dashboard refresh result: %w", err)
+	}
+	if result.RefreshID == uuid.Nil {
+		return viewer.DashboardRefreshResult{}, report.ErrRunNotFound
+	}
+	if queued > 0 || running > 0 {
+		return viewer.DashboardRefreshResult{}, viewer.ErrDashboardRefreshNotReady
+	}
+	switch {
+	case len(result.Items) > 0 && len(result.Failures) == 0:
+		result.Status = viewer.DashboardRefreshSucceeded
+	case len(result.Items) > 0:
+		result.Status = viewer.DashboardRefreshPartial
+	default:
+		result.Status = viewer.DashboardRefreshFailed
+	}
+	return result, nil
+}
+
+func dashboardRefreshInputsMatch(ctx context.Context, tx pgx.Tx, refreshID uuid.UUID, inputs []report.EnqueueInput) (bool, error) {
+	rows, err := tx.Query(ctx, `
+		select linked.report_key, run.period_preset, run.period_from::text, run.period_to::text
+		from dashboard_refresh_runs linked
+		join report_runs run on run.id = linked.report_run_id
+		where linked.refresh_id = $1`, refreshID)
+	if err != nil {
+		return false, fmt.Errorf("compare dashboard refresh replay: %w", err)
+	}
+	defer rows.Close()
+	want := make(map[report.Key]report.Period, len(inputs))
+	for _, input := range inputs {
+		want[input.ReportKey] = input.Period
+	}
+	seen := 0
+	for rows.Next() {
+		var key report.Key
+		var period report.Period
+		if err := rows.Scan(&key, &period.Preset, &period.DateFrom, &period.DateTo); err != nil {
+			return false, fmt.Errorf("scan dashboard refresh replay: %w", err)
+		}
+		if expected, ok := want[key]; !ok || expected != period {
+			return false, nil
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate dashboard refresh replay: %w", err)
+	}
+	return seen == len(want), nil
 }
 
 func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, tenantID, refreshID uuid.UUID, now time.Time) (viewer.DashboardRefresh, error) {
