@@ -79,20 +79,22 @@ func TestTenantStoreIdempotencyPaginationAndOptimisticUpdate(t *testing.T) {
 		t.Fatalf("audit count = %d, want 2 (create + update)", auditCount)
 	}
 	pendingRecipientID := uuid.New()
-	if _, err := pool.Exec(ctx, `
-		insert into line_recipients (id, encryption_key_id, status, created_at, updated_at)
-		values ($1, 'test-key', 'PENDING', $2, $2);
-		insert into tenant_memberships (tenant_id, recipient_id, status, created_at, updated_at)
-		values ($3, $1, 'PENDING', $2, $2);
-		insert into recipient_invitations (tenant_id, pending_recipient_id, reference_hash, created_at, expires_at)
-		values ($3, $1, decode('01020304', 'hex'), $2, $4);
-		insert into notification_schedules (tenant_id, name, status, local_time, timezone, period_preset, next_run_at, created_at, updated_at)
-		values ($3, 'active-before-archive', 'ACTIVE', '08:00', 'Asia/Bangkok', 'YESTERDAY', $4, $2, $2);
-		insert into report_runs (tenant_id, report_key, source, idempotency_key, status, period_preset, queued_at, expires_at, created_at, updated_at)
-		values ($3, 'sales_goods_services', 'DASHBOARD', 'tenant-archive-run', 'QUEUED', 'YESTERDAY', $2, $4, $2, $2);
-		insert into dashboard_refreshes (tenant_id, requested_by_recipient_id, idempotency_key, status, total, created_at, updated_at)
-		values ($3, $1, 'tenant-archive-refresh', 'QUEUED', 1, $2, $2)`, pendingRecipientID, now, created.ID, now.Add(time.Hour)); err != nil {
-		t.Fatalf("seed tenant archive dependencies: %v", err)
+	expiresAt := now.Add(time.Hour)
+	seedStatements := []struct {
+		query string
+		args  []any
+	}{
+		{`insert into line_recipients (id, encryption_key_id, status, created_at, updated_at) values ($1, 'test-key', 'PENDING', $2, $2)`, []any{pendingRecipientID, now}},
+		{`insert into tenant_memberships (tenant_id, recipient_id, status, created_at, updated_at) values ($1, $2, 'PENDING', $3, $3)`, []any{created.ID, pendingRecipientID, now}},
+		{`insert into recipient_invitations (tenant_id, pending_recipient_id, reference_hash, created_at, expires_at) values ($1, $2, decode('01020304', 'hex'), $3, $4)`, []any{created.ID, pendingRecipientID, now, expiresAt}},
+		{`insert into notification_schedules (tenant_id, name, status, local_time, timezone, period_preset, next_run_at, created_at, updated_at) values ($1, 'active-before-archive', 'ACTIVE', '08:00', 'Asia/Bangkok', 'YESTERDAY', $2, $3, $3)`, []any{created.ID, expiresAt, now}},
+		{`insert into report_runs (tenant_id, report_key, source, idempotency_key, status, period_preset, queued_at, expires_at, created_at, updated_at) values ($1, 'sales_goods_services', 'DASHBOARD', 'tenant-archive-run', 'QUEUED', 'YESTERDAY', $2, $3, $2, $2)`, []any{created.ID, now, expiresAt}},
+		{`insert into dashboard_refreshes (tenant_id, requested_by_recipient_id, idempotency_key, status, total, created_at, updated_at) values ($1, $2, 'tenant-archive-refresh', 'QUEUED', 1, $3, $3)`, []any{created.ID, pendingRecipientID, now}},
+	}
+	for _, statement := range seedStatements {
+		if _, err := pool.Exec(ctx, statement.query, statement.args...); err != nil {
+			t.Fatalf("seed tenant archive dependency: %v", err)
+		}
 	}
 
 	if err := service.Archive(ctx, []byte("admin-hash"), "request-7", created.ID, updated.Version); err != nil {
