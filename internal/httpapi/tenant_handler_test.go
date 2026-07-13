@@ -19,6 +19,10 @@ type fakeTenantAPI struct {
 	createCount int
 	updated     tenant.Tenant
 	updateErr   error
+	archiveErr  error
+	archiveCall int
+	archiveID   uuid.UUID
+	archiveVer  int
 }
 
 func (fake *fakeTenantAPI) Create(context.Context, []byte, string, string, tenant.CreateInput) (tenant.Tenant, error) {
@@ -36,6 +40,13 @@ func (fake *fakeTenantAPI) Get(context.Context, uuid.UUID) (tenant.Tenant, error
 
 func (fake *fakeTenantAPI) Update(context.Context, []byte, string, uuid.UUID, tenant.PatchInput) (tenant.Tenant, error) {
 	return fake.updated, fake.updateErr
+}
+
+func (fake *fakeTenantAPI) Archive(_ context.Context, _ []byte, _ string, id uuid.UUID, version int) error {
+	fake.archiveCall++
+	fake.archiveID = id
+	fake.archiveVer = version
+	return fake.archiveErr
 }
 
 func TestCreateTenantRequiresBootstrapPasswordRotation(t *testing.T) {
@@ -104,6 +115,51 @@ func TestPatchTenantReturnsOptimisticConflict(t *testing.T) {
 
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"VERSION_CONFLICT"`) {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDeleteTenantRequiresCSRFAndUsesOptimisticVersion(t *testing.T) {
+	tenantID := uuid.MustParse("4a06e1c2-29cd-4b5a-81d4-b2a26c2e11ec")
+	adminAuth := &fakeAdminAuth{admin: auth.AuthenticatedAdmin{Username: "superadmin"}}
+	api := &fakeTenantAPI{}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: adminAuth, Tenants: api})
+
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/tenants/"+tenantID.String()+"?version=3", nil)
+	request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "session"})
+	request.Header.Set("X-CSRF-Token", "csrf")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent || api.archiveCall != 1 || api.archiveID != tenantID || api.archiveVer != 3 {
+		t.Fatalf("status=%d call=%d id=%s version=%d body=%s", response.Code, api.archiveCall, api.archiveID, api.archiveVer, response.Body.String())
+	}
+}
+
+func TestDeleteTenantRejectsInvalidVersionAndMapsConflict(t *testing.T) {
+	tenantID := "4a06e1c2-29cd-4b5a-81d4-b2a26c2e11ec"
+	for _, test := range []struct {
+		name       string
+		path       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "missing version", path: "/api/v1/admin/tenants/" + tenantID, wantStatus: http.StatusUnprocessableEntity, wantCode: "VALIDATION_ERROR"},
+		{name: "stale version", path: "/api/v1/admin/tenants/" + tenantID + "?version=1", err: tenant.ErrConflict, wantStatus: http.StatusConflict, wantCode: "VERSION_CONFLICT"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adminAuth := &fakeAdminAuth{admin: auth.AuthenticatedAdmin{Username: "superadmin"}}
+			api := &fakeTenantAPI{archiveErr: test.err}
+			handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: adminAuth, Tenants: api})
+			request := httptest.NewRequest(http.MethodDelete, test.path, nil)
+			request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "session"})
+			request.Header.Set("X-CSRF-Token", "csrf")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), `"code":"`+test.wantCode+`"`) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

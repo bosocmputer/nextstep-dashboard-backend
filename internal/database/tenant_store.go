@@ -181,7 +181,8 @@ func (store *TenantStore) List(ctx context.Context, filter tenant.ListFilter, no
 		       t.created_at, t.updated_at
 		from tenants t
 		left join tenant_sml_connections s on s.tenant_id = t.id
-		where ($2::text is null or (case when t.access_ends_at <= $1 then 'EXPIRED' else t.status end) = $2)
+		where t.archived_at is null
+		  and ($2::text is null or (case when t.access_ends_at <= $1 then 'EXPIRED' else t.status end) = $2)
 		  and ($3 = '' or t.name ilike '%' || $3 || '%' or t.slug ilike '%' || $3 || '%')
 		  and ($4::timestamptz is null or (t.updated_at, t.id) < ($4, $5))
 		order by t.updated_at desc, t.id desc
@@ -223,7 +224,7 @@ func (store *TenantStore) Get(ctx context.Context, id uuid.UUID, now time.Time) 
 		       t.created_at, t.updated_at
 		from tenants t
 		left join tenant_sml_connections s on s.tenant_id = t.id
-		where t.id = $1`, id, now)
+		where t.id = $1 and t.archived_at is null`, id, now)
 	item, err := scanTenant(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return tenant.Tenant{}, tenant.ErrNotFound
@@ -243,7 +244,7 @@ func (store *TenantStore) Update(ctx context.Context, actorHash []byte, requestI
 	var before tenant.Tenant
 	err = tx.QueryRow(ctx, `
 		select id, slug, name, timezone, status, access_ends_at, version, created_at, updated_at
-		from tenants where id = $1 for update`, id).Scan(
+		from tenants where id = $1 and archived_at is null for update`, id).Scan(
 		&before.ID, &before.Slug, &before.Name, &before.Timezone, &before.Status,
 		&before.AccessEndsAt, &before.Version, &before.CreatedAt, &before.UpdatedAt,
 	)
@@ -292,6 +293,93 @@ func (store *TenantStore) Update(ctx context.Context, actorHash []byte, requestI
 		return tenant.Tenant{}, fmt.Errorf("commit update tenant: %w", err)
 	}
 	return updated, nil
+}
+
+func (store *TenantStore) Archive(ctx context.Context, actorHash []byte, requestID string, id uuid.UUID, version int, now time.Time) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin archive tenant: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockTenantRecipientScheduleMutation(ctx, tx, id); err != nil {
+		return err
+	}
+
+	var before tenant.Tenant
+	err = tx.QueryRow(ctx, `
+		select id, slug, name, timezone, status, access_ends_at, version, created_at, updated_at
+		from tenants
+		where id = $1 and archived_at is null
+		for update`, id).Scan(
+		&before.ID, &before.Slug, &before.Name, &before.Timezone, &before.Status,
+		&before.AccessEndsAt, &before.Version, &before.CreatedAt, &before.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tenant.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock tenant for archive: %w", err)
+	}
+	if before.Version != version {
+		return tenant.ErrConflict
+	}
+
+	if _, err := tx.Exec(ctx, `
+		update notification_schedules
+		set status = 'PAUSED', next_run_at = null, version = version + 1, updated_at = $2
+		where tenant_id = $1 and status = 'ACTIVE'`, id, now); err != nil {
+		return fmt.Errorf("pause archived tenant schedules: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update report_runs
+		set status = 'CANCELLED', safe_error_code = 'TENANT_ARCHIVED', finished_at = $2, updated_at = $2
+		where tenant_id = $1 and status = 'QUEUED'`, id, now); err != nil {
+		return fmt.Errorf("cancel archived tenant report queue: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update dashboard_refreshes
+		set status = 'FAILED', failed = total, finished_at = $2, updated_at = $2
+		where tenant_id = $1 and status = 'QUEUED'`, id, now); err != nil {
+		return fmt.Errorf("cancel archived tenant dashboard refreshes: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update line_recipients recipient
+		set status = 'REVOKED', updated_at = $2
+		where recipient.status = 'PENDING'
+		  and exists (
+		    select 1 from tenant_memberships membership
+		    where membership.tenant_id = $1 and membership.recipient_id = recipient.id
+		  )`, id, now); err != nil {
+		return fmt.Errorf("revoke archived tenant pending recipients: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update recipient_invitations
+		set used_at = $2
+		where tenant_id = $1 and used_at is null`, id, now); err != nil {
+		return fmt.Errorf("expire archived tenant invitations: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update tenant_memberships
+		set status = 'REVOKED', updated_at = $2
+		where tenant_id = $1 and status <> 'REVOKED'`, id, now); err != nil {
+		return fmt.Errorf("revoke archived tenant memberships: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update tenants
+		set status = 'DISABLED', archived_at = $2, version = version + 1, updated_at = $2
+		where id = $1`, id, now); err != nil {
+		return fmt.Errorf("archive tenant: %w", err)
+	}
+
+	beforeJSON, _ := json.Marshal(before)
+	afterJSON, _ := json.Marshal(map[string]any{"status": tenant.StatusDisabled, "archivedAt": now})
+	if err := insertAudit(ctx, tx, id, actorHash, "TENANT_ARCHIVED", "TENANT", id.String(), requestID, beforeJSON, afterJSON, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit archive tenant: %w", err)
+	}
+	return nil
 }
 
 type rowScanner interface {

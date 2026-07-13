@@ -18,6 +18,7 @@ type TenantAPI interface {
 	List(context.Context, tenant.ListFilter) (tenant.Page, error)
 	Get(context.Context, uuid.UUID) (tenant.Tenant, error)
 	Update(context.Context, []byte, string, uuid.UUID, tenant.PatchInput) (tenant.Tenant, error)
+	Archive(context.Context, []byte, string, uuid.UUID, int) error
 }
 
 func registerTenantRoutes(router chi.Router, adminAuth AdminAuthenticator, tenants TenantAPI) {
@@ -125,6 +126,26 @@ func registerTenantRoutes(router chi.Router, adminAuth AdminAuthenticator, tenan
 		}
 		writeJSON(response, http.StatusOK, updated)
 	})
+
+	router.Delete("/api/v1/admin/tenants/{tenantId}", func(response http.ResponseWriter, request *http.Request) {
+		admin, ok := operationalAdmin(response, request, adminAuth, true)
+		if !ok {
+			return
+		}
+		id, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		version, err := strconv.Atoi(request.URL.Query().Get("version"))
+		if err != nil || version < 1 {
+			writeValidationProblem(response, request, &tenant.ValidationError{Field: "version", Code: "INVALID_VERSION", Message: "Version must be a positive integer."})
+			return
+		}
+		if err := tenants.Archive(request.Context(), admin.TokenHash, requestID(request), id, version); handleTenantError(response, request, err, "Unable to delete tenant.") {
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
 }
 
 func operationalAdmin(response http.ResponseWriter, request *http.Request, adminAuth AdminAuthenticator, requireCSRF bool) (auth.AuthenticatedAdmin, bool) {
@@ -166,7 +187,7 @@ func handleTenantError(response http.ResponseWriter, request *http.Request, err 
 	case errors.Is(err, tenant.ErrConflict):
 		code := "CONFLICT"
 		message := "Tenant already exists."
-		if request.Method == http.MethodPatch {
+		if request.Method == http.MethodPatch || request.Method == http.MethodDelete {
 			code = "VERSION_CONFLICT"
 			message = "Tenant changed since it was loaded. Reload before saving again."
 		}

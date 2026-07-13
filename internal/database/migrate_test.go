@@ -105,6 +105,10 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select pg_get_constraintdef(oid) like '%BACKGROUND%' from pg_constraint where conrelid = 'report_runs'::regclass and conname = 'report_runs_source_check'`).Scan(&acceptsBackground); err != nil || !acceptsBackground {
 		t.Fatalf("report run source does not accept BACKGROUND: accepts=%v err=%v", acceptsBackground, err)
 	}
+	var hasTenantArchivedAt bool
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'tenants' and column_name = 'archived_at')`).Scan(&hasTenantArchivedAt); err != nil || !hasTenantArchivedAt {
+		t.Fatalf("tenants.archived_at missing: exists=%v err=%v", hasTenantArchivedAt, err)
+	}
 	var acceptsPositionTen bool
 	if err := pool.QueryRow(ctx, `
 		select pg_get_constraintdef(oid) ~ 'position.*>= 1.*position.*<= 10'

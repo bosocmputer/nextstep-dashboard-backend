@@ -178,6 +178,21 @@ paths:
               schema: {$ref: '#/components/schemas/Tenant'}
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
+    delete:
+      tags: [Admin tenants]
+      operationId: archiveTenant
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - name: version
+          in: query
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '204': {description: "Tenant archived, access revoked, and future schedules stopped while retained history remains available to audit operations."}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/tenants/{tenantId}/sml-connection:
     parameters: [{$ref: '#/components/parameters/TenantID'}]
     get:

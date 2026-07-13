@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/tenant"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -76,6 +77,65 @@ func TestTenantStoreIdempotencyPaginationAndOptimisticUpdate(t *testing.T) {
 	}
 	if auditCount != 2 {
 		t.Fatalf("audit count = %d, want 2 (create + update)", auditCount)
+	}
+	pendingRecipientID := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		insert into line_recipients (id, encryption_key_id, status, created_at, updated_at)
+		values ($1, 'test-key', 'PENDING', $2, $2);
+		insert into tenant_memberships (tenant_id, recipient_id, status, created_at, updated_at)
+		values ($3, $1, 'PENDING', $2, $2);
+		insert into recipient_invitations (tenant_id, pending_recipient_id, reference_hash, created_at, expires_at)
+		values ($3, $1, decode('01020304', 'hex'), $2, $4);
+		insert into notification_schedules (tenant_id, name, status, local_time, timezone, period_preset, next_run_at, created_at, updated_at)
+		values ($3, 'active-before-archive', 'ACTIVE', '08:00', 'Asia/Bangkok', 'YESTERDAY', $4, $2, $2);
+		insert into report_runs (tenant_id, report_key, source, idempotency_key, status, period_preset, queued_at, expires_at, created_at, updated_at)
+		values ($3, 'sales_goods_services', 'DASHBOARD', 'tenant-archive-run', 'QUEUED', 'YESTERDAY', $2, $4, $2, $2);
+		insert into dashboard_refreshes (tenant_id, requested_by_recipient_id, idempotency_key, status, total, created_at, updated_at)
+		values ($3, $1, 'tenant-archive-refresh', 'QUEUED', 1, $2, $2)`, pendingRecipientID, now, created.ID, now.Add(time.Hour)); err != nil {
+		t.Fatalf("seed tenant archive dependencies: %v", err)
+	}
+
+	if err := service.Archive(ctx, []byte("admin-hash"), "request-7", created.ID, updated.Version); err != nil {
+		t.Fatalf("Archive() error = %v", err)
+	}
+	if _, err := service.Get(ctx, created.ID); !errors.Is(err, tenant.ErrNotFound) {
+		t.Fatalf("archived tenant Get() error = %v", err)
+	}
+	page, err := service.List(ctx, tenant.ListFilter{PageSize: 25, Search: name})
+	if err != nil || len(page.Data) != 0 {
+		t.Fatalf("archived tenant still listed: page=%+v err=%v", page, err)
+	}
+	if err := service.Archive(ctx, []byte("admin-hash"), "request-8", created.ID, updated.Version); !errors.Is(err, tenant.ErrNotFound) {
+		t.Fatalf("archive replay error = %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select count(*) from audit_logs where tenant_id = $1`, created.ID).Scan(&auditCount); err != nil {
+		t.Fatalf("count archived audit logs: %v", err)
+	}
+	if auditCount != 3 {
+		t.Fatalf("audit count = %d, want 3 (create + update + archive)", auditCount)
+	}
+	var scheduleStatus, membershipStatus, recipientStatus, runStatus, runSafeCode, refreshStatus string
+	var invitationUsedAt *time.Time
+	if err := pool.QueryRow(ctx, `select status from notification_schedules where tenant_id = $1 and name = 'active-before-archive'`, created.ID).Scan(&scheduleStatus); err != nil {
+		t.Fatalf("read archived schedule status: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select status from tenant_memberships where tenant_id = $1 and recipient_id = $2`, created.ID, pendingRecipientID).Scan(&membershipStatus); err != nil {
+		t.Fatalf("read archived membership status: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select status from line_recipients where id = $1`, pendingRecipientID).Scan(&recipientStatus); err != nil {
+		t.Fatalf("read archived pending recipient status: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select used_at from recipient_invitations where tenant_id = $1`, created.ID).Scan(&invitationUsedAt); err != nil {
+		t.Fatalf("read archived invitation status: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select status, safe_error_code from report_runs where tenant_id = $1 and idempotency_key = 'tenant-archive-run'`, created.ID).Scan(&runStatus, &runSafeCode); err != nil {
+		t.Fatalf("read archived report status: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select status from dashboard_refreshes where tenant_id = $1 and idempotency_key = 'tenant-archive-refresh'`, created.ID).Scan(&refreshStatus); err != nil {
+		t.Fatalf("read archived refresh status: %v", err)
+	}
+	if scheduleStatus != "PAUSED" || membershipStatus != "REVOKED" || recipientStatus != "REVOKED" || invitationUsedAt == nil || runStatus != "CANCELLED" || runSafeCode != "TENANT_ARCHIVED" || refreshStatus != "FAILED" {
+		t.Fatalf("archive dependencies not stopped: schedule=%s membership=%s recipient=%s invitation=%v run=%s/%s refresh=%s", scheduleStatus, membershipStatus, recipientStatus, invitationUsedAt, runStatus, runSafeCode, refreshStatus)
 	}
 }
 

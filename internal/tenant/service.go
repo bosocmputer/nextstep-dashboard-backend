@@ -27,6 +27,7 @@ type Store interface {
 	List(context.Context, ListFilter, time.Time) (Page, error)
 	Get(context.Context, uuid.UUID, time.Time) (Tenant, error)
 	Update(context.Context, []byte, string, uuid.UUID, PatchInput, time.Time) (Tenant, error)
+	Archive(context.Context, []byte, string, uuid.UUID, int, time.Time) error
 }
 
 type Service struct {
@@ -76,4 +77,11 @@ func (service *Service) Update(ctx context.Context, actorHash []byte, requestID 
 		return Tenant{}, err
 	}
 	return service.store.Update(ctx, actorHash, requestID, id, normalized, service.now().UTC())
+}
+
+func (service *Service) Archive(ctx context.Context, actorHash []byte, requestID string, id uuid.UUID, version int) error {
+	if version < 1 {
+		return validation("version", "INVALID_VERSION", "Version must be a positive integer.")
+	}
+	return service.store.Archive(ctx, actorHash, requestID, id, version, service.now().UTC())
 }
