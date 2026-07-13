@@ -19,6 +19,7 @@ type memoryRecipientStore struct {
 	stored     StoredRecipient
 	inviteHash []byte
 	redeemed   StoredRecipient
+	revoked    bool
 }
 
 func (store *memoryRecipientStore) CreateInvitation(_ context.Context, _ []byte, _, _ string, _ []byte, pending StoredRecipient, inviteHash []byte, _ time.Time, _ time.Time) (StoredRecipient, error) {
@@ -38,6 +39,14 @@ func (store *memoryRecipientStore) ReplacePermissions(_ context.Context, _ []byt
 	store.stored.ReportKeys = append([]report.Key(nil), keys...)
 	store.stored.PermissionsVersion++
 	return store.stored, nil
+}
+
+func (store *memoryRecipientStore) Revoke(_ context.Context, _ []byte, _ string, tenantID, recipientID uuid.UUID, _ time.Time) error {
+	if store.stored.TenantID != tenantID || store.stored.ID != recipientID {
+		return ErrRecipientNotFound
+	}
+	store.revoked = true
+	return nil
 }
 
 func (store *memoryRecipientStore) RedeemInvitation(_ context.Context, inviteHash, _ []byte, identity StoredRecipient, _ time.Time) (StoredRecipient, error) {
@@ -130,6 +139,24 @@ func TestServiceUsesOptimisticPermissionVersioning(t *testing.T) {
 	}
 	if _, err := service.ReplacePermissions(context.Background(), []byte("admin"), "request-3", store.stored.TenantID, created.ID, nil, created.PermissionsVersion); !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("stale permission version error = %v", err)
+	}
+}
+
+func TestServiceRevokesRecipientWithinTenantScope(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 12)))
+	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{3}, 32), bytes.NewReader(nil), func() time.Time { return now })
+	store := &memoryRecipientStore{}
+	service := NewService(store, box, tokens, bytes.NewReader(bytes.Repeat([]byte{4}, 32)), "https://dashboard.nextstep-soft.com", func() time.Time { return now })
+	created, err := service.CreateInvitation(context.Background(), []byte("admin"), "request-1", "recipient-revoke-001", uuid.New(), "Owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Revoke(context.Background(), []byte("admin"), "request-2", store.stored.TenantID, created.ID); err != nil || !store.revoked {
+		t.Fatalf("Revoke() error=%v revoked=%v", err, store.revoked)
+	}
+	if err := service.Revoke(context.Background(), []byte("admin"), "request-3", uuid.New(), created.ID); !errors.Is(err, ErrRecipientNotFound) {
+		t.Fatalf("cross-tenant Revoke() error=%v", err)
 	}
 }
 

@@ -322,6 +322,19 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Recipient'}
         '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [Admin configuration]
+      operationId: revokeTenantRecipient
+      description: Revokes the recipient membership for this tenant while retaining audit and delivery history.
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/RecipientID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      responses:
+        '204': {description: Recipient membership revoked.}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /api/v1/admin/tenants/{tenantId}/schedules:
     parameters: [{$ref: '#/components/parameters/TenantID'}]
     get:

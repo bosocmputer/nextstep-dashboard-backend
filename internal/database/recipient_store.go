@@ -246,6 +246,83 @@ func (store *RecipientStore) ReplacePermissions(ctx context.Context, actorHash [
 	return updated, nil
 }
 
+func (store *RecipientStore) Revoke(ctx context.Context, actorHash []byte, requestID string, tenantID, recipientID uuid.UUID, now time.Time) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin recipient revoke: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockTenantRecipientScheduleMutation(ctx, tx, tenantID); err != nil {
+		return err
+	}
+
+	var membershipStatus string
+	if err := tx.QueryRow(ctx, `
+		select status from tenant_memberships
+		where tenant_id = $1 and recipient_id = $2 and status <> 'REVOKED'
+		for update`, tenantID, recipientID).Scan(&membershipStatus); errors.Is(err, pgx.ErrNoRows) {
+		return recipient.ErrRecipientNotFound
+	} else if err != nil {
+		return fmt.Errorf("lock recipient membership for revoke: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `
+		select distinct s.name
+		from notification_schedules s
+		join notification_schedule_recipients sr on sr.schedule_id = s.id
+		where s.tenant_id = $1 and sr.recipient_id = $2 and s.status = 'ACTIVE'
+		order by s.name`, tenantID, recipientID)
+	if err != nil {
+		return fmt.Errorf("check active schedule recipient dependencies: %w", err)
+	}
+	var scheduleNames []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan active schedule recipient dependency: %w", err)
+		}
+		scheduleNames = append(scheduleNames, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate active schedule recipient dependencies: %w", err)
+	}
+	rows.Close()
+	if len(scheduleNames) > 0 {
+		return &recipient.RecipientInUseError{ScheduleNames: scheduleNames}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		update tenant_memberships
+		set status = 'REVOKED', permissions_version = permissions_version + 1, updated_at = $3
+		where tenant_id = $1 and recipient_id = $2`, tenantID, recipientID, now); err != nil {
+		return fmt.Errorf("revoke recipient membership: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `delete from recipient_report_permissions where tenant_id = $1 and recipient_id = $2`, tenantID, recipientID); err != nil {
+		return fmt.Errorf("clear revoked recipient permissions: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update recipient_invitations
+		set expires_at = least(expires_at, $3)
+		where tenant_id = $1 and pending_recipient_id = $2 and used_at is null`, tenantID, recipientID, now); err != nil {
+		return fmt.Errorf("expire revoked recipient invitation: %w", err)
+	}
+	if membershipStatus == string(recipient.StatusPending) {
+		if _, err := tx.Exec(ctx, `update line_recipients set status = 'REVOKED', updated_at = $2 where id = $1 and status = 'PENDING'`, recipientID, now); err != nil {
+			return fmt.Errorf("revoke pending recipient identity: %w", err)
+		}
+	}
+	afterJSON, _ := json.Marshal(map[string]any{"status": recipient.StatusRevoked})
+	if err := insertAudit(ctx, tx, tenantID, actorHash, "RECIPIENT_REVOKED", "LINE_RECIPIENT", recipientID.String(), requestID, nil, afterJSON, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit recipient revoke: %w", err)
+	}
+	return nil
+}
+
 func (store *RecipientStore) RedeemInvitation(ctx context.Context, invitationHash, lineHash []byte, identity recipient.StoredRecipient, now time.Time) (recipient.StoredRecipient, error) {
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {

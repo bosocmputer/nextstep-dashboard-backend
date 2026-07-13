@@ -41,6 +41,12 @@ func (err *PermissionInUseError) Error() string {
 	return "recipient permission is used by an active schedule"
 }
 
+type RecipientInUseError struct{ ScheduleNames []string }
+
+func (err *RecipientInUseError) Error() string {
+	return "recipient is used by an active schedule"
+}
+
 type StoredRecipient struct {
 	ID                 uuid.UUID
 	TenantID           uuid.UUID
@@ -81,6 +87,7 @@ type Store interface {
 	CreateInvitation(context.Context, []byte, string, string, []byte, StoredRecipient, []byte, time.Time, time.Time) (StoredRecipient, error)
 	List(context.Context, uuid.UUID, int, string) (Page, error)
 	ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, int, time.Time) (StoredRecipient, error)
+	Revoke(context.Context, []byte, string, uuid.UUID, uuid.UUID, time.Time) error
 	RedeemInvitation(context.Context, []byte, []byte, StoredRecipient, time.Time) (StoredRecipient, error)
 	FindByLineHash(context.Context, []byte) (StoredRecipient, error)
 	GetByID(context.Context, uuid.UUID) (StoredRecipient, error)
@@ -210,6 +217,13 @@ func (service *Service) ReplacePermissions(ctx context.Context, actorHash []byte
 		return Recipient{}, err
 	}
 	return service.publicRecipient(stored)
+}
+
+func (service *Service) Revoke(ctx context.Context, actorHash []byte, requestID string, tenantID, recipientID uuid.UUID) error {
+	if tenantID == uuid.Nil || recipientID == uuid.Nil {
+		return ErrInvalidInput
+	}
+	return service.store.Revoke(ctx, actorHash, requestID, tenantID, recipientID, service.now().UTC())
 }
 
 func (service *Service) ResolveIdentity(ctx context.Context, identity line.Identity, invitationReference string) (Recipient, error) {

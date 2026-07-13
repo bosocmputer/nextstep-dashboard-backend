@@ -85,4 +85,29 @@ func TestRecipientStoreInvitationPermissionAndIdentityMerge(t *testing.T) {
 	if strings.Contains(rawPII, "U123") || strings.Contains(rawPII, "Verified Owner") {
 		t.Fatalf("recipient PII stored in plaintext: %q", rawPII)
 	}
+
+	if err := service.Revoke(ctx, []byte("admin"), "request-revoke", tenantID, bound.ID); err != nil {
+		t.Fatalf("Revoke() error = %v", err)
+	}
+	page, err = service.List(ctx, tenantID, 25, "")
+	if err != nil || len(page.Data) != 0 {
+		t.Fatalf("List() after revoke = %+v, %v", page, err)
+	}
+	if _, err := service.GetForTenant(ctx, tenantID, bound.ID); !errors.Is(err, recipient.ErrRecipientNotFound) {
+		t.Fatalf("GetForTenant() after revoke error = %v", err)
+	}
+	var membershipStatus string
+	var permissionCount, auditCount int
+	if err := pool.QueryRow(ctx, `select status from tenant_memberships where tenant_id = $1 and recipient_id = $2`, tenantID, bound.ID).Scan(&membershipStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select count(*) from recipient_report_permissions where tenant_id = $1 and recipient_id = $2`, tenantID, bound.ID).Scan(&permissionCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select count(*) from audit_events where tenant_id = $1 and action = 'RECIPIENT_REVOKED' and resource_id = $2`, tenantID, bound.ID.String()).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if membershipStatus != string(recipient.StatusRevoked) || permissionCount != 0 || auditCount != 1 {
+		t.Fatalf("revoke state status=%s permissions=%d audits=%d", membershipStatus, permissionCount, auditCount)
+	}
 }

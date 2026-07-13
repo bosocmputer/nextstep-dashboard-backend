@@ -17,6 +17,7 @@ type RecipientAPI interface {
 	List(context.Context, uuid.UUID, int, string) (recipient.RecipientPage, error)
 	GetForTenant(context.Context, uuid.UUID, uuid.UUID) (recipient.Recipient, error)
 	ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, int) (recipient.Recipient, error)
+	Revoke(context.Context, []byte, string, uuid.UUID, uuid.UUID) error
 }
 
 func registerRecipientRoutes(router chi.Router, adminAuth AdminAuthenticator, recipients RecipientAPI) {
@@ -91,6 +92,26 @@ func registerRecipientRoutes(router chi.Router, adminAuth AdminAuthenticator, re
 		writeJSON(response, http.StatusOK, item)
 	})
 
+	router.Delete("/api/v1/admin/tenants/{tenantId}/recipients/{recipientId}", func(response http.ResponseWriter, request *http.Request) {
+		admin, ok := operationalAdmin(response, request, adminAuth, true)
+		if !ok {
+			return
+		}
+		tenantID, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		recipientID, err := uuid.Parse(chi.URLParam(request, "recipientId"))
+		if err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Recipient ID must be a UUID.", false)
+			return
+		}
+		if err := recipients.Revoke(request.Context(), admin.TokenHash, requestID(request), tenantID, recipientID); handleRecipientError(response, request, err) {
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+
 	router.Put("/api/v1/admin/tenants/{tenantId}/recipients/{recipientId}/permissions", func(response http.ResponseWriter, request *http.Request) {
 		admin, ok := operationalAdmin(response, request, adminAuth, true)
 		if !ok {
@@ -137,6 +158,15 @@ func handleRecipientError(response http.ResponseWriter, request *http.Request, e
 	case errors.Is(err, recipient.ErrVersionConflict):
 		writeProblem(response, request, http.StatusConflict, "VERSION_CONFLICT", "Report permissions changed in another session. Reload before saving again.", false)
 	default:
+		var recipientInUse *recipient.RecipientInUseError
+		if errors.As(err, &recipientInUse) {
+			fieldErrors := make([]fieldError, 0, len(recipientInUse.ScheduleNames))
+			for _, name := range recipientInUse.ScheduleNames {
+				fieldErrors = append(fieldErrors, fieldError{Field: "recipientId", Code: "ACTIVE_SCHEDULE_DEPENDENCY", Message: name})
+			}
+			writeJSON(response, http.StatusConflict, problemEnvelope{Error: problem{Code: "RECIPIENT_IN_USE", Message: "Pause or edit active schedules before removing this recipient.", RequestID: requestID(request), FieldErrors: fieldErrors}})
+			break
+		}
 		var inUse *recipient.PermissionInUseError
 		if errors.As(err, &inUse) {
 			fieldErrors := make([]fieldError, 0, len(inUse.ScheduleNames))

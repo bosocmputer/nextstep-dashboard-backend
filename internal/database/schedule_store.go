@@ -164,6 +164,9 @@ func (store *ScheduleStore) Update(ctx context.Context, actorHash []byte, reques
 		return schedule.Schedule{}, fmt.Errorf("begin update schedule: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockTenantRecipientScheduleMutation(ctx, tx, tenantID); err != nil {
+		return schedule.Schedule{}, err
+	}
 	before, err := getSchedule(ctx, tx, tenantID, scheduleID, true)
 	if err != nil {
 		return schedule.Schedule{}, err
@@ -199,6 +202,15 @@ func (store *ScheduleStore) Update(ctx context.Context, actorHash []byte, reques
 	return updated, nil
 }
 
+// Recipient revocation and schedule activation share this lock so an activation
+// cannot pass readiness while the same tenant membership is being revoked.
+func lockTenantRecipientScheduleMutation(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "tenant-recipient-schedule:"+tenantID.String()); err != nil {
+		return fmt.Errorf("lock tenant recipient schedule mutation: %w", err)
+	}
+	return nil
+}
+
 func (store *ScheduleStore) Readiness(ctx context.Context, tenantID uuid.UUID, scheduleIDs []uuid.UUID, now time.Time) (map[uuid.UUID][]string, error) {
 	return scheduleReadiness(ctx, store.pool, tenantID, scheduleIDs, now)
 }
@@ -212,6 +224,9 @@ func (store *ScheduleStore) Activate(ctx context.Context, actorHash []byte, requ
 		return schedule.Schedule{}, fmt.Errorf("begin activate schedule: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockTenantRecipientScheduleMutation(ctx, tx, tenantID); err != nil {
+		return schedule.Schedule{}, err
+	}
 	before, err := getSchedule(ctx, tx, tenantID, scheduleID, true)
 	if err != nil {
 		return schedule.Schedule{}, err
