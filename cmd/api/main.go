@@ -63,9 +63,13 @@ func main() {
 	viewerService := viewer.NewService(lineVerifier, recipientService, database.NewViewerStore(pool), sessionManager, time.Now)
 	viewerReportService := viewer.NewReportService(viewerService, database.NewReportStore(pool), time.Now).
 		ConfigureSnapshotFirst(cfg.SnapshotFirstEnabled, cfg.SnapshotFirstTenantIDs)
-	scheduleService := schedule.NewService(database.NewScheduleStore(pool), cfg.LineMessagingAccessToken != "", time.Now)
-	scheduleTestService := schedule.NewTestSendService(database.NewScheduleStore(pool), cfg.LineMessagingAccessToken != "", time.Now)
-	flexPreviewService := line.NewFlexPreviewService(tenantService, cfg.PublicBaseURL, time.Now)
+	periodObserver := func(preset report.Preset, mode report.ParameterKind, result string) {
+		logger.Info("schedule period resolved", "event", "schedule_period_resolution", "preset", preset, "mode", mode, "result", result, "schedulePeriodResolutionTotal", 1)
+	}
+	scheduleService := schedule.NewService(database.NewScheduleStore(pool).ConfigureSmartPeriods(cfg.SmartSchedulePeriodsEnabled, cfg.SmartSchedulePeriodTenantIDs, periodObserver), cfg.LineMessagingAccessToken != "", time.Now)
+	scheduleTestService := schedule.NewTestSendService(database.NewScheduleStore(pool).ConfigureSmartPeriods(cfg.SmartSchedulePeriodsEnabled, cfg.SmartSchedulePeriodTenantIDs, periodObserver), cfg.LineMessagingAccessToken != "", time.Now)
+	flexPreviewService := line.NewFlexPreviewService(tenantService, cfg.PublicBaseURL, time.Now).
+		ConfigureSmartPeriods(cfg.SmartSchedulePeriodsEnabled, cfg.SmartSchedulePeriodTenantIDs, periodObserver)
 
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,

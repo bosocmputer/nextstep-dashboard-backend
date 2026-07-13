@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/schedule"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/tenant"
 	"github.com/google/uuid"
 )
@@ -23,6 +24,9 @@ func (err *FlexPreviewValidationError) Error() string { return err.Field + ": " 
 type FlexPreviewInput struct {
 	PeriodPreset report.Preset `json:"periodPreset"`
 	ReportKeys   []report.Key  `json:"reportKeys"`
+	DaysOfWeek   []int         `json:"daysOfWeek,omitempty"`
+	LocalTime    string        `json:"localTime,omitempty"`
+	Timezone     string        `json:"timezone,omitempty"`
 }
 
 type FlexPreviewMetric struct {
@@ -41,6 +45,7 @@ type FlexPreviewReport struct {
 	Attention     *FlexAttentionPresentation  `json:"attention,omitempty"`
 	DataState     FlexDataState               `json:"dataState,omitempty"`
 	StateText     string                      `json:"stateText,omitempty"`
+	PeriodLabel   string                      `json:"periodLabel"`
 	ActionURL     string                      `json:"actionUrl"`
 }
 
@@ -55,6 +60,8 @@ type FlexPreview struct {
 	ActionURL           string              `json:"actionUrl"`
 	Reports             []FlexPreviewReport `json:"reports"`
 	PayloadBytes        int                 `json:"payloadBytes"`
+	ExampleScheduledFor time.Time           `json:"exampleScheduledFor,omitempty"`
+	MixedPeriods        bool                `json:"mixedPeriods"`
 	Message             json.RawMessage     `json:"message"`
 }
 
@@ -66,6 +73,12 @@ type FlexPreviewService struct {
 	tenants       FlexPreviewTenantReader
 	publicBaseURL *url.URL
 	now           func() time.Time
+	periodPolicy  schedule.PeriodPolicy
+}
+
+func (service *FlexPreviewService) ConfigureSmartPeriods(enabled bool, tenantIDs []uuid.UUID, observers ...schedule.PeriodResolutionObserver) *FlexPreviewService {
+	service.periodPolicy = schedule.NewPeriodPolicy(enabled, tenantIDs, observers...)
+	return service
 }
 
 func NewFlexPreviewService(tenants FlexPreviewTenantReader, publicBaseURL *url.URL, now func() time.Time) *FlexPreviewService {
@@ -85,8 +98,17 @@ func (service *FlexPreviewService) Preview(ctx context.Context, tenantID uuid.UU
 	if err != nil {
 		return FlexPreview{}, errors.New("tenant timezone is invalid")
 	}
-	generatedAt := service.now().In(location)
-	period, err := report.ResolvePeriod(validated.PeriodPreset, location, generatedAt, nil, nil)
+	now := service.now()
+	generatedAt := now.In(location)
+	exampleScheduledFor := generatedAt
+	if len(validated.DaysOfWeek) > 0 {
+		exampleScheduledFor, err = schedule.NextOccurrence(validated.DaysOfWeek, validated.LocalTime, validated.Timezone, now)
+		if err != nil {
+			return FlexPreview{}, err
+		}
+		exampleScheduledFor = exampleScheduledFor.In(location)
+	}
+	period, err := report.ResolvePeriod(validated.PeriodPreset, location, exampleScheduledFor, nil, nil)
 	if err != nil {
 		return FlexPreview{}, err
 	}
@@ -97,8 +119,21 @@ func (service *FlexPreviewService) Preview(ctx context.Context, tenantID uuid.UU
 
 	reports := make([]FlexPreviewReport, 0, len(validated.ReportKeys))
 	renderReports := make([]FlexReport, 0, len(validated.ReportKeys))
+	mixedPeriods := false
+	var firstEffectivePeriod report.Period
+	var firstPeriodMode report.ParameterKind
 	for _, key := range validated.ReportKeys {
 		definition, _ := report.DefinitionFor(key)
+		effectivePeriod, resolveErr := service.periodPolicy.Resolve(tenantID, validated.PeriodPreset, definition.ParameterKind, location, exampleScheduledFor)
+		if resolveErr != nil {
+			return FlexPreview{}, resolveErr
+		}
+		if len(renderReports) == 0 {
+			firstEffectivePeriod = effectivePeriod
+			firstPeriodMode = definition.ParameterKind
+		} else if effectivePeriod != firstEffectivePeriod {
+			mixedPeriods = true
+		}
 		metrics := make([]FlexPreviewMetric, 0, len(definition.LineMetrics))
 		renderMetrics := make(map[string]string, len(definition.LineMetrics))
 		for index, metric := range definition.LineMetrics {
@@ -110,8 +145,8 @@ func (service *FlexPreviewService) Preview(ctx context.Context, tenantID uuid.UU
 		reportURL.Path = strings.TrimRight(reportURL.Path, "/") + "/app/tenant/" + tenantID.String() + "/report/" + string(key)
 		reportURL.RawQuery = ""
 		reportURL.Fragment = ""
-		dashboard := previewDashboard(key, period)
-		renderReport := FlexReport{Key: key, Metrics: renderMetrics, Dashboard: &dashboard, ActionURL: reportURL.String()}
+		dashboard := previewDashboard(key, effectivePeriod)
+		renderReport := FlexReport{Key: key, Metrics: renderMetrics, Dashboard: &dashboard, Period: effectivePeriod, FinishedAt: exampleScheduledFor, ActionURL: reportURL.String()}
 		presentation, err := BuildFlexReportPresentation(renderReport)
 		if err != nil {
 			return FlexPreview{}, err
@@ -119,21 +154,35 @@ func (service *FlexPreviewService) Preview(ctx context.Context, tenantID uuid.UU
 		reports = append(reports, FlexPreviewReport{
 			Key: key, Label: definition.LabelTH, CategoryLabel: presentation.CategoryLabel, Metrics: metrics,
 			Primary: presentation.Primary, Supporting: presentation.Supporting, Comparison: presentation.Comparison,
-			Attention: presentation.Attention, DataState: presentation.DataState, StateText: presentation.StateText, ActionURL: presentation.ActionURL,
+			Attention: presentation.Attention, DataState: presentation.DataState, StateText: presentation.StateText,
+			PeriodLabel: previewPeriodLabel(definition.ParameterKind, effectivePeriod, exampleScheduledFor), ActionURL: presentation.ActionURL,
 		})
 		renderReports = append(renderReports, renderReport)
 	}
+	period = firstEffectivePeriod
+	structuredPeriodLabel := previewPeriodLabel(firstPeriodMode, period, exampleScheduledFor)
+	if mixedPeriods {
+		structuredPeriodLabel = flexPeriodSummary(period, true)
+	}
 	rendered, err := RenderFlexWithStats(FlexInput{
-		TenantName: item.Name, Timezone: item.Timezone, Period: period, GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: renderReports,
+		TenantName: item.Name, Timezone: item.Timezone, Period: period, GeneratedAt: exampleScheduledFor, ActionURL: actionURL.String(), Reports: renderReports,
 	})
 	if err != nil {
 		return FlexPreview{}, err
 	}
 	return FlexPreview{
 		PresentationVersion: rendered.PresentationVersion,
-		AltText:             flexAltText(item.Name, period, len(reports)), TenantName: item.Name, Period: period, PeriodLabel: periodLabel(period),
-		ContextNote: flexContextNote(period), GeneratedAt: generatedAt, ActionURL: actionURL.String(), Reports: reports, PayloadBytes: rendered.PayloadBytes, Message: rendered.Message,
+		AltText:             flexAltTextLabel(item.Name, structuredPeriodLabel, len(reports)), TenantName: item.Name, Period: period, PeriodLabel: structuredPeriodLabel,
+		ContextNote: flexContextNote(period), GeneratedAt: exampleScheduledFor, ActionURL: actionURL.String(), Reports: reports,
+		PayloadBytes: rendered.PayloadBytes, ExampleScheduledFor: exampleScheduledFor.UTC(), MixedPeriods: mixedPeriods, Message: rendered.Message,
 	}, nil
+}
+
+func previewPeriodLabel(mode report.ParameterKind, period report.Period, scheduledFor time.Time) string {
+	if mode == report.CurrentOnly {
+		return "สถานะ ณ เวลาส่ง " + thaiShortDate(scheduledFor) + " · " + scheduledFor.Format("15:04") + " น."
+	}
+	return periodLabel(period)
 }
 
 func previewDashboard(key report.Key, period report.Period) report.Dashboard {
@@ -230,6 +279,19 @@ func validateFlexPreviewInput(input FlexPreviewInput) (FlexPreviewInput, error) 
 		seen[key] = struct{}{}
 	}
 	input.ReportKeys = append([]report.Key(nil), input.ReportKeys...)
+	if len(input.DaysOfWeek) > 0 || input.LocalTime != "" || input.Timezone != "" {
+		if len(input.DaysOfWeek) == 0 {
+			return FlexPreviewInput{}, &FlexPreviewValidationError{Field: "daysOfWeek", Code: "INVALID_DAYS"}
+		}
+		if _, err := schedule.NextOccurrence(input.DaysOfWeek, input.LocalTime, input.Timezone, time.Now()); err != nil {
+			var validationError *schedule.ValidationError
+			if errors.As(err, &validationError) {
+				return FlexPreviewInput{}, &FlexPreviewValidationError{Field: validationError.Field, Code: validationError.Code}
+			}
+			return FlexPreviewInput{}, err
+		}
+		input.DaysOfWeek = append([]int(nil), input.DaysOfWeek...)
+	}
 	return input, nil
 }
 

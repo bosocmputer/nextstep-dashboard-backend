@@ -34,12 +34,16 @@ func TestFlexPreviewUsesTenantTimezoneAndExactRenderedMessage(t *testing.T) {
 	preview, err := service.Preview(context.Background(), tenantID, FlexPreviewInput{
 		PeriodPreset: report.Yesterday,
 		ReportKeys:   []report.Key{report.SalesGoodsServices, report.StockBalance},
+		DaysOfWeek:   []int{6}, LocalTime: "08:00", Timezone: "Asia/Bangkok",
 	})
 	if err != nil {
 		t.Fatalf("Preview() error = %v", err)
 	}
 	if preview.TenantName != "ร้านตัวอย่าง" || preview.Period.DateFrom != "2026-07-10" || preview.Period.DateTo != "2026-07-10" {
 		t.Fatalf("preview = %+v", preview)
+	}
+	if preview.ExampleScheduledFor.Format(time.RFC3339) != "2026-07-11T01:00:00Z" || preview.MixedPeriods {
+		t.Fatalf("preview schedule example = %s mixed=%v", preview.ExampleScheduledFor, preview.MixedPeriods)
 	}
 	if preview.PayloadBytes != len(preview.Message) || preview.PayloadBytes == 0 || len(preview.Reports) != 2 {
 		t.Fatalf("payloadBytes=%d message=%d reports=%d", preview.PayloadBytes, len(preview.Message), len(preview.Reports))
@@ -67,6 +71,58 @@ func TestFlexPreviewUsesTenantTimezoneAndExactRenderedMessage(t *testing.T) {
 	}
 	if err := json.Unmarshal(preview.Message, &message); err != nil || message.Type != "flex" || message.AltText != preview.AltText {
 		t.Fatalf("message=%s err=%v previewAlt=%q", preview.Message, err, preview.AltText)
+	}
+}
+
+func TestFlexPreviewUsesNextScheduleOccurrenceAndSmartMixedPeriods(t *testing.T) {
+	tenantID := uuid.New()
+	baseURL, _ := url.Parse("https://dashboard.nextstep-soft.com")
+	now := time.Date(2026, 7, 10, 18, 30, 0, 0, time.UTC)
+	service := NewFlexPreviewService(previewTenantReader{item: tenant.Tenant{
+		ID: tenantID, Name: "ร้านตัวอย่าง", Timezone: "Asia/Bangkok",
+	}}, baseURL, func() time.Time { return now }).ConfigureSmartPeriods(true, []uuid.UUID{tenantID})
+
+	preview, err := service.Preview(context.Background(), tenantID, FlexPreviewInput{
+		PeriodPreset: report.Yesterday,
+		ReportKeys:   []report.Key{report.SalesGoodsServices, report.StockBalance, report.StockReorder},
+		DaysOfWeek:   []int{6}, LocalTime: "08:00", Timezone: "Asia/Bangkok",
+	})
+	if err != nil {
+		t.Fatalf("Preview() error = %v", err)
+	}
+	if !preview.MixedPeriods || preview.ExampleScheduledFor.Format(time.RFC3339) != "2026-07-11T01:00:00Z" {
+		t.Fatalf("preview = %+v", preview)
+	}
+	want := map[report.Key]string{
+		report.SalesGoodsServices: "ข้อมูล ณ 10 ก.ค. 2569",
+		report.StockBalance:       "ข้อมูล ณ 10 ก.ค. 2569",
+		report.StockReorder:       "สถานะ ณ เวลาส่ง 11 ก.ค. 2569 · 08:00 น.",
+	}
+	for _, item := range preview.Reports {
+		if item.PeriodLabel != want[item.Key] {
+			t.Errorf("periodLabel[%s] = %q, want %q", item.Key, item.PeriodLabel, want[item.Key])
+		}
+	}
+	if !strings.Contains(string(preview.Message), "ช่วงข้อมูลแตกต่างตามรายงาน") {
+		t.Fatalf("mixed-period message missing marker: %s", preview.Message)
+	}
+}
+
+func TestFlexPreviewDoesNotCallOneCurrentOnlyReportMixed(t *testing.T) {
+	tenantID := uuid.New()
+	baseURL, _ := url.Parse("https://dashboard.nextstep-soft.com")
+	service := NewFlexPreviewService(previewTenantReader{item: tenant.Tenant{
+		ID: tenantID, Name: "ร้านตัวอย่าง", Timezone: "Asia/Bangkok",
+	}}, baseURL, func() time.Time { return time.Date(2026, 7, 10, 18, 30, 0, 0, time.UTC) }).ConfigureSmartPeriods(true, nil)
+	preview, err := service.Preview(context.Background(), tenantID, FlexPreviewInput{
+		PeriodPreset: report.Yesterday, ReportKeys: []report.Key{report.StockReorder},
+		DaysOfWeek: []int{6}, LocalTime: "08:00", Timezone: "Asia/Bangkok",
+	})
+	if err != nil {
+		t.Fatalf("Preview() error = %v", err)
+	}
+	if preview.MixedPeriods || !strings.HasPrefix(preview.PeriodLabel, "สถานะ ณ เวลาส่ง") || preview.Period.Preset != report.AsOfRun {
+		t.Fatalf("single current-only preview = %+v", preview)
 	}
 }
 

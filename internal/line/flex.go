@@ -15,7 +15,7 @@ import (
 const (
 	softFlexPayloadBytes    = 24 * 1024
 	maximumFlexPayloadBytes = 30 * 1024
-	FlexPresentationVersion = "executive-navy-v1"
+	FlexPresentationVersion = "executive-navy-v2"
 )
 
 const (
@@ -32,10 +32,12 @@ const (
 var ErrFlexInputInvalid = errors.New("LINE Flex input is invalid")
 
 type FlexReport struct {
-	Key       report.Key
-	Metrics   map[string]string
-	Dashboard *report.Dashboard
-	ActionURL string
+	Key        report.Key
+	Metrics    map[string]string
+	Dashboard  *report.Dashboard
+	Period     report.Period
+	FinishedAt time.Time
+	ActionURL  string
 }
 
 type FlexInput struct {
@@ -53,6 +55,7 @@ type FlexRenderResult struct {
 	PayloadBytes        int
 	ReportCount         int
 	ZeroReportCount     int
+	MixedPeriods        bool
 	Duration            time.Duration
 }
 
@@ -87,6 +90,7 @@ func RenderFlexWithStats(input FlexInput) (result FlexRenderResult, err error) {
 	}
 
 	presentations := make([]FlexReportPresentation, 0, len(input.Reports))
+	reportPeriods := make([]report.Period, 0, len(input.Reports))
 	seen := make(map[report.Key]struct{}, len(input.Reports))
 	for _, item := range input.Reports {
 		if _, duplicate := seen[item.Key]; duplicate {
@@ -95,6 +99,15 @@ func RenderFlexWithStats(input FlexInput) (result FlexRenderResult, err error) {
 		seen[item.Key] = struct{}{}
 		if strings.TrimSpace(item.ActionURL) == "" {
 			item.ActionURL = overviewURL.String()
+		}
+		itemPeriod := item.Period
+		if itemPeriod.DateFrom == "" && itemPeriod.DateTo == "" {
+			itemPeriod = input.Period
+		}
+		itemFrom, itemFromErr := time.Parse(time.DateOnly, itemPeriod.DateFrom)
+		itemTo, itemToErr := time.Parse(time.DateOnly, itemPeriod.DateTo)
+		if itemFromErr != nil || itemToErr != nil || itemTo.Before(itemFrom) {
+			return result, ErrFlexInputInvalid
 		}
 		reportURL, parseErr := validHTTPSURL(item.ActionURL)
 		if parseErr != nil || !strings.EqualFold(reportURL.Host, overviewURL.Host) {
@@ -105,19 +118,29 @@ func RenderFlexWithStats(input FlexInput) (result FlexRenderResult, err error) {
 			return result, presentationErr
 		}
 		presentations = append(presentations, presentation)
+		reportPeriods = append(reportPeriods, itemPeriod)
 	}
+	mixedPeriods := false
+	for _, itemPeriod := range reportPeriods[1:] {
+		if itemPeriod != reportPeriods[0] {
+			mixedPeriods = true
+			break
+		}
+	}
+	localGeneratedAt := input.GeneratedAt.In(location)
+	summaryLabel := flexReportSummary(input.Period, input.Reports, mixedPeriods, localGeneratedAt)
 
 	zeroReportCount := 0
 	bodyContents := []any{
 		map[string]any{"type": "text", "text": input.TenantName, "size": "xl", "color": flexTextColor, "weight": "bold", "wrap": true, "maxLines": 2, "adjustMode": "shrink-to-fit", "scaling": true},
-		flexText(periodLabel(input.Period), "sm", flexMutedColor, false, true, "sm"),
+		flexText(summaryLabel, "sm", flexMutedColor, false, true, "sm"),
 		flexText(runeCountLabel(len(presentations)), "xs", "#94A3B8", false, true, "xs"),
 	}
-	if note := flexContextNote(input.Period); note != "" {
+	if note := flexContextNote(input.Period); note != "" && !mixedPeriods {
 		bodyContents = append(bodyContents, flexText(note, "xs", flexMutedColor, false, true, "sm"))
 	}
 	lastCategory := ""
-	for _, item := range presentations {
+	for index, item := range presentations {
 		if item.CategoryLabel != lastCategory {
 			bodyContents = append(bodyContents, flexText(item.CategoryLabel, "xs", flexMutedColor, true, true, "lg"))
 			lastCategory = item.CategoryLabel
@@ -125,14 +148,17 @@ func RenderFlexWithStats(input FlexInput) (result FlexRenderResult, err error) {
 		if item.DataState == FlexDataZero {
 			zeroReportCount++
 		}
-		bodyContents = append(bodyContents, reportBox(item))
+		boxPeriodLabel := ""
+		if mixedPeriods {
+			boxPeriodLabel = flexReportPeriodLabel(item.Key, reportPeriods[index], input.GeneratedAt.In(location))
+		}
+		bodyContents = append(bodyContents, reportBox(item, boxPeriodLabel))
 	}
-	localGeneratedAt := input.GeneratedAt.In(location)
 	bodyContents = append(bodyContents, flexText("สร้างเมื่อ "+thaiShortDate(localGeneratedAt)+" · "+localGeneratedAt.Format("15:04")+" น. เวลาไทย", "xs", "#94A3B8", false, true, "lg"))
 
 	message := map[string]any{
 		"type":    "flex",
-		"altText": flexAltText(input.TenantName, input.Period, len(presentations)),
+		"altText": flexAltTextLabel(input.TenantName, summaryLabel, len(presentations)),
 		"contents": map[string]any{
 			"type": "bubble", "size": "giga",
 			"header": map[string]any{
@@ -161,10 +187,11 @@ func RenderFlexWithStats(input FlexInput) (result FlexRenderResult, err error) {
 	result.PayloadBytes = len(payload)
 	result.ReportCount = len(presentations)
 	result.ZeroReportCount = zeroReportCount
+	result.MixedPeriods = mixedPeriods
 	return result, nil
 }
 
-func reportBox(item FlexReportPresentation) map[string]any {
+func reportBox(item FlexReportPresentation, reportPeriodLabel string) map[string]any {
 	contents := []any{
 		map[string]any{
 			"type": "box", "layout": "horizontal", "alignItems": "center",
@@ -173,6 +200,9 @@ func reportBox(item FlexReportPresentation) map[string]any {
 				map[string]any{"type": "text", "text": "›", "size": "lg", "color": "#94A3B8", "align": "end", "flex": 1},
 			},
 		},
+	}
+	if reportPeriodLabel != "" {
+		contents = append(contents, flexText(reportPeriodLabel, "xs", flexMutedColor, false, true, "xs"))
 	}
 	if item.DataState == FlexDataZero {
 		contents = append(contents, flexText(item.StateText, "xs", flexMutedColor, false, true, "sm"))
@@ -205,6 +235,33 @@ func reportBox(item FlexReportPresentation) map[string]any {
 		"action":   map[string]any{"type": "uri", "label": "เปิดรายละเอียดรายงาน", "uri": item.ActionURL},
 		"contents": contents,
 	}
+}
+
+func flexPeriodSummary(period report.Period, mixed bool) string {
+	if mixed {
+		return "ช่วงข้อมูลแตกต่างตามรายงาน"
+	}
+	return periodLabel(period)
+}
+
+func flexReportSummary(period report.Period, reports []FlexReport, mixed bool, generatedAt time.Time) string {
+	if mixed {
+		return flexPeriodSummary(period, true)
+	}
+	if len(reports) == 1 {
+		if definition, ok := report.DefinitionFor(reports[0].Key); ok && definition.ParameterKind == report.CurrentOnly {
+			return "สถานะ ณ เวลาส่ง " + thaiShortDate(generatedAt) + " · " + generatedAt.Format("15:04") + " น."
+		}
+	}
+	return periodLabel(period)
+}
+
+func flexReportPeriodLabel(key report.Key, period report.Period, generatedAt time.Time) string {
+	definition, ok := report.DefinitionFor(key)
+	if ok && definition.ParameterKind == report.CurrentOnly {
+		return "สถานะ ณ เวลาส่ง " + thaiShortDate(generatedAt) + " · " + generatedAt.Format("15:04") + " น."
+	}
+	return periodLabel(period)
 }
 
 func metricRow(metric FlexMetricPresentation, primary bool) map[string]any {
@@ -273,7 +330,15 @@ func thaiShortDate(value time.Time) string {
 func runeCountLabel(count int) string { return strconv.Itoa(count) + " รายงาน" }
 
 func flexAltText(tenantName string, period report.Period, reportCount int) string {
-	text := "สรุปรายงาน " + tenantName + ": " + periodLabel(period) + " (" + runeCountLabel(reportCount) + ")"
+	return flexAltTextWithMode(tenantName, period, reportCount, false)
+}
+
+func flexAltTextWithMode(tenantName string, period report.Period, reportCount int, mixed bool) string {
+	return flexAltTextLabel(tenantName, flexPeriodSummary(period, mixed), reportCount)
+}
+
+func flexAltTextLabel(tenantName, summaryLabel string, reportCount int) string {
+	text := "สรุปรายงาน " + tenantName + ": " + summaryLabel + " (" + runeCountLabel(reportCount) + ")"
 	if utf8.RuneCountInString(text) <= 400 {
 		return text
 	}

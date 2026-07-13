@@ -166,12 +166,40 @@ func NextOccurrences(input Input, after time.Time, count int) ([]time.Time, erro
 	if err != nil {
 		return nil, err
 	}
-	location, _ := time.LoadLocation(validated.Timezone)
-	clock, _ := time.Parse("15:04", validated.LocalTime)
+	return calculateOccurrences(validated.DaysOfWeek, validated.LocalTime, validated.Timezone, after, count)
+}
+
+func NextOccurrence(daysOfWeek []int, localTime, timezone string, after time.Time) (time.Time, error) {
+	days := append([]int(nil), daysOfWeek...)
+	sort.Ints(days)
+	if len(days) < 1 || len(days) > 7 {
+		return time.Time{}, &ValidationError{Field: "daysOfWeek", Code: "INVALID_DAYS"}
+	}
+	for index, day := range days {
+		if day < 0 || day > 6 || index > 0 && days[index-1] == day {
+			return time.Time{}, &ValidationError{Field: "daysOfWeek", Code: "INVALID_DAYS"}
+		}
+	}
+	if _, err := time.Parse("15:04", localTime); err != nil || len(localTime) != 5 {
+		return time.Time{}, &ValidationError{Field: "localTime", Code: "INVALID_LOCAL_TIME"}
+	}
+	if timezone != "Asia/Bangkok" {
+		return time.Time{}, &ValidationError{Field: "timezone", Code: "INVALID_TIMEZONE"}
+	}
+	items, err := calculateOccurrences(days, localTime, timezone, after, 1)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return items[0], nil
+}
+
+func calculateOccurrences(daysOfWeek []int, localTime, timezone string, after time.Time, count int) ([]time.Time, error) {
+	location, _ := time.LoadLocation(timezone)
+	clock, _ := time.Parse("15:04", localTime)
 	localAfter := after.In(location)
 	startDay := time.Date(localAfter.Year(), localAfter.Month(), localAfter.Day(), 0, 0, 0, 0, location)
-	allowedDays := make(map[time.Weekday]struct{}, len(validated.DaysOfWeek))
-	for _, day := range validated.DaysOfWeek {
+	allowedDays := make(map[time.Weekday]struct{}, len(daysOfWeek))
+	for _, day := range daysOfWeek {
 		allowedDays[time.Weekday(day)] = struct{}{}
 	}
 	result := make([]time.Time, 0, count)

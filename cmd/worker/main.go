@@ -56,7 +56,10 @@ func main() {
 	workerID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
 	reportWorker := worker.NewReportWorker(database.NewReportStore(pool), connections, reportClient, workerID, time.Now)
 	schedulerID := workerID + "-scheduler"
-	dueWorker := schedule.NewDueWorker(database.NewScheduleStore(pool), schedulerID, time.Now)
+	periodObserver := func(preset report.Preset, mode report.ParameterKind, result string) {
+		logger.Info("schedule period resolved", "event", "schedule_period_resolution", "preset", preset, "mode", mode, "result", result, "schedulePeriodResolutionTotal", 1)
+	}
+	dueWorker := schedule.NewDueWorker(database.NewScheduleStore(pool).ConfigureSmartPeriods(cfg.SmartSchedulePeriodsEnabled, cfg.SmartSchedulePeriodTenantIDs, periodObserver), schedulerID, time.Now)
 	sessionManager, err := auth.NewSessionManager(cfg.SessionHMACKey, rand.Reader, time.Now)
 	if err != nil {
 		logger.Error("create worker token manager", "error", "session configuration rejected")
@@ -77,6 +80,8 @@ func main() {
 			"event", "flex_rendered", "presentationVersion", result.PresentationVersion, "result", "SUCCESS",
 			"reportCount", result.ReportCount, "flexRenderTotal", 1, "flexPayloadBytes", result.PayloadBytes,
 			"flexZeroReportCount", result.ZeroReportCount, "flexRenderDurationMs", float64(result.Duration.Microseconds())/1000,
+			"mixedPeriods", result.MixedPeriods,
+			"flexMixedPeriodTotal", 1,
 		)
 		return result.Message, nil
 	}

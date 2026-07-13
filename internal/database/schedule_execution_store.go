@@ -91,10 +91,17 @@ func (store *ScheduleStore) MaterializeTest(ctx context.Context, actorHash []byt
 		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5)`, execution.ID, tenantID, scheduleID, scheduledFor, now); err != nil {
 		return schedule.Execution{}, fmt.Errorf("insert test notification run: %w", err)
 	}
-	paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": period.DateFrom, "dateTo": period.DateTo})
 	idempotencyDigest := sha256.Sum256([]byte(idempotencyKey))
 	actorDigest := sha256.Sum256(actorHash)
 	for _, reportKey := range item.ReportKeys {
+		effectivePeriod := period
+		if definition, ok := report.DefinitionFor(reportKey); ok {
+			effectivePeriod, err = store.periodPolicy.Resolve(tenantID, item.PeriodPreset, definition.ParameterKind, location, now)
+			if err != nil {
+				return schedule.Execution{}, fmt.Errorf("resolve test report %s period: %w", reportKey, err)
+			}
+		}
+		paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": effectivePeriod.DateFrom, "dateTo": effectivePeriod.DateTo})
 		reportRunID := uuid.New()
 		reportIdempotencyKey := "schedule-test:" + scheduleID.String() + ":" + hex.EncodeToString(actorDigest[:8]) + ":" + hex.EncodeToString(idempotencyDigest[:16]) + ":" + string(reportKey)
 		if _, err := tx.Exec(ctx, `
@@ -107,7 +114,7 @@ func (store *ScheduleStore) MaterializeTest(ctx context.Context, actorHash []byt
 			       'SUMMARY', 100, d.version, coalesce(c.version, 0), 'QUEUED', $9
 			from report_definitions d left join tenant_sml_connections c on c.tenant_id = $2
 			where d.report_key = $3`,
-			reportRunID, tenantID, reportKey, reportIdempotencyKey, period.Preset, period.DateFrom, period.DateTo,
+			reportRunID, tenantID, reportKey, reportIdempotencyKey, effectivePeriod.Preset, effectivePeriod.DateFrom, effectivePeriod.DateTo,
 			paramsJSON, now, now.AddDate(0, 3, 0)); err != nil {
 			return schedule.Execution{}, fmt.Errorf("enqueue test report %s: %w", reportKey, err)
 		}
@@ -209,9 +216,16 @@ func (store *ScheduleStore) MaterializeDue(ctx context.Context, workerID string,
 		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5)`, executionID, item.TenantID, item.ID, scheduledFor, now.Add(5*time.Second)); err != nil {
 		return schedule.Execution{}, fmt.Errorf("insert notification run: %w", err)
 	}
-	paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": period.DateFrom, "dateTo": period.DateTo})
 	reportRunIDs := make([]uuid.UUID, 0, len(item.ReportKeys))
 	for _, reportKey := range item.ReportKeys {
+		effectivePeriod := period
+		if definition, ok := report.DefinitionFor(reportKey); ok {
+			effectivePeriod, err = store.periodPolicy.Resolve(item.TenantID, item.PeriodPreset, definition.ParameterKind, location, scheduledFor)
+			if err != nil {
+				return schedule.Execution{}, fmt.Errorf("resolve scheduled report %s period: %w", reportKey, err)
+			}
+		}
+		paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": effectivePeriod.DateFrom, "dateTo": effectivePeriod.DateTo})
 		reportRunID := uuid.New()
 		idempotencyKey := "schedule:" + item.ID.String() + ":" + scheduledFor.UTC().Format("20060102T150405Z") + ":" + string(reportKey)
 		if _, err := tx.Exec(ctx, `
@@ -224,7 +238,7 @@ func (store *ScheduleStore) MaterializeDue(ctx context.Context, workerID string,
 			       'SUMMARY', 100, d.version, coalesce(c.version, 0), 'QUEUED', $9
 			from report_definitions d left join tenant_sml_connections c on c.tenant_id = $2
 			where d.report_key = $3`,
-			reportRunID, item.TenantID, reportKey, idempotencyKey, period.Preset, period.DateFrom, period.DateTo,
+			reportRunID, item.TenantID, reportKey, idempotencyKey, effectivePeriod.Preset, effectivePeriod.DateFrom, effectivePeriod.DateTo,
 			paramsJSON, now, now.AddDate(0, 3, 0)); err != nil {
 			return schedule.Execution{}, fmt.Errorf("enqueue scheduled report %s: %w", reportKey, err)
 		}

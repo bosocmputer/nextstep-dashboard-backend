@@ -108,6 +108,7 @@ func TestWorkerRefusesMismatchedReportPeriods(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	store := &memoryNotificationStore{work: Work{
 		ID: uuid.New(), TenantID: uuid.New(), TenantName: "Shop", Timezone: "Asia/Bangkok",
+		SchedulePeriodPreset: report.Yesterday, ScheduledFor: now,
 		Reports: []ReportResult{
 			{RunID: uuid.New(), Key: report.SalesGoodsServices, Period: report.Period{Preset: report.Yesterday, DateFrom: "2026-07-09", DateTo: "2026-07-09"}, FinishedAt: now, Metrics: map[string]string{"document_count": "2", "total_amount": "30.00"}},
 			{RunID: uuid.New(), Key: report.StockBalance, Period: report.Period{Preset: report.AsOfRun, DateFrom: "2026-07-10", DateTo: "2026-07-10"}, FinishedAt: now, Metrics: map[string]string{"item_count": "10", "balance_amount": "99.00"}},
@@ -116,6 +117,26 @@ func TestWorkerRefusesMismatchedReportPeriods(t *testing.T) {
 	}}
 	if err := testNotificationWorker(t, store, now).ProcessOne(context.Background()); err != nil || store.failedCode != "FLEX_REPORT_CONTEXT_INVALID" || len(store.published) != 0 {
 		t.Fatalf("ProcessOne() error=%v failedCode=%q published=%d", err, store.failedCode, len(store.published))
+	}
+}
+
+func TestWorkerAcceptsResolverVerifiedMixedReportPeriods(t *testing.T) {
+	now := time.Date(2026, 7, 11, 1, 0, 0, 0, time.UTC)
+	tenantID := uuid.New()
+	store := &memoryNotificationStore{work: Work{
+		ID: uuid.New(), TenantID: tenantID, TenantName: "Shop", Timezone: "Asia/Bangkok",
+		SchedulePeriodPreset: report.Yesterday, ScheduledFor: now,
+		Reports: []ReportResult{
+			{RunID: uuid.New(), Key: report.SalesGoodsServices, Period: report.Period{Preset: report.Yesterday, DateFrom: "2026-07-10", DateTo: "2026-07-10"}, FinishedAt: now, Metrics: map[string]string{"document_count": "2", "total_amount": "30.00"}},
+			{RunID: uuid.New(), Key: report.StockReorder, Period: report.Period{Preset: report.AsOfRun, DateFrom: "2026-07-11", DateTo: "2026-07-11"}, FinishedAt: now, Metrics: map[string]string{"reorder_item_count": "3", "shortage_qty": "8"}},
+		},
+		Targets: []Target{{RecipientID: uuid.New(), ReportKeys: []report.Key{report.SalesGoodsServices, report.StockReorder}}},
+	}}
+	if err := testNotificationWorker(t, store, now).ProcessOne(context.Background()); err != nil || store.failedCode != "" || len(store.published) != 1 {
+		t.Fatalf("ProcessOne() error=%v failedCode=%q published=%d", err, store.failedCode, len(store.published))
+	}
+	if !strings.Contains(string(store.published[0].Payload), "ช่วงข้อมูลแตกต่างตามรายงาน") {
+		t.Fatalf("mixed period payload is missing report periods: %s", store.published[0].Payload)
 	}
 }
 

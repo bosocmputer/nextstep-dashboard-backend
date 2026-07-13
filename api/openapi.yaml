@@ -1128,7 +1128,7 @@ components:
         periodMode: {type: string, enum: [DATE_RANGE, AS_OF_DATE, CURRENT_ONLY]}
     AdminReportDefinition:
       type: object
-      required: [reportKey, version, label, category, categoryLabel, status]
+      required: [reportKey, version, label, category, categoryLabel, status, periodMode]
       properties:
         reportKey: {$ref: '#/components/schemas/ReportKey'}
         version: {type: string}
@@ -1136,6 +1136,7 @@ components:
         category: {type: string}
         categoryLabel: {type: string}
         status: {type: string, enum: [ACTIVE, DEPRECATED]}
+        periodMode: {type: string, enum: [DATE_RANGE, AS_OF_DATE, CURRENT_ONLY]}
     AdminReportCatalog:
       type: object
       required: [data, limits]
@@ -1202,6 +1203,9 @@ components:
       properties:
         periodPreset: {$ref: '#/components/schemas/PeriodPreset'}
         reportKeys: {type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        daysOfWeek: {type: array, minItems: 1, maxItems: 7, uniqueItems: true, items: {type: integer, minimum: 0, maximum: 6}}
+        localTime: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'}
+        timezone: {type: string, enum: [Asia/Bangkok]}
     FlexPreviewMetric:
       type: object
       additionalProperties: false
@@ -1226,7 +1230,7 @@ components:
     FlexPreviewReport:
       type: object
       additionalProperties: false
-      required: [key, label, metrics]
+      required: [key, label, metrics, periodLabel]
       properties:
         key: {$ref: '#/components/schemas/ReportKey'}
         label: {type: string}
@@ -1238,11 +1242,12 @@ components:
         attention: {$ref: '#/components/schemas/FlexPreviewAttention'}
         dataState: {type: string, enum: [DATA, ZERO], description: Optional presentation state; absent for legacy preview producers.}
         stateText: {type: string, description: Backend-approved Thai state text when dataState is ZERO.}
+        periodLabel: {type: string}
         actionUrl: {type: string, format: uri}
     FlexPreview:
       type: object
       additionalProperties: false
-      required: [altText, tenantName, period, periodLabel, generatedAt, actionUrl, reports, payloadBytes, message]
+      required: [altText, tenantName, period, periodLabel, generatedAt, actionUrl, reports, payloadBytes, exampleScheduledFor, mixedPeriods, message]
       properties:
         presentationVersion: {type: string, description: Optional renderer presentation contract version; absent for legacy preview producers.}
         altText: {type: string}
@@ -1261,6 +1266,8 @@ components:
         actionUrl: {type: string, format: uri}
         reports: {type: array, minItems: 1, maxItems: 10, items: {$ref: '#/components/schemas/FlexPreviewReport'}}
         payloadBytes: {type: integer, minimum: 1, maximum: 30719}
+        exampleScheduledFor: {type: string, format: date-time}
+        mixedPeriods: {type: boolean}
         message: {type: object, additionalProperties: true, description: Exact LINE Messaging API Flex message object produced by the backend renderer.}
     NotificationExecution:
       type: object

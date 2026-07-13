@@ -18,25 +18,27 @@ const production = "production"
 type LookupFunc func(string) (string, bool)
 
 type Config struct {
-	Environment               string
-	HTTPAddr                  string
-	DatabaseURL               string
-	PublicBaseURL             *url.URL
-	AdminUsername             string
-	AdminPasswordHash         string
-	SessionHMACKey            []byte
-	EncryptionMasterKey       []byte
-	EncryptionKeyID           string
-	LineLoginChannelID        string
-	LineMessagingAccessToken  string
-	SMLAllowedPrefixes        []netip.Prefix
-	SMLAllowedHosts           []string
-	DatabaseMaxConnections    int
-	DatabaseMinConnections    int
-	ReportWorkerConcurrency   int
-	DeliveryWorkerConcurrency int
-	SnapshotFirstEnabled      bool
-	SnapshotFirstTenantIDs    []uuid.UUID
+	Environment                  string
+	HTTPAddr                     string
+	DatabaseURL                  string
+	PublicBaseURL                *url.URL
+	AdminUsername                string
+	AdminPasswordHash            string
+	SessionHMACKey               []byte
+	EncryptionMasterKey          []byte
+	EncryptionKeyID              string
+	LineLoginChannelID           string
+	LineMessagingAccessToken     string
+	SMLAllowedPrefixes           []netip.Prefix
+	SMLAllowedHosts              []string
+	DatabaseMaxConnections       int
+	DatabaseMinConnections       int
+	ReportWorkerConcurrency      int
+	DeliveryWorkerConcurrency    int
+	SnapshotFirstEnabled         bool
+	SnapshotFirstTenantIDs       []uuid.UUID
+	SmartSchedulePeriodsEnabled  bool
+	SmartSchedulePeriodTenantIDs []uuid.UUID
 }
 
 func Load(lookup LookupFunc) (Config, error) {
@@ -136,7 +138,15 @@ func Load(lookup LookupFunc) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	snapshotFirstTenantIDs, err := parseUUIDList(valueOrDefault(lookup, "SNAPSHOT_FIRST_TENANT_IDS", ""))
+	snapshotFirstTenantIDs, err := parseUUIDList("SNAPSHOT_FIRST_TENANT_IDS", valueOrDefault(lookup, "SNAPSHOT_FIRST_TENANT_IDS", ""))
+	if err != nil {
+		return Config{}, err
+	}
+	smartSchedulePeriodsEnabled, err := boolValue(lookup, "SMART_SCHEDULE_PERIODS_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	smartSchedulePeriodTenantIDs, err := parseUUIDList("SMART_SCHEDULE_PERIOD_TENANT_IDS", valueOrDefault(lookup, "SMART_SCHEDULE_PERIOD_TENANT_IDS", ""))
 	if err != nil {
 		return Config{}, err
 	}
@@ -151,25 +161,27 @@ func Load(lookup LookupFunc) (Config, error) {
 	}
 
 	return Config{
-		Environment:               environment,
-		HTTPAddr:                  httpAddr,
-		DatabaseURL:               values["DATABASE_URL"],
-		PublicBaseURL:             publicBaseURL,
-		AdminUsername:             adminUsername,
-		AdminPasswordHash:         values["ADMIN_PASSWORD_HASH"],
-		SessionHMACKey:            sessionKey,
-		EncryptionMasterKey:       encryptionKey,
-		EncryptionKeyID:           values["ENCRYPTION_KEY_ID"],
-		LineLoginChannelID:        lineLoginChannelID,
-		LineMessagingAccessToken:  lineMessagingAccessToken,
-		SMLAllowedPrefixes:        allowedPrefixes,
-		SMLAllowedHosts:           allowedHosts,
-		DatabaseMaxConnections:    databaseMaxConnections,
-		DatabaseMinConnections:    databaseMinConnections,
-		ReportWorkerConcurrency:   workerConcurrency,
-		DeliveryWorkerConcurrency: deliveryConcurrency,
-		SnapshotFirstEnabled:      snapshotFirstEnabled,
-		SnapshotFirstTenantIDs:    snapshotFirstTenantIDs,
+		Environment:                  environment,
+		HTTPAddr:                     httpAddr,
+		DatabaseURL:                  values["DATABASE_URL"],
+		PublicBaseURL:                publicBaseURL,
+		AdminUsername:                adminUsername,
+		AdminPasswordHash:            values["ADMIN_PASSWORD_HASH"],
+		SessionHMACKey:               sessionKey,
+		EncryptionMasterKey:          encryptionKey,
+		EncryptionKeyID:              values["ENCRYPTION_KEY_ID"],
+		LineLoginChannelID:           lineLoginChannelID,
+		LineMessagingAccessToken:     lineMessagingAccessToken,
+		SMLAllowedPrefixes:           allowedPrefixes,
+		SMLAllowedHosts:              allowedHosts,
+		DatabaseMaxConnections:       databaseMaxConnections,
+		DatabaseMinConnections:       databaseMinConnections,
+		ReportWorkerConcurrency:      workerConcurrency,
+		DeliveryWorkerConcurrency:    deliveryConcurrency,
+		SnapshotFirstEnabled:         snapshotFirstEnabled,
+		SnapshotFirstTenantIDs:       snapshotFirstTenantIDs,
+		SmartSchedulePeriodsEnabled:  smartSchedulePeriodsEnabled,
+		SmartSchedulePeriodTenantIDs: smartSchedulePeriodTenantIDs,
 	}, nil
 }
 
@@ -182,7 +194,7 @@ func boolValue(lookup LookupFunc, name string, fallback bool) (bool, error) {
 	return value, nil
 }
 
-func parseUUIDList(raw string) ([]uuid.UUID, error) {
+func parseUUIDList(name, raw string) ([]uuid.UUID, error) {
 	if strings.TrimSpace(raw) == "" {
 		return []uuid.UUID{}, nil
 	}
@@ -191,7 +203,7 @@ func parseUUIDList(raw string) ([]uuid.UUID, error) {
 	for _, part := range strings.Split(raw, ",") {
 		id, err := uuid.Parse(strings.TrimSpace(part))
 		if err != nil {
-			return nil, errors.New("SNAPSHOT_FIRST_TENANT_IDS must contain comma-separated UUIDs")
+			return nil, fmt.Errorf("%s must contain comma-separated UUIDs", name)
 		}
 		if _, exists := seen[id]; !exists {
 			seen[id] = struct{}{}

@@ -14,6 +14,7 @@ import (
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/auth"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/line"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/schedule"
 	"github.com/google/uuid"
 )
 
@@ -37,15 +38,17 @@ type Target struct {
 }
 
 type Work struct {
-	ID         uuid.UUID
-	TenantID   uuid.UUID
-	ScheduleID uuid.UUID
-	TenantName string
-	Timezone   string
-	Pending    bool
-	Partial    bool
-	Reports    []ReportResult
-	Targets    []Target
+	ID                   uuid.UUID
+	TenantID             uuid.UUID
+	ScheduleID           uuid.UUID
+	TenantName           string
+	Timezone             string
+	SchedulePeriodPreset report.Preset
+	ScheduledFor         time.Time
+	Pending              bool
+	Partial              bool
+	Reports              []ReportResult
+	Targets              []Target
 }
 
 type PreparedDelivery struct {
@@ -98,7 +101,7 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 	if len(work.Targets) == 0 {
 		return worker.store.Fail(ctx, work.ID, worker.workerID, "NO_ELIGIBLE_RECIPIENTS", now)
 	}
-	if !validReportContext(work.Reports) {
+	if !validReportContext(work) {
 		return worker.store.Fail(ctx, work.ID, worker.workerID, "FLEX_REPORT_CONTEXT_INVALID", now)
 	}
 	prepared := make([]PreparedDelivery, 0, len(work.Targets))
@@ -130,7 +133,7 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 			reportQuery.Set("snapshotRunId", result.RunID.String())
 			reportQuery.Set("deliveryRef", reference)
 			reportURL.RawQuery = reportQuery.Encode()
-			flexReports = append(flexReports, line.FlexReport{Key: result.Key, Metrics: result.Metrics, Dashboard: result.Dashboard, ActionURL: reportURL.String()})
+			flexReports = append(flexReports, line.FlexReport{Key: result.Key, Metrics: result.Metrics, Dashboard: result.Dashboard, Period: result.Period, FinishedAt: result.FinishedAt, ActionURL: reportURL.String()})
 		}
 		payload, err := worker.render(line.FlexInput{
 			TenantName: work.TenantName, Timezone: work.Timezone, Period: reports[0].Period, GeneratedAt: generatedAt,
@@ -150,16 +153,39 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 	return worker.store.Publish(ctx, work.ID, worker.workerID, prepared, work.Partial, now)
 }
 
-func validReportContext(reports []ReportResult) bool {
+func validReportContext(work Work) bool {
+	reports := work.Reports
 	if len(reports) == 0 {
 		return false
 	}
 	period := reports[0].Period
+	mixed := false
 	for _, result := range reports {
-		if result.RunID == uuid.Nil || result.Period != period || result.FinishedAt.IsZero() {
+		if result.RunID == uuid.Nil || result.FinishedAt.IsZero() {
 			return false
 		}
+		mixed = mixed || result.Period != period
 		if result.Dashboard != nil && (result.Dashboard.ReportKey != result.Key || result.Dashboard.Period != result.Period) {
+			return false
+		}
+	}
+	if !mixed {
+		return true
+	}
+	if work.ScheduledFor.IsZero() || work.SchedulePeriodPreset == "" || work.Timezone != "Asia/Bangkok" {
+		return false
+	}
+	location, err := time.LoadLocation(work.Timezone)
+	if err != nil {
+		return false
+	}
+	for _, result := range reports {
+		definition, ok := report.DefinitionFor(result.Key)
+		if !ok {
+			return false
+		}
+		expected, err := schedule.ResolveEffectivePeriod(work.SchedulePeriodPreset, definition.ParameterKind, location, work.ScheduledFor)
+		if err != nil || expected != result.Period {
 			return false
 		}
 	}

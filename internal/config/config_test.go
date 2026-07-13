@@ -53,6 +53,8 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 		"DATABASE_MIN_CONNECTIONS":            "3",
 		"SNAPSHOT_FIRST_ENABLED":              "true",
 		"SNAPSHOT_FIRST_TENANT_IDS":           "a904bc92-a89b-463b-bc2a-565f09cbef44",
+		"SMART_SCHEDULE_PERIODS_ENABLED":      "true",
+		"SMART_SCHEDULE_PERIOD_TENANT_IDS":    "a904bc92-a89b-463b-bc2a-565f09cbef44",
 	}
 
 	cfg, err := Load(func(key string) (string, bool) {
@@ -88,6 +90,9 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 	}
 	if !cfg.SnapshotFirstEnabled || len(cfg.SnapshotFirstTenantIDs) != 1 {
 		t.Fatalf("snapshot first config = enabled:%v tenants:%v", cfg.SnapshotFirstEnabled, cfg.SnapshotFirstTenantIDs)
+	}
+	if !cfg.SmartSchedulePeriodsEnabled || len(cfg.SmartSchedulePeriodTenantIDs) != 1 {
+		t.Fatalf("smart schedule config = enabled:%v tenants:%v", cfg.SmartSchedulePeriodsEnabled, cfg.SmartSchedulePeriodTenantIDs)
 	}
 }
 

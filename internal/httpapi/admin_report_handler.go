@@ -13,12 +13,13 @@ const (
 )
 
 type adminReportDefinition struct {
-	ReportKey     report.Key    `json:"reportKey"`
-	Version       string        `json:"version"`
-	Label         string        `json:"label"`
-	Category      string        `json:"category"`
-	CategoryLabel string        `json:"categoryLabel"`
-	Status        report.Status `json:"status"`
+	ReportKey     report.Key           `json:"reportKey"`
+	Version       string               `json:"version"`
+	Label         string               `json:"label"`
+	Category      string               `json:"category"`
+	CategoryLabel string               `json:"categoryLabel"`
+	Status        report.Status        `json:"status"`
+	PeriodMode    report.ParameterKind `json:"periodMode"`
 }
 
 func registerAdminReportRoutes(router chi.Router, adminAuth AdminAuthenticator) {
@@ -32,6 +33,7 @@ func registerAdminReportRoutes(router chi.Router, adminAuth AdminAuthenticator) 
 			items = append(items, adminReportDefinition{
 				ReportKey: definition.Key, Version: definition.Version, Label: definition.LabelTH,
 				Category: definition.Category, CategoryLabel: definition.CategoryLabelTH, Status: definition.Status,
+				PeriodMode: definition.ParameterKind,
 			})
 		}
 		response.Header().Set("Cache-Control", "no-store")

@@ -19,11 +19,17 @@ import (
 )
 
 type ScheduleStore struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	periodPolicy schedule.PeriodPolicy
 }
 
 func NewScheduleStore(pool *pgxpool.Pool) *ScheduleStore {
 	return &ScheduleStore{pool: pool}
+}
+
+func (store *ScheduleStore) ConfigureSmartPeriods(enabled bool, tenantIDs []uuid.UUID, observers ...schedule.PeriodResolutionObserver) *ScheduleStore {
+	store.periodPolicy = schedule.NewPeriodPolicy(enabled, tenantIDs, observers...)
+	return store
 }
 
 func (store *ScheduleStore) Create(ctx context.Context, actorHash []byte, requestID, idempotencyKey string, tenantID uuid.UUID, input schedule.Input, now time.Time) (schedule.Schedule, error) {

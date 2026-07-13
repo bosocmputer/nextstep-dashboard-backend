@@ -183,10 +183,12 @@ func (store *NotificationStore) Publish(ctx context.Context, runID uuid.UUID, wo
 func loadNotificationWork(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now time.Time) (notification.Work, error) {
 	var work notification.Work
 	if err := tx.QueryRow(ctx, `
-		select n.id, n.tenant_id, n.schedule_id, tenant.name, tenant.timezone
+		select n.id, n.tenant_id, n.schedule_id, tenant.name, tenant.timezone,
+		       schedule.period_preset, n.scheduled_for
 		from notification_runs n
 		join tenants tenant on tenant.id = n.tenant_id
-		where n.id = $1`, runID).Scan(&work.ID, &work.TenantID, &work.ScheduleID, &work.TenantName, &work.Timezone); err != nil {
+		join notification_schedules schedule on schedule.id = n.schedule_id
+		where n.id = $1`, runID).Scan(&work.ID, &work.TenantID, &work.ScheduleID, &work.TenantName, &work.Timezone, &work.SchedulePeriodPreset, &work.ScheduledFor); err != nil {
 		return notification.Work{}, fmt.Errorf("load notification work: %w", err)
 	}
 	rows, err := tx.Query(ctx, `

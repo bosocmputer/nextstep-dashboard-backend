@@ -22,7 +22,7 @@ func TestAdminReportCatalogReturnsSafeDefinitionsAndServerLimits(t *testing.T) {
 	handler.ServeHTTP(response, request)
 
 	body := response.Body.String()
-	if response.Code != http.StatusOK || !strings.Contains(body, `"maxScheduleReports":10`) || !strings.Contains(body, `"maxFlexPayloadBytes":30720`) {
+	if response.Code != http.StatusOK || !strings.Contains(body, `"maxScheduleReports":10`) || !strings.Contains(body, `"maxFlexPayloadBytes":30720`) || !strings.Contains(body, `"periodMode":"DATE_RANGE"`) || !strings.Contains(body, `"periodMode":"CURRENT_ONLY"`) {
 		t.Fatalf("status=%d body=%s", response.Code, body)
 	}
 	for _, forbidden := range []string{"contractJson", "query", "sql", "isSensitive"} {
