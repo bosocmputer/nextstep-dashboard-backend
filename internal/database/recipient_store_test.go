@@ -104,7 +104,7 @@ func TestRecipientStoreInvitationPermissionAndIdentityMerge(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select count(*) from recipient_report_permissions where tenant_id = $1 and recipient_id = $2`, tenantID, bound.ID).Scan(&permissionCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `select count(*) from audit_events where tenant_id = $1 and action = 'RECIPIENT_REVOKED' and resource_id = $2`, tenantID, bound.ID.String()).Scan(&auditCount); err != nil {
+	if err := pool.QueryRow(ctx, `select count(*) from audit_logs where tenant_id = $1 and action = 'RECIPIENT_REVOKED' and resource_id = $2`, tenantID, bound.ID.String()).Scan(&auditCount); err != nil {
 		t.Fatal(err)
 	}
 	if membershipStatus != string(recipient.StatusRevoked) || permissionCount != 0 || auditCount != 1 {
