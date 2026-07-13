@@ -16,6 +16,13 @@ for runtime_script in backup.sh restore-drill.sh; do
   fi
 done
 
+for feature_key in SMART_SCHEDULE_PERIODS_ENABLED SMART_SCHEDULE_PERIOD_TENANT_IDS; do
+  if ! grep -q "^  $feature_key:" "$script_dir/compose.production.yml"; then
+    echo "compose.production.yml must pass $feature_key to API and Worker" >&2
+    exit 1
+  fi
+done
+
 chmod_line=$(awk '/chmod 600 .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
 chown_line=$(awk '/chown .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
 if [ -z "$chmod_line" ] || [ -z "$chown_line" ] || [ "$chmod_line" -ge "$chown_line" ]; then
