@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/operations"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -33,24 +34,63 @@ func (store *OperationsStore) ListReportRuns(ctx context.Context, filter operati
 		status = &value
 	}
 	rows, err := store.pool.Query(ctx, `
-		select `+reportRunColumns+`, (select name from tenants where id = r.tenant_id) from report_runs r
+		select `+reportRunColumns+`,
+		       (select name from tenants where id = r.tenant_id),
+		       case when r.status in ('CLAIMED', 'RUNNING') and r.lease_expires_at < $6 then 'STALLED' else 'ACTIVE' end,
+		       (select max(retry_at) from (
+		          select circuit.open_until as retry_at
+		          from tenant_sml_circuits circuit
+		          where circuit.tenant_id = r.tenant_id and circuit.open_until > $6
+		          union all
+		          select host_circuit.open_until
+		          from tenant_sml_connections connection
+		          join sml_host_circuits host_circuit on host_circuit.host_key = connection.endpoint_host_key
+		          where connection.tenant_id = r.tenant_id and host_circuit.open_until > $6
+		       ) retry_times),
+		       case when r.status <> 'QUEUED' then null
+		         when exists (select 1 from tenant_sml_circuits circuit where circuit.tenant_id = r.tenant_id and circuit.open_until > $6) then 'TENANT_COOLDOWN'
+		         when exists (
+		           select 1 from tenant_sml_connections connection
+		           join sml_host_circuits host_circuit on host_circuit.host_key = connection.endpoint_host_key
+		           where connection.tenant_id = r.tenant_id and host_circuit.open_until > $6
+		         ) then 'HOST_COOLDOWN'
+		         when exists (select 1 from report_runs active where active.tenant_id = r.tenant_id and active.status in ('CLAIMED', 'RUNNING')) then 'TENANT_BUSY'
+		         when (select count(*) from report_runs active
+		               join tenant_sml_connections active_connection on active_connection.tenant_id = active.tenant_id
+		               join tenant_sml_connections candidate_connection on candidate_connection.tenant_id = r.tenant_id
+		               where active.status in ('CLAIMED', 'RUNNING')
+		                 and active_connection.endpoint_host_key = candidate_connection.endpoint_host_key) >= $7 then 'HOST_BUSY'
+		         when r.source <> 'SCHEDULE' and (
+		           (select count(*) from report_runs active where active.status in ('CLAIMED', 'RUNNING') and active.source <> 'SCHEDULE') >= $8
+		           or (r.report_key in ('stock_balance', 'ar_customer_movement') and exists (
+		             select 1 from notification_schedules schedule
+		             join tenant_sml_connections scheduled_connection on scheduled_connection.tenant_id = schedule.tenant_id
+		             join tenant_sml_connections candidate_connection on candidate_connection.tenant_id = r.tenant_id
+		               and candidate_connection.endpoint_host_key = scheduled_connection.endpoint_host_key
+		             where schedule.status = 'ACTIVE' and schedule.next_run_at between $6 and $6 + interval '15 minutes'
+		           ))
+		         ) then 'SCHEDULE_RESERVED'
+		         else null end
+		from report_runs r
 		where ($1::uuid is null or r.tenant_id = $1)
 		  and ($2::text is null or r.status = $2)
 		  and ($3::timestamptz is null or (r.created_at, r.id) < ($3, $4))
 		order by r.created_at desc, r.id desc
-		limit $5`, filter.TenantID, status, cursorTime, cursorID, filter.PageSize+1)
+		limit $5`, filter.TenantID, status, cursorTime, cursorID, filter.PageSize+1,
+		filter.Now, boundedEnvInt("REPORT_HOST_QUERY_CONCURRENCY", 2, 1, 16), max(1, boundedEnvInt("REPORT_GLOBAL_QUERY_CONCURRENCY", 4, 1, 32)-1))
 	if err != nil {
 		return operations.ReportRunPage{}, fmt.Errorf("list admin report runs: %w", err)
 	}
 	defer rows.Close()
 	items := make([]operations.ReportRun, 0, filter.PageSize+1)
 	for rows.Next() {
-		var tenantName string
-		run, err := scanReportRunWithExtras(rows, filter.Now, &tenantName)
+		var item operations.ReportRun
+		run, err := scanReportRunWithExtras(rows, filter.Now, &item.TenantName, &item.RuntimeStatus, &item.RetryAvailableAt, &item.WaitReason)
 		if err != nil {
 			return operations.ReportRunPage{}, fmt.Errorf("scan admin report run: %w", err)
 		}
-		items = append(items, operations.ReportRun{Run: run, TenantName: tenantName})
+		item.Run = run
+		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		return operations.ReportRunPage{}, fmt.Errorf("iterate admin report runs: %w", err)
@@ -76,11 +116,17 @@ func (store *OperationsStore) ListDeliveries(ctx context.Context, filter operati
 		select delivery.id, delivery.tenant_id, tenant.name,
 		       recipient.id, recipient.line_user_id_hash,
 		       recipient.display_name_ciphertext, recipient.display_name_nonce, recipient.encryption_key_id,
+		       coalesce(actual_reports.report_keys, '{}'::text[]),
 		       delivery.status, delivery.attempt, delivery.safe_error_code, delivery.provider_request_id,
 		       delivery.accepted_at, delivery.created_at, delivery.expires_at
 		from line_deliveries delivery
 		join tenants tenant on tenant.id = delivery.tenant_id
 		join line_recipients recipient on recipient.id = delivery.recipient_id
+		left join lateral (
+		  select array_agg(linked.report_key order by linked.position nulls last, linked.report_key) as report_keys
+		  from notification_run_reports linked
+		  where linked.notification_run_id = delivery.notification_run_id
+		) actual_reports on true
 		where ($1::uuid is null or delivery.tenant_id = $1)
 		  and ($2::timestamptz is null or (delivery.created_at, delivery.id) < ($2, $3))
 		order by delivery.created_at desc, delivery.id desc
@@ -92,15 +138,22 @@ func (store *OperationsStore) ListDeliveries(ctx context.Context, filter operati
 	items := make([]operations.Delivery, 0, filter.PageSize+1)
 	for rows.Next() {
 		var item operations.Delivery
+		var reportKeys []string
 		if err := rows.Scan(
 			&item.ID, &item.TenantID, &item.TenantName,
 			&item.StoredRecipient.ID, &item.StoredRecipient.LineUserIDHash,
 			&item.StoredRecipient.DisplayName.Ciphertext, &item.StoredRecipient.DisplayName.Nonce, &item.StoredRecipient.DisplayName.KeyID,
+			&reportKeys,
 			&item.Status, &item.Attempt, &item.SafeErrorCode, &item.ProviderRequestID,
 			&item.AcceptedAt, &item.CreatedAt, &item.ExpiresAt,
 		); err != nil {
 			return operations.DeliveryPage{}, fmt.Errorf("scan LINE delivery: %w", err)
 		}
+		item.ReportKeys = make([]report.Key, len(reportKeys))
+		for index, reportKey := range reportKeys {
+			item.ReportKeys[index] = report.Key(reportKey)
+		}
+		item.ReportCount = len(item.ReportKeys)
 		item.StoredRecipient.TenantID = item.TenantID
 		items = append(items, item)
 	}

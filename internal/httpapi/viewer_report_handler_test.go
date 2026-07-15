@@ -173,6 +173,34 @@ func TestViewerExecutiveOverviewExactPeriodLookupDoesNotRevalidate(t *testing.T)
 	}
 }
 
+func TestViewerOverviewRevalidationReturnsContractDefaultsForEmptyResult(t *testing.T) {
+	tenantID := uuid.New()
+	reportAPI := &fakeViewerReportAPI{overviewRevalidation: viewer.OverviewRevalidation{
+		Disposition: viewer.RevalidationDisabled,
+		Overview: viewer.ExecutiveOverview{
+			TenantID: tenantID,
+			Timezone: "Asia/Bangkok",
+		},
+	}}
+	handler := NewHandler(Dependencies{
+		Readiness:     readinessFunc(func(context.Context) error { return nil }),
+		ViewerAuth:    &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: uuid.New()}},
+		ViewerReports: reportAPI,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/viewer/tenants/"+tenantID.String()+"/executive-overview/revalidations", strings.NewReader(`{"periodPreset":"MONTH_TO_DATE","reportKeys":["sales_goods_services"]}`))
+	request.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", "viewer-csrf")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, `"items":[]`) || !strings.Contains(body, `"runs":[]`) || !strings.Contains(body, `"retryAfter":0`) {
+		t.Fatalf("status=%d body=%s", response.Code, body)
+	}
+}
+
 func TestViewerExecutiveOverviewRejectsPartialExactPeriodQuery(t *testing.T) {
 	tenantID := uuid.New()
 	reportAPI := &fakeViewerReportAPI{}

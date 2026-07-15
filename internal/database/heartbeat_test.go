@@ -29,7 +29,7 @@ func TestWorkerNodeHealthRequiresEveryCriticalStage(t *testing.T) {
 		id, workerType string
 		metadata       map[string]any
 	}{
-		{"report", "REPORT", nil}, {"scheduler", "SCHEDULER", nil}, {"retention", "RETENTION", nil},
+		{"report", "REPORT", map[string]any{"recoveryLoopAt": now.Format(time.RFC3339)}}, {"scheduler", "SCHEDULER", nil}, {"retention", "RETENTION", nil},
 		{"delivery-prepare", "DELIVERY", map[string]any{"stage": "prepare"}},
 		{"delivery-send", "DELIVERY", map[string]any{"stage": "send"}},
 	}

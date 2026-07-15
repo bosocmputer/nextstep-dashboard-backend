@@ -70,10 +70,13 @@ type Definition struct {
 	LineMetrics            []Metric
 	SummaryTimeout         time.Duration
 	DetailTimeout          time.Duration
+	SummaryTotalTimeout    time.Duration
+	DetailTotalTimeout     time.Duration
 	MaxRows                int
 	MaxRangeDays           int
 	RefreshClass           RefreshClass
 	MinimumRefreshInterval time.Duration
+	ChunkSafe              bool
 }
 
 var orderedDefinitions = []Definition{
@@ -105,8 +108,14 @@ func definition(key Key, label, category string, sensitive bool, parameterKind P
 	refreshClass := RefreshStandard
 	if key == SalesGoodsServices || key == ARDebtReceipt || key == CashBankReceipts || key == CashBankPayments {
 		refreshClass = RefreshFast
-	} else if key == StockBalance {
+	} else if key == StockBalance || key == ARCustomerMovement {
 		refreshClass = RefreshHeavy
+	}
+	summaryTimeout := 30 * time.Second
+	summaryTotalTimeout := 60 * time.Second
+	if refreshClass == RefreshHeavy {
+		summaryTimeout = 5 * time.Minute
+		summaryTotalTimeout = 5 * time.Minute
 	}
 	return Definition{
 		Key:                    key,
@@ -118,12 +127,15 @@ func definition(key Key, label, category string, sensitive bool, parameterKind P
 		Sensitive:              sensitive,
 		ParameterKind:          parameterKind,
 		LineMetrics:            []Metric{{Key: firstMetricKey, LabelTH: firstMetricLabel}, {Key: secondMetricKey, LabelTH: secondMetricLabel}},
-		SummaryTimeout:         30 * time.Second,
+		SummaryTimeout:         summaryTimeout,
 		DetailTimeout:          120 * time.Second,
+		SummaryTotalTimeout:    summaryTotalTimeout,
+		DetailTotalTimeout:     120 * time.Second,
 		MaxRows:                200_000,
 		MaxRangeDays:           366,
 		RefreshClass:           refreshClass,
 		MinimumRefreshInterval: DefaultRefreshInterval(refreshClass),
+		ChunkSafe:              key == StockBalance || key == ARCustomerMovement,
 	}
 }
 

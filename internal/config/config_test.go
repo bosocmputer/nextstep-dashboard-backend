@@ -47,6 +47,8 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 		"ENCRYPTION_KEY_ID":                   "key-2026-01",
 		"SML_ALLOWED_CIDRS":                   "10.0.0.0/8,192.168.0.0/16",
 		"SML_ALLOWED_HOSTS":                   "sml-shop.example.com",
+		"SML_ALLOW_PUBLIC_ENDPOINTS":          "true",
+		"SML_ALLOWED_PORTS":                   "80,443,8080,8092",
 		"LINE_LOGIN_CHANNEL_ID":               "2010662588",
 		"LINE_MESSAGING_CHANNEL_ACCESS_TOKEN": strings.Repeat("x", 64),
 		"DATABASE_MAX_CONNECTIONS":            "24",
@@ -55,6 +57,12 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 		"SNAPSHOT_FIRST_TENANT_IDS":           "a904bc92-a89b-463b-bc2a-565f09cbef44",
 		"SMART_SCHEDULE_PERIODS_ENABLED":      "true",
 		"SMART_SCHEDULE_PERIOD_TENANT_IDS":    "a904bc92-a89b-463b-bc2a-565f09cbef44",
+		"SUMMARY_QUERY_ENABLED":               "true",
+		"GENERATION_CACHE_ENABLED":            "true",
+		"STALE_REVALIDATION_ENABLED":          "true",
+		"HEAVY_CHUNK_ENABLED":                 "true",
+		"HEAVY_CHUNK_TENANT_REPORTS":          "11111111-1111-1111-1111-111111111111/stock_balance",
+		"SCHEDULE_CHUNK_ENABLED":              "false",
 	}
 
 	cfg, err := Load(func(key string) (string, bool) {
@@ -88,11 +96,36 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 	if len(cfg.SMLAllowedHosts) != 1 || cfg.SMLAllowedHosts[0] != "sml-shop.example.com" {
 		t.Fatalf("SMLAllowedHosts = %#v", cfg.SMLAllowedHosts)
 	}
+	if !cfg.SMLAllowPublicEndpoints {
+		t.Fatal("SMLAllowPublicEndpoints was not loaded")
+	}
+	if got := cfg.SMLAllowedPorts; len(got) != 4 || got[0] != 80 || got[1] != 443 || got[2] != 8080 || got[3] != 8092 {
+		t.Fatalf("SMLAllowedPorts = %#v", got)
+	}
 	if !cfg.SnapshotFirstEnabled || len(cfg.SnapshotFirstTenantIDs) != 1 {
 		t.Fatalf("snapshot first config = enabled:%v tenants:%v", cfg.SnapshotFirstEnabled, cfg.SnapshotFirstTenantIDs)
 	}
 	if !cfg.SmartSchedulePeriodsEnabled || len(cfg.SmartSchedulePeriodTenantIDs) != 1 {
 		t.Fatalf("smart schedule config = enabled:%v tenants:%v", cfg.SmartSchedulePeriodsEnabled, cfg.SmartSchedulePeriodTenantIDs)
+	}
+	if !cfg.SummaryQueryEnabled || !cfg.GenerationCacheEnabled || !cfg.StaleRevalidationEnabled || !cfg.HeavyChunkEnabled || len(cfg.HeavyChunkTenantReports) != 1 || cfg.ScheduleChunkEnabled {
+		t.Fatalf("dashboard feature flags were not loaded: %+v", cfg)
+	}
+}
+
+func TestParseAllowedPortsAllowsWildcardForAnyPublicEndpointPort(t *testing.T) {
+	ports, err := parseAllowedPorts("*")
+	if err != nil {
+		t.Fatalf("parseAllowedPorts(*) error = %v", err)
+	}
+	if len(ports) != 0 {
+		t.Fatalf("parseAllowedPorts(*) = %#v, want no port restriction", ports)
+	}
+}
+
+func TestParseAllowedPortsRejectsWildcardMixedWithExplicitPorts(t *testing.T) {
+	if _, err := parseAllowedPorts("*,8080"); err == nil {
+		t.Fatal("parseAllowedPorts(*,8080) accepted an ambiguous wildcard configuration")
 	}
 }
 
@@ -113,6 +146,44 @@ func TestLoadRejectsDatabaseMinimumAboveMaximum(t *testing.T) {
 	_, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
 	if err == nil || !strings.Contains(err.Error(), "DATABASE_MIN_CONNECTIONS") {
 		t.Fatalf("Load() error = %v, want minimum/maximum validation", err)
+	}
+}
+
+func TestLoadRejectsUnsafeFeatureFlagCombinations(t *testing.T) {
+	secret := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901"))
+	base := map[string]string{
+		"DATABASE_URL":          "postgres://nextstep@localhost/nextstep?sslmode=disable",
+		"PUBLIC_BASE_URL":       "http://localhost:6324",
+		"ADMIN_PASSWORD_HASH":   "$argon2id$v=19$m=65536,t=3,p=2$c2FsdA$aGFzaA",
+		"SESSION_HMAC_KEY":      secret,
+		"ENCRYPTION_MASTER_KEY": secret,
+		"ENCRYPTION_KEY_ID":     "key-2026-01",
+		"SML_ALLOWED_CIDRS":     "10.0.0.0/8",
+	}
+	tests := []struct {
+		name    string
+		flags   map[string]string
+		message string
+	}{
+		{name: "generation without summary", flags: map[string]string{"GENERATION_CACHE_ENABLED": "true"}, message: "GENERATION_CACHE_ENABLED requires SUMMARY_QUERY_ENABLED"},
+		{name: "revalidation without generation", flags: map[string]string{"SUMMARY_QUERY_ENABLED": "true", "STALE_REVALIDATION_ENABLED": "true"}, message: "STALE_REVALIDATION_ENABLED requires GENERATION_CACHE_ENABLED"},
+		{name: "schedule chunk without heavy chunk", flags: map[string]string{"SCHEDULE_CHUNK_ENABLED": "true"}, message: "SCHEDULE_CHUNK_ENABLED requires HEAVY_CHUNK_ENABLED"},
+		{name: "heavy chunk without target", flags: map[string]string{"HEAVY_CHUNK_ENABLED": "true"}, message: "HEAVY_CHUNK_ENABLED requires at least one HEAVY_CHUNK_TENANT_REPORTS entry"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := make(map[string]string, len(base)+len(test.flags))
+			for key, value := range base {
+				values[key] = value
+			}
+			for key, value := range test.flags {
+				values[key] = value
+			}
+			_, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+			if err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("Load() error = %v, want %q", err, test.message)
+			}
+		})
 	}
 }
 

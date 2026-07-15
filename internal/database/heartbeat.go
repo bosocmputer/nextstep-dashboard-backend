@@ -37,7 +37,10 @@ func WorkerNodeHealthy(ctx context.Context, pool *pgxpool.Pool, nodeName string,
 	var reportReady, schedulerReady, retentionReady, notificationReady, deliveryReady bool
 	err := pool.QueryRow(ctx, `
 		select
-		  coalesce(bool_or(worker_type = 'REPORT'), false),
+		  coalesce(bool_or(
+		    worker_type = 'REPORT'
+		    and nullif(metadata_json ->> 'recoveryLoopAt', '')::timestamptz >= $2
+		  ), false),
 		  coalesce(bool_or(worker_type = 'SCHEDULER'), false),
 		  coalesce(bool_or(worker_type = 'RETENTION'), false),
 		  coalesce(bool_or(worker_type = 'DELIVERY' and metadata_json ->> 'stage' = 'prepare'), false),

@@ -34,6 +34,9 @@ func TestMaterializeDueScheduleIsAtomicAndSingleClaim(t *testing.T) {
 	}
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	tenantID, recipientID, secondRecipientID := uuid.New(), uuid.New(), uuid.New()
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `delete from tenants where id = $1`, tenantID)
+	}()
 	if _, err := pool.Exec(ctx, `
 		insert into tenants (id, slug, name, timezone, status, access_ends_at)
 		values ($1, $2, 'Execution Store', 'Asia/Bangkok', 'ACTIVE', $3)`, tenantID, "execution-"+tenantID.String(), now.AddDate(1, 0, 0)); err != nil {
@@ -123,6 +126,17 @@ func TestMaterializeDueScheduleIsAtomicAndSingleClaim(t *testing.T) {
 	if notificationCount != 1 || reportCount != 2 {
 		t.Fatalf("notificationCount=%d reportCount=%d", notificationCount, reportCount)
 	}
+	var materializationVersion int16
+	var linkedPositions []int16
+	if err := pool.QueryRow(ctx, `
+		select n.materialization_version, array_agg(linked.position order by linked.position)
+		from notification_runs n join notification_run_reports linked on linked.notification_run_id = n.id
+		where n.id = $1 group by n.materialization_version`, execution.ID).Scan(&materializationVersion, &linkedPositions); err != nil {
+		t.Fatal(err)
+	}
+	if materializationVersion != 2 || len(linkedPositions) != 2 || linkedPositions[0] != 1 || linkedPositions[1] != 2 {
+		t.Fatalf("materializationVersion=%d positions=%v", materializationVersion, linkedPositions)
+	}
 	for _, runID := range execution.ReportRunIDs {
 		var key report.Key
 		if err := pool.QueryRow(ctx, `select report_key from report_runs where id = $1`, runID).Scan(&key); err != nil {
@@ -140,10 +154,24 @@ func TestMaterializeDueScheduleIsAtomicAndSingleClaim(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Editing the schedule after materialization must not change the report set
+	// or order of the already-created notification occurrence.
+	if _, err := pool.Exec(ctx, `delete from notification_schedule_reports where schedule_id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into notification_schedule_reports (tenant_id, schedule_id, report_key, position)
+		values ($1, $2, 'stock_balance', 1), ($1, $2, 'sales_goods_services', 2)`, tenantID, created.ID); err != nil {
+		t.Fatal(err)
+	}
 	notificationStore := NewNotificationStore(pool)
 	work, err := notificationStore.Claim(ctx, "notification-a", time.Minute, now.Add(6*time.Second))
-	if err != nil || len(work.Reports) != 2 || len(work.Targets) != 2 || work.Pending {
+	if err != nil || len(work.Reports) != 2 || len(work.Targets) != 2 || work.Pending || work.MaterializationVersion != 2 || work.OrderStatus != "EXACT" {
 		t.Fatalf("Claim() = %+v, %v", work, err)
+	}
+	if work.Reports[0].Key != report.SalesGoodsServices || work.Reports[1].Key != report.StockBalance ||
+		work.Targets[0].ReportKeys[0] != report.SalesGoodsServices || work.Targets[0].ReportKeys[1] != report.StockBalance {
+		t.Fatalf("materialized report order changed with schedule: reports=%v target=%v", work.Reports, work.Targets[0].ReportKeys)
 	}
 	if _, err := pool.Exec(ctx, `
 		delete from recipient_report_permissions

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,12 +50,17 @@ func main() {
 		logger.Error("create secret box", "error", "encryption configuration rejected")
 		os.Exit(1)
 	}
-	policy := sml.EndpointPolicy{AllowedPrefixes: cfg.SMLAllowedPrefixes, AllowedHosts: cfg.SMLAllowedHosts}
+	policy := sml.EndpointPolicy{AllowedPrefixes: cfg.SMLAllowedPrefixes, AllowedHosts: cfg.SMLAllowedHosts, AllowPublicEndpoints: cfg.SMLAllowPublicEndpoints, AllowedPorts: cfg.SMLAllowedPorts}
 	connections := sml.NewConnectionService(database.NewSMLConnectionStore(pool), box, policy, nil, time.Now)
-	reportClient := sml.NewClient(policy, 120*time.Second, 32*1024*1024, 200_000)
+	// The HTTP transport is a hard ceiling. Report-level contexts impose the
+	// lower 60s/120s/5m total budgets and are shared by current+comparison.
+	reportClient := sml.NewClient(policy, 5*time.Minute, 32*1024*1024, 200_000)
 	hostname, _ := os.Hostname()
 	workerID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
-	reportWorker := worker.NewReportWorker(database.NewReportStore(pool), connections, reportClient, workerID, time.Now)
+	reportStore := database.NewReportStore(pool).ConfigureGenerationCache(cfg.GenerationCacheEnabled)
+	reportWorker := worker.NewReportWorker(reportStore, connections, reportClient, workerID, time.Now).
+		ConfigureSummaryQueries(cfg.SummaryQueryEnabled).
+		ConfigureHeavyChunks(cfg.HeavyChunkEnabled, cfg.ScheduleChunkEnabled, cfg.HeavyChunkTenantReports)
 	schedulerID := workerID + "-scheduler"
 	periodObserver := func(preset report.Preset, mode report.ParameterKind, result string) {
 		logger.Info("schedule period resolved", "event", "schedule_period_resolution", "preset", preset, "mode", mode, "result", result, "schedulePeriodResolutionTotal", 1)
@@ -106,7 +112,15 @@ func main() {
 	)
 
 	logger.Info("report worker started", "workerId", workerID, "concurrency", cfg.ReportWorkerConcurrency)
-	go heartbeatLoop(ctx, logger, pool, workerID, "REPORT", hostname, map[string]any{"concurrency": cfg.ReportWorkerConcurrency})
+	var recoveryLoopAt atomic.Int64
+	go reportRecoveryLoop(ctx, logger, reportStore, &recoveryLoopAt)
+	go heartbeatLoopDynamic(ctx, logger, pool, workerID, "REPORT", hostname, func() map[string]any {
+		metadata := map[string]any{"concurrency": cfg.ReportWorkerConcurrency}
+		if unix := recoveryLoopAt.Load(); unix > 0 {
+			metadata["recoveryLoopAt"] = time.Unix(unix, 0).UTC().Format(time.RFC3339)
+		}
+		return metadata
+	})
 	go heartbeatLoop(ctx, logger, pool, schedulerID, "SCHEDULER", hostname, map[string]any{"concurrency": 1})
 	go heartbeatLoop(ctx, logger, pool, notificationID, "DELIVERY", hostname, map[string]any{"stage": "prepare", "presentationVersion": line.FlexPresentationVersion})
 	go heartbeatLoop(ctx, logger, pool, deliveryID, "DELIVERY", hostname, map[string]any{"stage": "send", "concurrency": cfg.DeliveryWorkerConcurrency})
@@ -174,7 +188,7 @@ func retentionLoop(ctx context.Context, logger *slog.Logger, retentionWorker *re
 			delay = time.Minute
 			continue
 		}
-		logger.Info("retention batch completed", "reportRows", counts.ReportRows, "reportRuns", counts.ReportRuns, "dashboardRefreshes", counts.DashboardRefreshes, "auditLogs", counts.AuditLogs, "deliveries", counts.Deliveries)
+		logger.Info("retention batch completed", "reportRows", counts.ReportRows, "reportRuns", counts.ReportRuns, "dashboardRefreshes", counts.DashboardRefreshes, "dashboardGenerations", counts.DashboardGenerations, "auditLogs", counts.AuditLogs, "deliveries", counts.Deliveries)
 		delay = time.Hour
 	}
 }
@@ -270,11 +284,43 @@ func processLoop(ctx context.Context, logger *slog.Logger, reportWorker *worker.
 }
 
 func heartbeatLoop(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, workerID, workerType, hostname string, metadata map[string]any) {
+	heartbeatLoopDynamic(ctx, logger, pool, workerID, workerType, hostname, func() map[string]any { return metadata })
+}
+
+func heartbeatLoopDynamic(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, workerID, workerType, hostname string, metadata func() map[string]any) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
-		if err := database.RecordWorkerHeartbeat(ctx, pool, workerID, workerType, hostname, metadata, time.Now().UTC()); err != nil && ctx.Err() == nil {
+		if err := database.RecordWorkerHeartbeat(ctx, pool, workerID, workerType, hostname, metadata(), time.Now().UTC()); err != nil && ctx.Err() == nil {
 			logger.Error("worker heartbeat failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func reportRecoveryLoop(ctx context.Context, logger *slog.Logger, store *database.ReportStore, lastSuccess *atomic.Int64) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		now := time.Now().UTC()
+		recovered, err := store.RecoverExpiredLeases(ctx, now)
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Error("report lease recovery failed", "safeErrorCode", "REPORT_LEASE_RECOVERY_FAILED")
+			}
+		} else {
+			lastSuccess.Store(now.Unix())
+			if recovered.RequeuedClaimed > 0 || recovered.FailedRunning > 0 {
+				logger.Warn("report leases recovered",
+					"requeuedClaimed", recovered.RequeuedClaimed,
+					"failedRunning", recovered.FailedRunning,
+					"cancelledSiblings", recovered.CancelledSiblings,
+				)
+			}
 		}
 		select {
 		case <-ctx.Done():

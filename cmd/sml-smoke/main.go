@@ -55,7 +55,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return errors.New("encryption configuration is invalid")
 	}
-	policy := sml.EndpointPolicy{AllowedPrefixes: cfg.SMLAllowedPrefixes, AllowedHosts: cfg.SMLAllowedHosts}
+	policy := sml.EndpointPolicy{AllowedPrefixes: cfg.SMLAllowedPrefixes, AllowedHosts: cfg.SMLAllowedHosts, AllowPublicEndpoints: cfg.SMLAllowPublicEndpoints, AllowedPorts: cfg.SMLAllowedPorts}
 	connectionService := sml.NewConnectionService(database.NewSMLConnectionStore(pool), box, policy, nil, time.Now)
 	connection, err := connectionService.Open(ctx, tenantID)
 	if err != nil {

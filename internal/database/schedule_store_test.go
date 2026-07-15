@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,6 +145,43 @@ func TestScheduleStoreLifecycleAndReadinessGates(t *testing.T) {
 	restored, err := store.Restore(ctx, []byte("admin"), "request-restore", tenantID, created.ID, archived.Version, now.Add(7*time.Second))
 	if err != nil || restored.Status != schedule.StatusDraft || restored.ArchivedAt != nil {
 		t.Fatalf("Restore() = %+v, %v", restored, err)
+	}
+
+	// Permission replacement and schedule activation may be submitted by two
+	// Admin sessions at the same time. Their shared tenant advisory lock must
+	// preserve the invariant that an ACTIVE schedule never lacks permission.
+	raceInput := updatedInput
+	raceInput.Name = "Concurrent activation"
+	raceSchedule, err := store.Create(ctx, []byte("admin"), "request-race-create", "schedule-race-create-001", tenantID, raceInput, now.Add(8*time.Second))
+	if err != nil {
+		t.Fatalf("create race schedule: %v", err)
+	}
+	var permissionVersion int
+	if err := pool.QueryRow(ctx, `select permissions_version from tenant_memberships where tenant_id = $1 and recipient_id = $2`, tenantID, activeRecipientID).Scan(&permissionVersion); err != nil {
+		t.Fatal(err)
+	}
+	var activateErr, permissionErr error
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		_, activateErr = store.Activate(ctx, []byte("admin"), "request-race-activate", tenantID, raceSchedule.ID, now.Add(2*time.Hour), now.Add(9*time.Second))
+	}()
+	go func() {
+		defer wait.Done()
+		_, permissionErr = NewRecipientStore(pool).ReplacePermissions(ctx, []byte("admin"), "request-race-permission", tenantID, activeRecipientID, nil, permissionVersion, now.Add(9*time.Second))
+	}()
+	wait.Wait()
+	var finalStatus string
+	var finalPermissionCount int
+	if err := pool.QueryRow(ctx, `select status from notification_schedules where tenant_id = $1 and id = $2`, tenantID, raceSchedule.ID).Scan(&finalStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select count(*) from recipient_report_permissions where tenant_id = $1 and recipient_id = $2 and report_key = 'sales_goods_services'`, tenantID, activeRecipientID).Scan(&finalPermissionCount); err != nil {
+		t.Fatal(err)
+	}
+	if finalStatus == string(schedule.StatusActive) && finalPermissionCount == 0 {
+		t.Fatalf("concurrent mutation broke readiness invariant: activateErr=%v permissionErr=%v", activateErr, permissionErr)
 	}
 	var auditActions []string
 	rows, err := pool.Query(ctx, `select action from audit_logs where tenant_id = $1 and resource_id = $2 order by created_at`, tenantID, created.ID.String())

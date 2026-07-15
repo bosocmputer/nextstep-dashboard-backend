@@ -22,6 +22,14 @@ type memoryRecipientStore struct {
 	revoked    bool
 }
 
+func (store *memoryRecipientStore) ReissueInvitation(_ context.Context, _ []byte, _ string, tenantID, recipientID uuid.UUID, inviteHash []byte, _ time.Time, _ time.Time) (StoredRecipient, error) {
+	if store.stored.TenantID != tenantID || store.stored.ID != recipientID || store.stored.Status != StatusPending {
+		return StoredRecipient{}, ErrRecipientNotFound
+	}
+	store.inviteHash = append([]byte(nil), inviteHash...)
+	return store.stored, nil
+}
+
 func (store *memoryRecipientStore) CreateInvitation(_ context.Context, _ []byte, _, _ string, _ []byte, pending StoredRecipient, inviteHash []byte, _ time.Time, _ time.Time) (StoredRecipient, error) {
 	store.stored = pending
 	store.inviteHash = append([]byte(nil), inviteHash...)
@@ -30,6 +38,14 @@ func (store *memoryRecipientStore) CreateInvitation(_ context.Context, _ []byte,
 
 func (store *memoryRecipientStore) List(context.Context, uuid.UUID, int, string) (Page, error) {
 	return Page{Stored: []StoredRecipient{store.stored}}, nil
+}
+
+func (store *memoryRecipientStore) PermissionDependencies(context.Context, uuid.UUID, uuid.UUID) (PermissionDependencies, error) {
+	return PermissionDependencies{RecipientID: store.stored.ID, PermissionsVersion: store.stored.PermissionsVersion, Items: []PermissionDependency{}}, nil
+}
+
+func (store *memoryRecipientStore) ListScheduleCandidates(context.Context, uuid.UUID, int) ([]StoredRecipient, error) {
+	return []StoredRecipient{store.stored}, nil
 }
 
 func (store *memoryRecipientStore) ReplacePermissions(_ context.Context, _ []byte, _ string, _ uuid.UUID, _ uuid.UUID, keys []report.Key, version int, _ time.Time) (StoredRecipient, error) {
@@ -120,6 +136,35 @@ func TestServiceReturnsEmptyReportKeyArraysForNewRecipients(t *testing.T) {
 	}
 	if len(page.Data) != 1 || page.Data[0].ReportKeys == nil || len(page.Data[0].ReportKeys) != 0 {
 		t.Fatalf("List() reportKeys = %#v, want non-nil empty array", page.Data)
+	}
+}
+
+func TestServiceReissuesPendingInvitationAndInvalidatesPreviousReference(t *testing.T) {
+	now := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 60)))
+	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{3}, 32), bytes.NewReader(nil), func() time.Time { return now })
+	store := &memoryRecipientStore{}
+	service := NewService(store, box, tokens, bytes.NewReader(bytes.Repeat([]byte{4}, 32)), "https://dashboard.nextstep-soft.com", func() time.Time { return now })
+	tenantID := uuid.New()
+	created, err := service.CreateInvitation(context.Background(), []byte("admin"), "request-1", "recipient-create-reissue", tenantID, "kurayami")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldReference := strings.TrimPrefix(created.InvitationURL, "https://dashboard.nextstep-soft.com/app/invite?ref=")
+
+	reissued, err := service.ReissueInvitation(context.Background(), []byte("admin"), "request-2", "recipient-reissue-001", tenantID, created.ID)
+	if err != nil {
+		t.Fatalf("ReissueInvitation() error = %v", err)
+	}
+	if reissued.InvitationURL == "" || reissued.InvitationURL == created.InvitationURL {
+		t.Fatalf("ReissueInvitation() URL = %q, want a new URL", reissued.InvitationURL)
+	}
+	if _, err := service.ResolveIdentity(context.Background(), line.Identity{Subject: "U123", DisplayName: "Kurayami"}, oldReference); !errors.Is(err, ErrInvitationInvalid) {
+		t.Fatalf("old invitation error = %v, want ErrInvitationInvalid", err)
+	}
+	newReference := strings.TrimPrefix(reissued.InvitationURL, "https://dashboard.nextstep-soft.com/app/invite?ref=")
+	if _, err := service.ResolveIdentity(context.Background(), line.Identity{Subject: "U123", DisplayName: "Kurayami"}, newReference); err != nil {
+		t.Fatalf("new invitation redemption error = %v", err)
 	}
 }
 

@@ -38,7 +38,7 @@ func TestRecipientStoreInvitationPermissionAndIdentityMerge(t *testing.T) {
 	if _, err := pool.Exec(ctx, `insert into tenants (id, slug, name, timezone, status, access_ends_at) values ($1, 'recipient-store', 'Recipient Store', 'Asia/Bangkok', 'ACTIVE', $2)`, tenantID, now.AddDate(1, 0, 0)); err != nil {
 		t.Fatal(err)
 	}
-	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 60)))
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 120)))
 	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{3}, 32), bytes.NewReader(nil), func() time.Time { return now })
 	service := recipient.NewService(NewRecipientStore(pool), box, tokens, bytes.NewReader(bytes.Repeat([]byte{4}, 32)), "https://dashboard.nextstep-soft.com", func() time.Time { return now })
 
@@ -50,6 +50,15 @@ func TestRecipientStoreInvitationPermissionAndIdentityMerge(t *testing.T) {
 	if err != nil || replayed.ID != pending.ID || replayed.InvitationURL != pending.InvitationURL {
 		t.Fatalf("CreateInvitation() replay = %+v, %v", replayed, err)
 	}
+	reissued, err := service.ReissueInvitation(ctx, []byte("admin"), "request-reissue", "recipient-store-reissue-001", tenantID, pending.ID)
+	if err != nil || reissued.InvitationURL == pending.InvitationURL {
+		t.Fatalf("ReissueInvitation() = %+v, %v", reissued, err)
+	}
+	oldURL, _ := url.Parse(pending.InvitationURL)
+	if _, err := service.ResolveIdentity(ctx, line.Identity{Subject: "U-old", DisplayName: "Old"}, oldURL.Query().Get("ref")); !errors.Is(err, recipient.ErrInvitationInvalid) {
+		t.Fatalf("old invitation error = %v", err)
+	}
+	pending = reissued
 	updated, err := service.ReplacePermissions(ctx, []byte("admin"), "request-2", tenantID, pending.ID, []report.Key{report.SalesGoodsServices, report.StockBalance}, pending.PermissionsVersion)
 	if err != nil {
 		t.Fatalf("ReplacePermissions() error = %v", err)
@@ -76,6 +85,29 @@ func TestRecipientStoreInvitationPermissionAndIdentityMerge(t *testing.T) {
 	page, err = service.List(ctx, tenantID, 25, "")
 	if err != nil || len(page.Data) != 1 || page.Data[0].ID != bound.ID || page.Data[0].DisplayName != "Verified Owner" || len(page.Data[0].ReportKeys) != 2 {
 		t.Fatalf("List() active = %+v, %v", page, err)
+	}
+
+	secondTenantID := uuid.New()
+	if _, err := pool.Exec(ctx, `insert into tenants (id, slug, name, timezone, status, access_ends_at) values ($1, 'recipient-store-second', 'Recipient Store Second', 'Asia/Bangkok', 'ACTIVE', $2)`, secondTenantID, now.AddDate(1, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	secondPending, err := service.CreateInvitation(ctx, []byte("admin"), "request-second", "recipient-store-second-001", secondTenantID, "Existing LINE user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInvitationURL := secondPending.InvitationURL
+	secondPending, err = service.ReplacePermissions(ctx, []byte("admin"), "request-second-permission", secondTenantID, secondPending.ID, []report.Key{report.SalesGoodsServices}, secondPending.PermissionsVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondURL, _ := url.Parse(secondInvitationURL)
+	secondBound, err := service.ResolveIdentity(ctx, line.Identity{Subject: "U123", DisplayName: "Verified Owner"}, secondURL.Query().Get("ref"))
+	if err != nil || secondBound.ID != bound.ID || secondBound.Status != recipient.StatusActive {
+		t.Fatalf("ResolveIdentity() existing LINE identity in another tenant = %+v, %v", secondBound, err)
+	}
+	secondPage, err := service.List(ctx, secondTenantID, 25, "")
+	if err != nil || len(secondPage.Data) != 1 || secondPage.Data[0].ID != bound.ID || secondPage.Data[0].Status != recipient.StatusActive || len(secondPage.Data[0].ReportKeys) != 1 {
+		t.Fatalf("List() merged second tenant membership = %+v, %v", secondPage, err)
 	}
 
 	var rawPII string

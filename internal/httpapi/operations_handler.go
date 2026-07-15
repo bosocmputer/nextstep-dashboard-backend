@@ -62,6 +62,11 @@ func registerOperationsRoutes(router interface {
 		for _, item := range page.Data {
 			responseItem := reportRunResponse(item.Run)
 			responseItem["tenantName"] = item.TenantName
+			responseItem["runtimeStatus"] = item.RuntimeStatus
+			responseItem["retryAvailableAt"] = nullableTime(item.RetryAvailableAt)
+			if item.WaitReason != nil {
+				responseItem["waitReason"] = *item.WaitReason
+			}
 			data = append(data, responseItem)
 		}
 		writeJSON(response, http.StatusOK, map[string]any{"data": data, "page": operationsPage(page.NextCursor, page.HasMore)})

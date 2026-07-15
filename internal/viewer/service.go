@@ -48,7 +48,8 @@ type Store interface {
 	CreateSession(context.Context, SessionRecord) error
 	FindSession(context.Context, []byte, time.Time) (SessionRecord, error)
 	RevokeSession(context.Context, []byte, time.Time) error
-	CheckDeliveryReference(context.Context, []byte, uuid.UUID, time.Time) (bool, error)
+	ResolveDeliveryReference(context.Context, []byte, uuid.UUID, *uuid.UUID, time.Time) (DeliveryContext, error)
+	GetDeliveryContext(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) (DeliveryContext, error)
 	ListTenants(context.Context, uuid.UUID, time.Time) ([]TenantAccess, error)
 	ListReports(context.Context, uuid.UUID, uuid.UUID, time.Time) ([]ReportAccess, error)
 	CanAccessReport(context.Context, uuid.UUID, uuid.UUID, report.Key, time.Time) (bool, error)
@@ -72,11 +73,13 @@ type Service struct {
 }
 
 type ExchangeResult struct {
-	RawToken    string
-	CSRFToken   string
-	RecipientID uuid.UUID
-	DisplayName string
-	ExpiresAt   time.Time
+	RawToken                 string
+	CSRFToken                string
+	RecipientID              uuid.UUID
+	DisplayName              string
+	ExpiresAt                time.Time
+	DeliveryContext          *DeliveryContext
+	DeliveryContextErrorCode string
 }
 
 type AuthenticatedViewer struct {
@@ -91,7 +94,7 @@ func NewService(identityVerifier IdentityVerifier, recipients RecipientResolver,
 	return &Service{identityVerifier: identityVerifier, recipients: recipients, store: store, tokens: tokens, now: now}
 }
 
-func (service *Service) Exchange(ctx context.Context, idToken, invitationReference, deliveryReference string) (ExchangeResult, error) {
+func (service *Service) Exchange(ctx context.Context, idToken, invitationReference, deliveryReference string, expectedTenantID *uuid.UUID) (ExchangeResult, error) {
 	if service.identityVerifier == nil {
 		return ExchangeResult{}, &line.SafeError{Code: "LINE_LOGIN_NOT_CONFIGURED", Retryable: false}
 	}
@@ -109,19 +112,6 @@ func (service *Service) Exchange(ctx context.Context, idToken, invitationReferen
 	if resolved.Status != recipient.StatusActive {
 		return ExchangeResult{}, ErrIdentityForbidden
 	}
-	if deliveryReference != "" {
-		if len(deliveryReference) < 32 || len(deliveryReference) > 512 {
-			return ExchangeResult{}, ErrDeliveryReferenceForbidden
-		}
-		referenceHash := service.tokens.HashToken("delivery-reference:" + deliveryReference)
-		allowed, err := service.store.CheckDeliveryReference(ctx, referenceHash, resolved.ID, service.now().UTC())
-		if err != nil {
-			return ExchangeResult{}, err
-		}
-		if !allowed {
-			return ExchangeResult{}, ErrDeliveryReferenceForbidden
-		}
-	}
 	issued, err := service.tokens.Issue(24 * time.Hour)
 	if err != nil {
 		return ExchangeResult{}, err
@@ -131,10 +121,23 @@ func (service *Service) Exchange(ctx context.Context, idToken, invitationReferen
 	}); err != nil {
 		return ExchangeResult{}, err
 	}
-	return ExchangeResult{
+	result := ExchangeResult{
 		RawToken: issued.RawToken, CSRFToken: issued.CSRFToken, RecipientID: resolved.ID,
 		DisplayName: resolved.DisplayName, ExpiresAt: issued.ExpiresAt,
-	}, nil
+	}
+	if deliveryReference != "" {
+		contextItem, contextErr := service.ResolveDeliveryContext(ctx, AuthenticatedViewer{RecipientID: resolved.ID}, deliveryReference, expectedTenantID)
+		if contextErr != nil {
+			if errors.Is(contextErr, ErrDeliveryContextPermissionChanged) {
+				result.DeliveryContextErrorCode = "DELIVERY_CONTEXT_PERMISSION_CHANGED"
+			} else {
+				result.DeliveryContextErrorCode = "DELIVERY_CONTEXT_UNAVAILABLE"
+			}
+		} else {
+			result.DeliveryContext = &contextItem
+		}
+	}
+	return result, nil
 }
 
 func (service *Service) Authenticate(ctx context.Context, rawToken string) (AuthenticatedViewer, error) {

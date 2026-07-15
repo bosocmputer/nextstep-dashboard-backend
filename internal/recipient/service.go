@@ -27,12 +27,13 @@ const (
 )
 
 var (
-	ErrInvitationInvalid   = errors.New("recipient invitation is invalid or expired")
-	ErrRecipientNotFound   = errors.New("recipient not found")
-	ErrPermissionInvalid   = errors.New("recipient report permission is invalid")
-	ErrInvalidInput        = errors.New("recipient input is invalid")
-	ErrIdempotencyConflict = errors.New("recipient idempotency conflict")
-	ErrVersionConflict     = errors.New("recipient permission version conflict")
+	ErrInvitationInvalid    = errors.New("recipient invitation is invalid or expired")
+	ErrRecipientNotFound    = errors.New("recipient not found")
+	ErrPermissionInvalid    = errors.New("recipient report permission is invalid")
+	ErrInvalidInput         = errors.New("recipient input is invalid")
+	ErrIdempotencyConflict  = errors.New("recipient idempotency conflict")
+	ErrVersionConflict      = errors.New("recipient permission version conflict")
+	ErrInvitationNotPending = errors.New("recipient invitation can only be reissued while pending")
 )
 
 type PermissionInUseError struct{ ScheduleNames []string }
@@ -71,6 +72,47 @@ type Recipient struct {
 	InvitationURL      string       `json:"invitationUrl,omitempty"`
 }
 
+type ScheduleDependency struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+type PermissionDependency struct {
+	ReportKey           report.Key           `json:"reportKey"`
+	ActiveScheduleCount int                  `json:"activeScheduleCount"`
+	Schedules           []ScheduleDependency `json:"schedules"`
+	AdditionalCount     int                  `json:"additionalCount"`
+}
+
+type PermissionDependencies struct {
+	RecipientID        uuid.UUID              `json:"recipientId"`
+	PermissionsVersion int                    `json:"permissionsVersion"`
+	Items              []PermissionDependency `json:"items"`
+}
+
+type ScheduleRecipientOption struct {
+	Recipient
+	Eligible          bool         `json:"eligible"`
+	MissingReportKeys []report.Key `json:"missingReportKeys"`
+}
+
+type ScheduleRecipientOptionsInput struct {
+	ReportKeys           []report.Key `json:"reportKeys"`
+	SelectedRecipientIDs []uuid.UUID  `json:"selectedRecipientIds"`
+	Search               string       `json:"search"`
+	Page                 int          `json:"page"`
+	PageSize             int          `json:"pageSize"`
+}
+
+type ScheduleRecipientOptions struct {
+	Data     []ScheduleRecipientOption `json:"data"`
+	Selected []ScheduleRecipientOption `json:"selected"`
+	Page     int                       `json:"page"`
+	PageSize int                       `json:"pageSize"`
+	Total    int                       `json:"total"`
+	HasMore  bool                      `json:"hasMore"`
+}
+
 type Page struct {
 	Stored     []StoredRecipient
 	NextCursor string
@@ -85,13 +127,91 @@ type RecipientPage struct {
 
 type Store interface {
 	CreateInvitation(context.Context, []byte, string, string, []byte, StoredRecipient, []byte, time.Time, time.Time) (StoredRecipient, error)
+	ReissueInvitation(context.Context, []byte, string, uuid.UUID, uuid.UUID, []byte, time.Time, time.Time) (StoredRecipient, error)
 	List(context.Context, uuid.UUID, int, string) (Page, error)
+	PermissionDependencies(context.Context, uuid.UUID, uuid.UUID) (PermissionDependencies, error)
+	ListScheduleCandidates(context.Context, uuid.UUID, int) ([]StoredRecipient, error)
 	ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, int, time.Time) (StoredRecipient, error)
 	Revoke(context.Context, []byte, string, uuid.UUID, uuid.UUID, time.Time) error
 	RedeemInvitation(context.Context, []byte, []byte, StoredRecipient, time.Time) (StoredRecipient, error)
 	FindByLineHash(context.Context, []byte) (StoredRecipient, error)
 	GetByID(context.Context, uuid.UUID) (StoredRecipient, error)
 	GetForTenant(context.Context, uuid.UUID, uuid.UUID) (StoredRecipient, error)
+}
+
+func (service *Service) PermissionDependencies(ctx context.Context, tenantID, recipientID uuid.UUID) (PermissionDependencies, error) {
+	if tenantID == uuid.Nil || recipientID == uuid.Nil {
+		return PermissionDependencies{}, ErrInvalidInput
+	}
+	return service.store.PermissionDependencies(ctx, tenantID, recipientID)
+}
+
+func (service *Service) ScheduleRecipientOptions(ctx context.Context, tenantID uuid.UUID, input ScheduleRecipientOptionsInput) (ScheduleRecipientOptions, error) {
+	if tenantID == uuid.Nil || input.Page < 0 || input.PageSize < 1 || input.PageSize > 100 || len(input.ReportKeys) < 1 || len(input.ReportKeys) > 10 || len(input.SelectedRecipientIDs) > 500 || len(strings.TrimSpace(input.Search)) > 160 {
+		return ScheduleRecipientOptions{}, ErrInvalidInput
+	}
+	required := make(map[report.Key]struct{}, len(input.ReportKeys))
+	for _, key := range input.ReportKeys {
+		if _, ok := report.DefinitionFor(key); !ok {
+			return ScheduleRecipientOptions{}, ErrPermissionInvalid
+		}
+		if _, duplicate := required[key]; duplicate {
+			return ScheduleRecipientOptions{}, ErrPermissionInvalid
+		}
+		required[key] = struct{}{}
+	}
+	selectedIDs := make(map[uuid.UUID]struct{}, len(input.SelectedRecipientIDs))
+	for _, id := range input.SelectedRecipientIDs {
+		if id == uuid.Nil {
+			return ScheduleRecipientOptions{}, ErrInvalidInput
+		}
+		selectedIDs[id] = struct{}{}
+	}
+	stored, err := service.store.ListScheduleCandidates(ctx, tenantID, 501)
+	if err != nil {
+		return ScheduleRecipientOptions{}, err
+	}
+	// The schedule contract allows at most 500 recipients. Refuse an
+	// incomplete candidate set rather than returning a misleading eligibility
+	// result when a tenant exceeds that supported bound.
+	if len(stored) > 500 {
+		return ScheduleRecipientOptions{}, ErrInvalidInput
+	}
+	needle := strings.ToLower(strings.TrimSpace(input.Search))
+	filtered := make([]ScheduleRecipientOption, 0, len(stored))
+	selected := make([]ScheduleRecipientOption, 0, len(selectedIDs))
+	for _, item := range stored {
+		public, err := service.publicRecipient(item)
+		if err != nil {
+			return ScheduleRecipientOptions{}, err
+		}
+		granted := make(map[report.Key]struct{}, len(public.ReportKeys))
+		for _, key := range public.ReportKeys {
+			granted[key] = struct{}{}
+		}
+		missing := make([]report.Key, 0)
+		for _, key := range input.ReportKeys {
+			if _, ok := granted[key]; !ok {
+				missing = append(missing, key)
+			}
+		}
+		option := ScheduleRecipientOption{Recipient: public, Eligible: public.Status == StatusActive && len(missing) == 0, MissingReportKeys: missing}
+		if _, ok := selectedIDs[public.ID]; ok {
+			selected = append(selected, option)
+		}
+		if needle == "" || strings.Contains(strings.ToLower(public.DisplayName), needle) {
+			filtered = append(filtered, option)
+		}
+	}
+	start := input.Page * input.PageSize
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+	end := min(start+input.PageSize, len(filtered))
+	return ScheduleRecipientOptions{
+		Data: filtered[start:end], Selected: selected, Page: input.Page, PageSize: input.PageSize,
+		Total: len(filtered), HasMore: end < len(filtered),
+	}, nil
 }
 
 func (service *Service) Get(ctx context.Context, recipientID uuid.UUID) (Recipient, error) {
@@ -165,6 +285,26 @@ func (service *Service) CreateInvitation(ctx context.Context, actorHash []byte, 
 		ID: recipientID, TenantID: tenantID, DisplayName: displayName, Status: StatusPending, ReportKeys: []report.Key{}, PermissionsVersion: 1, CreatedAt: now,
 	}
 	stored, err := service.store.CreateInvitation(ctx, actorHash, requestID, idempotencyKey, requestHash, pending, invitationHash, now.Add(7*24*time.Hour), now)
+	if err != nil {
+		return Recipient{}, err
+	}
+	public, err := service.publicRecipient(stored)
+	if err != nil {
+		return Recipient{}, err
+	}
+	public.InvitationURL = service.publicBaseURL + "/app/invite?ref=" + url.QueryEscape(reference)
+	return public, nil
+}
+
+func (service *Service) ReissueInvitation(ctx context.Context, actorHash []byte, requestID, idempotencyKey string, tenantID, recipientID uuid.UUID) (Recipient, error) {
+	if tenantID == uuid.Nil || recipientID == uuid.Nil || len(idempotencyKey) < 8 || len(idempotencyKey) > 200 || strings.TrimSpace(idempotencyKey) != idempotencyKey {
+		return Recipient{}, ErrInvalidInput
+	}
+	referenceBytes := service.tokens.HashToken("recipient-invitation-reissue-reference:" + hex.EncodeToString(actorHash) + ":" + tenantID.String() + ":" + recipientID.String() + ":" + idempotencyKey)
+	reference := base64.RawURLEncoding.EncodeToString(referenceBytes)
+	invitationHash := service.tokens.HashToken("recipient-invitation:" + reference)
+	now := service.now().UTC()
+	stored, err := service.store.ReissueInvitation(ctx, actorHash, requestID, tenantID, recipientID, invitationHash, now.Add(7*24*time.Hour), now)
 	if err != nil {
 		return Recipient{}, err
 	}

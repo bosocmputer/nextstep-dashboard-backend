@@ -55,6 +55,7 @@ type Tenant struct {
 	Version        int        `json:"version"`
 	SMLReadiness   string     `json:"smlReadiness"`
 	NextScheduleAt *time.Time `json:"nextScheduleAt"`
+	ViewerURL      string     `json:"viewerUrl,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
 	UpdatedAt      time.Time  `json:"updatedAt"`
 }

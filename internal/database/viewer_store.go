@@ -56,18 +56,6 @@ func (store *ViewerStore) RevokeSession(ctx context.Context, tokenHash []byte, n
 	return nil
 }
 
-func (store *ViewerStore) CheckDeliveryReference(ctx context.Context, referenceHash []byte, recipientID uuid.UUID, now time.Time) (bool, error) {
-	var allowed bool
-	if err := store.pool.QueryRow(ctx, `
-		select exists (
-		  select 1 from delivery_access_links
-		  where reference_hash = $1 and recipient_id = $2 and expires_at > $3
-		)`, referenceHash, recipientID, now).Scan(&allowed); err != nil {
-		return false, fmt.Errorf("check delivery reference: %w", err)
-	}
-	return allowed, nil
-}
-
 func (store *ViewerStore) ListTenants(ctx context.Context, recipientID uuid.UUID, now time.Time) ([]viewer.TenantAccess, error) {
 	rows, err := store.pool.Query(ctx, `
 		select t.id, t.name, t.timezone,
@@ -79,7 +67,6 @@ func (store *ViewerStore) ListTenants(ctx context.Context, recipientID uuid.UUID
 		where m.recipient_id = $1 and m.status = 'ACTIVE'
 		  and t.status = 'ACTIVE' and t.access_ends_at > $2
 		group by t.id
-		having count(p.report_key) > 0
 		order by t.name, t.id`, recipientID, now)
 	if err != nil {
 		return nil, fmt.Errorf("list viewer tenants: %w", err)

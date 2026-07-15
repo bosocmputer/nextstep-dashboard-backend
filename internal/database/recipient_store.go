@@ -99,6 +99,78 @@ func (store *RecipientStore) CreateInvitation(ctx context.Context, actorHash []b
 	return pending, nil
 }
 
+func (store *RecipientStore) ReissueInvitation(ctx context.Context, actorHash []byte, requestID string, tenantID, recipientID uuid.UUID, invitationHash []byte, expiresAt, now time.Time) (recipient.StoredRecipient, error) {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("begin reissue recipient invitation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var recipientStatus, membershipStatus string
+	err = tx.QueryRow(ctx, `
+		select r.status, m.status
+		from tenant_memberships m
+		join line_recipients r on r.id = m.recipient_id
+		where m.tenant_id = $1 and m.recipient_id = $2
+		for update of m, r`, tenantID, recipientID).Scan(&recipientStatus, &membershipStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return recipient.StoredRecipient{}, recipient.ErrRecipientNotFound
+	}
+	if err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("lock pending recipient invitation: %w", err)
+	}
+	if recipientStatus != string(recipient.StatusPending) || membershipStatus != string(recipient.StatusPending) {
+		return recipient.StoredRecipient{}, recipient.ErrInvitationNotPending
+	}
+
+	var currentHash []byte
+	var currentExpiresAt time.Time
+	var usedAt *time.Time
+	err = tx.QueryRow(ctx, `
+		select reference_hash, expires_at, used_at
+		from recipient_invitations
+		where tenant_id = $1 and pending_recipient_id = $2
+		for update`, tenantID, recipientID).Scan(&currentHash, &currentExpiresAt, &usedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return recipient.StoredRecipient{}, recipient.ErrRecipientNotFound
+	}
+	if err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("load pending recipient invitation: %w", err)
+	}
+	if subtle.ConstantTimeCompare(currentHash, invitationHash) == 1 {
+		if usedAt != nil || !currentExpiresAt.After(now) {
+			return recipient.StoredRecipient{}, recipient.ErrIdempotencyConflict
+		}
+		replayed, err := loadRecipientForTenantAny(ctx, tx, tenantID, recipientID)
+		if err != nil {
+			return recipient.StoredRecipient{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return recipient.StoredRecipient{}, fmt.Errorf("commit recipient invitation replay: %w", err)
+		}
+		return replayed, nil
+	}
+	if _, err := tx.Exec(ctx, `
+		update recipient_invitations
+		set reference_hash = $3, created_at = $4, expires_at = $5,
+		    used_at = null, used_by_recipient_id = null
+		where tenant_id = $1 and pending_recipient_id = $2`, tenantID, recipientID, invitationHash, now, expiresAt); err != nil {
+		return recipient.StoredRecipient{}, mapRecipientCreateError(err, "rotate recipient invitation")
+	}
+	stored, err := loadRecipientForTenantAny(ctx, tx, tenantID, recipientID)
+	if err != nil {
+		return recipient.StoredRecipient{}, err
+	}
+	afterJSON, _ := json.Marshal(map[string]any{"recipientId": recipientID, "status": recipient.StatusPending, "expiresAt": expiresAt})
+	if err := insertAudit(ctx, tx, tenantID, actorHash, "RECIPIENT_INVITATION_REISSUED", "LINE_RECIPIENT", recipientID.String(), requestID, nil, afterJSON, now); err != nil {
+		return recipient.StoredRecipient{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return recipient.StoredRecipient{}, fmt.Errorf("commit reissued recipient invitation: %w", err)
+	}
+	return stored, nil
+}
+
 func mapRecipientCreateError(err error, operation string) error {
 	var postgresError *pgconn.PgError
 	if errors.As(err, &postgresError) && postgresError.Code == "23505" {
@@ -156,12 +228,114 @@ func (store *RecipientStore) List(ctx context.Context, tenantID uuid.UUID, pageS
 	return recipient.Page{Stored: items, NextCursor: nextCursor, HasMore: hasMore}, nil
 }
 
+func (store *RecipientStore) ListScheduleCandidates(ctx context.Context, tenantID uuid.UUID, limit int) ([]recipient.StoredRecipient, error) {
+	rows, err := store.pool.Query(ctx, `
+		select r.id, m.tenant_id, r.line_user_id_hash,
+		       r.line_user_id_ciphertext, r.line_user_id_nonce,
+		       r.display_name_ciphertext, r.display_name_nonce,
+		       r.encryption_key_id, r.status, r.verified_at, r.created_at,
+		       coalesce(array_agg(p.report_key order by p.report_key) filter (where p.report_key is not null), '{}'),
+		       m.permissions_version
+		from tenant_memberships m
+		join line_recipients r on r.id = m.recipient_id
+		left join recipient_report_permissions p on p.tenant_id = m.tenant_id and p.recipient_id = m.recipient_id
+		where m.tenant_id = $1 and m.status <> 'REVOKED'
+		group by r.id, m.tenant_id, m.permissions_version
+		order by r.created_at desc, r.id desc
+		limit $2`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list schedule recipient candidates: %w", err)
+	}
+	defer rows.Close()
+	items := make([]recipient.StoredRecipient, 0, limit)
+	for rows.Next() {
+		item, err := scanRecipient(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan schedule recipient candidate: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate schedule recipient candidates: %w", err)
+	}
+	return items, nil
+}
+
+func (store *RecipientStore) PermissionDependencies(ctx context.Context, tenantID, recipientID uuid.UUID) (recipient.PermissionDependencies, error) {
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return recipient.PermissionDependencies{}, fmt.Errorf("begin recipient permission dependencies: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	result := recipient.PermissionDependencies{RecipientID: recipientID, Items: []recipient.PermissionDependency{}}
+	if err := tx.QueryRow(ctx, `
+		select permissions_version
+		from tenant_memberships
+		where tenant_id = $1 and recipient_id = $2 and status <> 'REVOKED'`, tenantID, recipientID).Scan(&result.PermissionsVersion); errors.Is(err, pgx.ErrNoRows) {
+		return recipient.PermissionDependencies{}, recipient.ErrRecipientNotFound
+	} else if err != nil {
+		return recipient.PermissionDependencies{}, fmt.Errorf("read recipient dependency version: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `
+		with dependencies as (
+		  select scheduled.report_key, s.id, s.name,
+		         row_number() over (partition by scheduled.report_key order by s.name, s.id) as row_number,
+		         count(*) over (partition by scheduled.report_key) as active_count
+		  from notification_schedules s
+		  join notification_schedule_recipients sr on sr.schedule_id = s.id and sr.recipient_id = $2
+		  join notification_schedule_reports scheduled on scheduled.schedule_id = s.id
+		  where s.tenant_id = $1 and s.status = 'ACTIVE'
+		)
+		select report_key, id, name, active_count
+		from dependencies
+		where row_number <= 5
+		order by report_key, row_number`, tenantID, recipientID)
+	if err != nil {
+		return recipient.PermissionDependencies{}, fmt.Errorf("list recipient permission dependencies: %w", err)
+	}
+	defer rows.Close()
+	indexByKey := make(map[report.Key]int)
+	for rows.Next() {
+		var keyValue string
+		var schedule recipient.ScheduleDependency
+		var activeCount int
+		if err := rows.Scan(&keyValue, &schedule.ID, &schedule.Name, &activeCount); err != nil {
+			return recipient.PermissionDependencies{}, fmt.Errorf("scan recipient permission dependency: %w", err)
+		}
+		key := report.Key(keyValue)
+		index, ok := indexByKey[key]
+		if !ok {
+			index = len(result.Items)
+			indexByKey[key] = index
+			result.Items = append(result.Items, recipient.PermissionDependency{
+				ReportKey: key, ActiveScheduleCount: activeCount, Schedules: []recipient.ScheduleDependency{}, AdditionalCount: max(0, activeCount-5),
+			})
+		}
+		result.Items[index].Schedules = append(result.Items[index].Schedules, schedule)
+	}
+	if err := rows.Err(); err != nil {
+		return recipient.PermissionDependencies{}, fmt.Errorf("iterate recipient permission dependencies: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return recipient.PermissionDependencies{}, fmt.Errorf("commit recipient permission dependencies: %w", err)
+	}
+	return result, nil
+}
+
 func (store *RecipientStore) ReplacePermissions(ctx context.Context, actorHash []byte, requestID string, tenantID, recipientID uuid.UUID, keys []report.Key, version int, now time.Time) (recipient.StoredRecipient, error) {
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return recipient.StoredRecipient{}, fmt.Errorf("begin recipient permissions: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Permission replacement and schedule activation must serialize per tenant.
+	// The advisory lock is acquired before any membership/schedule row lock so
+	// both mutation paths use the same lock order and cannot race or deadlock.
+	if err := lockTenantRecipientScheduleMutation(ctx, tx, tenantID); err != nil {
+		return recipient.StoredRecipient{}, err
+	}
 	var membershipStatus string
 	var storedVersion int
 	if err := tx.QueryRow(ctx, `
@@ -202,7 +376,8 @@ func (store *RecipientStore) ReplacePermissions(ctx context.Context, actorHash [
 		join notification_schedule_reports scheduled on scheduled.schedule_id = s.id
 		where s.tenant_id = $1 and s.status = 'ACTIVE'
 		  and not (scheduled.report_key = any($3::text[]))
-		order by s.name`, tenantID, recipientID, keyValues)
+		order by s.name
+		limit 6`, tenantID, recipientID, keyValues)
 	if err != nil {
 		return recipient.StoredRecipient{}, fmt.Errorf("check active schedule permission dependencies: %w", err)
 	}
@@ -271,7 +446,8 @@ func (store *RecipientStore) Revoke(ctx context.Context, actorHash []byte, reque
 		from notification_schedules s
 		join notification_schedule_recipients sr on sr.schedule_id = s.id
 		where s.tenant_id = $1 and sr.recipient_id = $2 and s.status = 'ACTIVE'
-		order by s.name`, tenantID, recipientID)
+		order by s.name
+		limit 6`, tenantID, recipientID)
 	if err != nil {
 		return fmt.Errorf("check active schedule recipient dependencies: %w", err)
 	}

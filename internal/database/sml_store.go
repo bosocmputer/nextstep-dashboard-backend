@@ -40,6 +40,10 @@ func (store *SMLConnectionStore) Get(ctx context.Context, tenantID uuid.UUID) (s
 }
 
 func (store *SMLConnectionStore) Put(ctx context.Context, actorHash []byte, requestID string, connection sml.StoredConnection, expectedVersion int, now time.Time) (sml.StoredConnection, error) {
+	hostKey, err := sml.CanonicalHostKey(connection.EndpointURL)
+	if err != nil {
+		return sml.StoredConnection{}, fmt.Errorf("canonicalize SML connection host: %w", err)
+	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return sml.StoredConnection{}, fmt.Errorf("begin SML connection update: %w", err)
@@ -57,12 +61,12 @@ func (store *SMLConnectionStore) Put(ctx context.Context, actorHash []byte, requ
 			insert into tenant_sml_connections (
 			  tenant_id, endpoint_url, config_file_name, database_name,
 			  username_ciphertext, username_nonce, password_ciphertext, password_nonce,
-			  encryption_key_id, version, readiness_status, created_at, updated_at
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, 'UNTESTED', $10, $10)`,
+			  encryption_key_id, version, readiness_status, endpoint_host_key, created_at, updated_at
+			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, 'UNTESTED', $10, $11, $11)`,
 			connection.TenantID, connection.EndpointURL, connection.ConfigFileName, connection.DatabaseName,
 			connection.Username.Ciphertext, connection.Username.Nonce,
 			connection.Password.Ciphertext, connection.Password.Nonce,
-			connection.Username.KeyID, now,
+			connection.Username.KeyID, hostKey[:], now,
 		)
 		if err != nil {
 			return sml.StoredConnection{}, fmt.Errorf("insert SML connection: %w", err)
@@ -80,12 +84,12 @@ func (store *SMLConnectionStore) Put(ctx context.Context, actorHash []byte, requ
 			    password_ciphertext = $7, password_nonce = $8,
 			    encryption_key_id = $9, version = version + 1,
 			    readiness_status = 'UNTESTED', last_tested_at = null,
-			    last_safe_error_code = null, updated_at = $10
+			    last_safe_error_code = null, endpoint_host_key = $10, updated_at = $11
 			where tenant_id = $1`,
 			connection.TenantID, connection.EndpointURL, connection.ConfigFileName, connection.DatabaseName,
 			connection.Username.Ciphertext, connection.Username.Nonce,
 			connection.Password.Ciphertext, connection.Password.Nonce,
-			connection.Username.KeyID, now,
+			connection.Username.KeyID, hostKey[:], now,
 		)
 		if err != nil {
 			return sml.StoredConnection{}, fmt.Errorf("update SML connection: %w", err)

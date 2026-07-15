@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/viewer"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -46,6 +47,15 @@ func TestReportStoreIdempotencyLeaseCompletionAndCursorRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewReportStore(pool)
+	if _, err := store.ListLatestDashboards(ctx, tenantID, []report.Key{report.SalesGoodsServices}); err != nil {
+		t.Fatalf("ListLatestDashboards() empty query error = %v", err)
+	}
+	if _, err := store.GetExactSnapshotsForPeriods(ctx, tenantID, []viewer.SnapshotPeriodRequest{{
+		ReportKey: report.SalesGoodsServices,
+		Period:    report.Period{Preset: report.Custom, DateFrom: "2026-07-01", DateTo: "2026-07-10"},
+	}}, now); err != nil {
+		t.Fatalf("GetExactSnapshotsForPeriods() empty query error = %v", err)
+	}
 	input := report.EnqueueInput{
 		TenantID: tenantID, ReportKey: report.SalesGoodsServices, Source: report.SourceDashboard,
 		IdempotencyKey: "dashboard-open-001", Period: report.Period{Preset: report.Custom, DateFrom: "2026-07-01", DateTo: "2026-07-10"},

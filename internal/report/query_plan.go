@@ -1,6 +1,29 @@
 package report
 
-import "errors"
+import (
+	"crypto/sha256"
+	_ "embed"
+	"encoding/hex"
+	"errors"
+	"strings"
+)
+
+const (
+	dashboardBuilderContractVersion = "executive-dashboard-v1"
+	formatterContractVersion        = "report-format-v1"
+	summaryQueryContractVersion     = "bounded-summary-v1"
+)
+
+// Embedding the builder and formatter source makes cache invalidation follow
+// implementation changes automatically. A code change cannot accidentally
+// reuse output produced by the previous formula even if a human forgets to
+// bump a version constant.
+//
+//go:embed dashboard_builder.go
+var dashboardBuilderSource string
+
+//go:embed summary.go
+var summaryFormatterSource string
 
 type QueryStep struct {
 	Name  string
@@ -13,12 +36,101 @@ type QueryPlan struct {
 	Steps     []QueryStep
 }
 
+// QueryPlanFingerprint invalidates cached report output when the SQL,
+// projection, dashboard builder contract, or formatter contract changes.
+// It intentionally excludes period values so equivalent resolved periods can
+// share an execution while still separating SUMMARY from DETAIL output.
+func QueryPlanFingerprint(key Key, projection ResultKind) string {
+	if _, ok := DefinitionFor(key); !ok || projection != ResultSummary && projection != ResultDetail {
+		return ""
+	}
+	queries := queryTemplates(key, projection)
+	if len(queries) == 0 {
+		return ""
+	}
+	parts := []string{
+		string(key), string(projection), dashboardBuilderContractVersion, formatterContractVersion,
+		normalizeSQLTemplate(dashboardBuilderSource), normalizeSQLTemplate(summaryFormatterSource),
+	}
+	for _, query := range queries {
+		parts = append(parts, normalizeSQLTemplate(query))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeSQLTemplate(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func queryTemplates(key Key, projection ResultKind) []string {
+	if projection == ResultSummary {
+		// Cover every SQL bucket shape (daily, weekly and monthly). Cache keys
+		// already contain the resolved period; these representative plans make
+		// changes inside the SQL builder invalidate every shape automatically.
+		templates := append([]string{summaryQueryContractVersion}, detailQueryTemplates(key)...)
+		periods := []Period{
+			{Preset: Custom, DateFrom: "2026-07-01", DateTo: "2026-07-01"},
+			{Preset: Custom, DateFrom: "2026-01-01", DateTo: "2026-03-31"},
+			{Preset: Custom, DateFrom: "2025-01-01", DateTo: "2025-12-31"},
+		}
+		for _, period := range periods {
+			plan, err := buildSummaryQueryPlan(key, period)
+			if err != nil {
+				return nil
+			}
+			for _, step := range plan.Steps {
+				templates = append(templates, step.Query.SQL)
+			}
+		}
+		return templates
+	}
+	return detailQueryTemplates(key)
+}
+
+func detailQueryTemplates(key Key) []string {
+	switch key {
+	case SalesGoodsServices:
+		return []string{salesHeaderSQL, salesDetailSQL}
+	case PurchaseGoodsPayables:
+		return []string{purchaseHeaderSQL, purchaseDetailSQL}
+	case GrossProfitByProduct:
+		return []string{grossProfitProductSQL}
+	case GrossProfitByARCustomer:
+		return []string{grossProfitCustomerSQL}
+	case StockBalance:
+		return []string{stockBalanceSQL}
+	case StockReorder:
+		return []string{stockReorderSQL}
+	case ARCustomerMovement:
+		return []string{arCustomerMovementSQL}
+	case ARDebtReceipt:
+		return []string{arDebtReceiptSQL}
+	case CashBankReceipts:
+		return []string{cashBankReceiptsSQL}
+	case CashBankPayments:
+		return []string{cashBankPaymentsSQL}
+	default:
+		return nil
+	}
+}
+
 func BuildQueryPlan(key Key, period Period) (QueryPlan, error) {
+	return BuildQueryPlanForProjection(key, period, ResultDetail)
+}
+
+func BuildQueryPlanForProjection(key Key, period Period, projection ResultKind) (QueryPlan, error) {
 	if period.DateFrom == "" || period.DateTo == "" {
 		return QueryPlan{}, errors.New("report query period is incomplete")
 	}
 	if _, ok := DefinitionFor(key); !ok {
 		return QueryPlan{}, errors.New("report key is not approved")
+	}
+	if projection != ResultDetail && projection != ResultSummary {
+		return QueryPlan{}, errors.New("report projection is not approved")
+	}
+	if projection == ResultSummary {
+		return buildSummaryQueryPlan(key, period)
 	}
 	dateRangeArgs := []any{period.DateFrom, period.DateTo}
 	plan := QueryPlan{ReportKey: key, Period: period}

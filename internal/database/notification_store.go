@@ -183,41 +183,41 @@ func (store *NotificationStore) Publish(ctx context.Context, runID uuid.UUID, wo
 func loadNotificationWork(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now time.Time) (notification.Work, error) {
 	var work notification.Work
 	if err := tx.QueryRow(ctx, `
-		select n.id, n.tenant_id, n.schedule_id, tenant.name, tenant.timezone,
+		select n.id, n.tenant_id, n.schedule_id, n.materialization_version, tenant.name, tenant.timezone,
 		       schedule.period_preset, n.scheduled_for
 		from notification_runs n
 		join tenants tenant on tenant.id = n.tenant_id
 		join notification_schedules schedule on schedule.id = n.schedule_id
-		where n.id = $1`, runID).Scan(&work.ID, &work.TenantID, &work.ScheduleID, &work.TenantName, &work.Timezone, &work.SchedulePeriodPreset, &work.ScheduledFor); err != nil {
+		where n.id = $1`, runID).Scan(&work.ID, &work.TenantID, &work.ScheduleID, &work.MaterializationVersion, &work.TenantName, &work.Timezone, &work.SchedulePeriodPreset, &work.ScheduledFor); err != nil {
 		return notification.Work{}, fmt.Errorf("load notification work: %w", err)
 	}
 	rows, err := tx.Query(ctx, `
-		select report_run.id, report_run.report_key, report_run.status, report_run.period_preset,
+		select report_run.id, report_run.report_key, linked.position, report_run.status, report_run.period_preset,
 		       report_run.period_from::text, report_run.period_to::text,
 		       report_run.summary_json, report_run.dashboard_json, report_run.finished_at, report_run.expires_at
 		from notification_run_reports linked
-		join notification_runs notification_run on notification_run.id = linked.notification_run_id
 		join report_runs report_run on report_run.id = linked.report_run_id
-		join notification_schedule_reports scheduled
-		  on scheduled.schedule_id = notification_run.schedule_id and scheduled.report_key = linked.report_key
 		where linked.notification_run_id = $1
-		order by scheduled.position`, runID)
+		order by linked.position nulls last, linked.report_key`, runID)
 	if err != nil {
 		return notification.Work{}, fmt.Errorf("load notification report results: %w", err)
 	}
 	defer rows.Close()
 	terminalFailures := 0
+	positions := make([]*int16, 0)
 	for rows.Next() {
 		var reportRunID uuid.UUID
 		var key report.Key
+		var position *int16
 		var status report.RunStatus
 		var period report.Period
 		var summaryJSON, dashboardJSON []byte
 		var finishedAt *time.Time
 		var expiresAt time.Time
-		if err := rows.Scan(&reportRunID, &key, &status, &period.Preset, &period.DateFrom, &period.DateTo, &summaryJSON, &dashboardJSON, &finishedAt, &expiresAt); err != nil {
+		if err := rows.Scan(&reportRunID, &key, &position, &status, &period.Preset, &period.DateFrom, &period.DateTo, &summaryJSON, &dashboardJSON, &finishedAt, &expiresAt); err != nil {
 			return notification.Work{}, fmt.Errorf("scan notification report result: %w", err)
 		}
+		positions = append(positions, position)
 		switch status {
 		case report.StatusQueued, report.StatusClaimed, report.StatusRunning:
 			work.Pending = true
@@ -246,28 +246,39 @@ func loadNotificationWork(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now t
 	if err := rows.Err(); err != nil {
 		return notification.Work{}, fmt.Errorf("iterate notification report results: %w", err)
 	}
-	work.Partial = terminalFailures > 0 && len(work.Reports) > 0
+	legacyOrder, err := validateMaterializedPositions(work.MaterializationVersion, positions)
+	if err != nil {
+		return notification.Work{}, fmt.Errorf("validate notification materialization: %w", err)
+	}
+	if legacyOrder {
+		work.OrderStatus = "LEGACY"
+	} else {
+		work.OrderStatus = "EXACT"
+	}
+	// Partial means that the immutable report set is already incomplete. It is
+	// intentionally true even when every successful sibling is still pending so
+	// the notification worker fails closed instead of waiting for more SML work.
+	work.Partial = terminalFailures > 0
 	if work.Pending {
 		return work, nil
 	}
 	targetRows, err := tx.Query(ctx, `
-		select sr.recipient_id, array_agg(scheduled.report_key order by scheduled.position)
+		select sr.recipient_id, array_agg(linked.report_key order by linked.position nulls last, linked.report_key)
 		from notification_runs n
 		join notification_schedule_recipients sr on sr.schedule_id = n.schedule_id
 		join tenant_memberships membership
 		  on membership.tenant_id = n.tenant_id and membership.recipient_id = sr.recipient_id and membership.status = 'ACTIVE'
 		join line_recipients recipient on recipient.id = sr.recipient_id and recipient.status = 'ACTIVE'
-		join notification_schedule_reports scheduled on scheduled.schedule_id = n.schedule_id
 		join recipient_report_permissions permission
-		  on permission.tenant_id = n.tenant_id and permission.recipient_id = sr.recipient_id and permission.report_key = scheduled.report_key
+		  on permission.tenant_id = n.tenant_id and permission.recipient_id = sr.recipient_id
 		join notification_run_reports linked
-		  on linked.notification_run_id = n.id and linked.report_key = scheduled.report_key
+		  on linked.notification_run_id = n.id and linked.report_key = permission.report_key
 		join report_runs report_run on report_run.id = linked.report_run_id and report_run.status = 'SUCCEEDED' and report_run.expires_at > $2
 		where n.id = $1
 		group by sr.recipient_id
 		having count(distinct permission.report_key) = (
-		  select count(*) from notification_schedule_reports expected
-		  where expected.schedule_id = (select schedule_id from notification_runs where id = $1)
+		  select count(*) from notification_run_reports expected
+		  where expected.notification_run_id = $1
 		)
 		order by sr.recipient_id`, runID, now)
 	if err != nil {
@@ -290,4 +301,29 @@ func loadNotificationWork(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now t
 		return notification.Work{}, fmt.Errorf("iterate notification targets: %w", err)
 	}
 	return work, nil
+}
+
+func validateMaterializedPositions(version int16, positions []*int16) (bool, error) {
+	if len(positions) == 0 {
+		return false, errors.New("notification materialization has no reports")
+	}
+	switch version {
+	case 1:
+		return true, nil
+	case 2:
+		seen := make(map[int16]struct{}, len(positions))
+		for index, position := range positions {
+			expected := int16(index + 1)
+			if position == nil || *position != expected {
+				return false, fmt.Errorf("v2 materialization position %d is not contiguous", index+1)
+			}
+			if _, duplicate := seen[*position]; duplicate {
+				return false, fmt.Errorf("v2 materialization position %d is duplicated", *position)
+			}
+			seen[*position] = struct{}{}
+		}
+		return false, nil
+	default:
+		return false, fmt.Errorf("unsupported materialization version %d", version)
+	}
 }

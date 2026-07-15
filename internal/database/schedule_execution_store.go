@@ -87,13 +87,14 @@ func (store *ScheduleStore) MaterializeTest(ctx context.Context, actorHash []byt
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into notification_runs (
-		  id, tenant_id, schedule_id, scheduled_for, status, next_attempt_at, created_at, updated_at
-		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5)`, execution.ID, tenantID, scheduleID, scheduledFor, now); err != nil {
+		  id, tenant_id, schedule_id, scheduled_for, status, next_attempt_at, created_at, updated_at,
+		  materialization_version
+		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5, 2)`, execution.ID, tenantID, scheduleID, scheduledFor, now); err != nil {
 		return schedule.Execution{}, fmt.Errorf("insert test notification run: %w", err)
 	}
 	idempotencyDigest := sha256.Sum256([]byte(idempotencyKey))
 	actorDigest := sha256.Sum256(actorHash)
-	for _, reportKey := range item.ReportKeys {
+	for index, reportKey := range item.ReportKeys {
 		effectivePeriod := period
 		if definition, ok := report.DefinitionFor(reportKey); ok {
 			effectivePeriod, err = store.periodPolicy.Resolve(tenantID, item.PeriodPreset, definition.ParameterKind, location, now)
@@ -103,24 +104,26 @@ func (store *ScheduleStore) MaterializeTest(ctx context.Context, actorHash []byt
 		}
 		paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": effectivePeriod.DateFrom, "dateTo": effectivePeriod.DateTo})
 		reportRunID := uuid.New()
+		queryPlanFingerprint := report.QueryPlanFingerprint(reportKey, report.ResultSummary)
 		reportIdempotencyKey := "schedule-test:" + scheduleID.String() + ":" + hex.EncodeToString(actorDigest[:8]) + ":" + hex.EncodeToString(idempotencyDigest[:16]) + ":" + string(reportKey)
 		if _, err := tx.Exec(ctx, `
 			insert into report_runs (
 			  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
 			  period_from, period_to, params_json, queued_at, expires_at, created_at, updated_at,
-			  result_kind, priority, report_definition_version, data_source_version, progress_phase, progress_updated_at
+			  result_kind, priority, report_definition_version, data_source_version, progress_phase, progress_updated_at,
+			  query_plan_fingerprint
 			)
 			select $1, $2, $3, 'SCHEDULE', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9, $10, $9, $9,
-			       'SUMMARY', 100, d.version, coalesce(c.version, 0), 'QUEUED', $9
+			       'SUMMARY', 100, d.version, coalesce(c.version, 0), 'QUEUED', $9, $11
 			from report_definitions d left join tenant_sml_connections c on c.tenant_id = $2
 			where d.report_key = $3`,
 			reportRunID, tenantID, reportKey, reportIdempotencyKey, effectivePeriod.Preset, effectivePeriod.DateFrom, effectivePeriod.DateTo,
-			paramsJSON, now, now.AddDate(0, 3, 0)); err != nil {
+			paramsJSON, now, now.AddDate(0, 3, 0), queryPlanFingerprint); err != nil {
 			return schedule.Execution{}, fmt.Errorf("enqueue test report %s: %w", reportKey, err)
 		}
 		if _, err := tx.Exec(ctx, `
-			insert into notification_run_reports (notification_run_id, report_key, report_run_id)
-			values ($1, $2, $3)`, execution.ID, reportKey, reportRunID); err != nil {
+			insert into notification_run_reports (notification_run_id, report_key, report_run_id, position)
+			values ($1, $2, $3, $4)`, execution.ID, reportKey, reportRunID, index+1); err != nil {
 			return schedule.Execution{}, fmt.Errorf("link test report %s: %w", reportKey, err)
 		}
 		execution.ReportRunIDs = append(execution.ReportRunIDs, reportRunID)
@@ -212,12 +215,13 @@ func (store *ScheduleStore) MaterializeDue(ctx context.Context, workerID string,
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into notification_runs (
-		  id, tenant_id, schedule_id, scheduled_for, status, next_attempt_at, created_at, updated_at
-		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5)`, executionID, item.TenantID, item.ID, scheduledFor, now.Add(5*time.Second)); err != nil {
+		  id, tenant_id, schedule_id, scheduled_for, status, next_attempt_at, created_at, updated_at,
+		  materialization_version
+		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5, 2)`, executionID, item.TenantID, item.ID, scheduledFor, now.Add(5*time.Second)); err != nil {
 		return schedule.Execution{}, fmt.Errorf("insert notification run: %w", err)
 	}
 	reportRunIDs := make([]uuid.UUID, 0, len(item.ReportKeys))
-	for _, reportKey := range item.ReportKeys {
+	for index, reportKey := range item.ReportKeys {
 		effectivePeriod := period
 		if definition, ok := report.DefinitionFor(reportKey); ok {
 			effectivePeriod, err = store.periodPolicy.Resolve(item.TenantID, item.PeriodPreset, definition.ParameterKind, location, scheduledFor)
@@ -227,24 +231,26 @@ func (store *ScheduleStore) MaterializeDue(ctx context.Context, workerID string,
 		}
 		paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": effectivePeriod.DateFrom, "dateTo": effectivePeriod.DateTo})
 		reportRunID := uuid.New()
+		queryPlanFingerprint := report.QueryPlanFingerprint(reportKey, report.ResultSummary)
 		idempotencyKey := "schedule:" + item.ID.String() + ":" + scheduledFor.UTC().Format("20060102T150405Z") + ":" + string(reportKey)
 		if _, err := tx.Exec(ctx, `
 			insert into report_runs (
 			  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
 			  period_from, period_to, params_json, queued_at, expires_at, created_at, updated_at,
-			  result_kind, priority, report_definition_version, data_source_version, progress_phase, progress_updated_at
+			  result_kind, priority, report_definition_version, data_source_version, progress_phase, progress_updated_at,
+			  query_plan_fingerprint
 			)
 			select $1, $2, $3, 'SCHEDULE', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9, $10, $9, $9,
-			       'SUMMARY', 100, d.version, coalesce(c.version, 0), 'QUEUED', $9
+			       'SUMMARY', 100, d.version, coalesce(c.version, 0), 'QUEUED', $9, $11
 			from report_definitions d left join tenant_sml_connections c on c.tenant_id = $2
 			where d.report_key = $3`,
 			reportRunID, item.TenantID, reportKey, idempotencyKey, effectivePeriod.Preset, effectivePeriod.DateFrom, effectivePeriod.DateTo,
-			paramsJSON, now, now.AddDate(0, 3, 0)); err != nil {
+			paramsJSON, now, now.AddDate(0, 3, 0), queryPlanFingerprint); err != nil {
 			return schedule.Execution{}, fmt.Errorf("enqueue scheduled report %s: %w", reportKey, err)
 		}
 		if _, err := tx.Exec(ctx, `
-			insert into notification_run_reports (notification_run_id, report_key, report_run_id)
-			values ($1, $2, $3)`, executionID, reportKey, reportRunID); err != nil {
+			insert into notification_run_reports (notification_run_id, report_key, report_run_id, position)
+			values ($1, $2, $3, $4)`, executionID, reportKey, reportRunID, index+1); err != nil {
 			return schedule.Execution{}, fmt.Errorf("link scheduled report %s: %w", reportKey, err)
 		}
 		reportRunIDs = append(reportRunIDs, reportRunID)

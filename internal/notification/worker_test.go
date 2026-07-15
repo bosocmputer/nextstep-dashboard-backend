@@ -68,7 +68,7 @@ func TestWorkerPublishesOneCompleteCardPerRecipient(t *testing.T) {
 	tenantID := uuid.New()
 	salesRunID, stockRunID := uuid.New(), uuid.New()
 	store := &memoryNotificationStore{work: Work{
-		ID: uuid.New(), TenantID: tenantID, TenantName: "Shop", Timezone: "Asia/Bangkok", Partial: true,
+		ID: uuid.New(), TenantID: tenantID, TenantName: "Shop", Timezone: "Asia/Bangkok",
 		Reports: []ReportResult{
 			{RunID: salesRunID, Key: report.SalesGoodsServices, Period: period, FinishedAt: now, Metrics: map[string]string{"document_count": "2", "total_amount": "30.00"}},
 			{RunID: stockRunID, Key: report.StockBalance, Period: period, FinishedAt: now, Metrics: map[string]string{"item_count": "10", "balance_amount": "99.00"}},
@@ -78,7 +78,7 @@ func TestWorkerPublishesOneCompleteCardPerRecipient(t *testing.T) {
 	if err := testNotificationWorker(t, store, now).ProcessOne(context.Background()); err != nil {
 		t.Fatalf("ProcessOne() error = %v", err)
 	}
-	if len(store.published) != 1 || !store.partial || store.published[0].RecipientID != recipientID || len(store.published[0].ReferenceHash) == 0 {
+	if len(store.published) != 1 || store.partial || store.published[0].RecipientID != recipientID || len(store.published[0].ReferenceHash) == 0 {
 		t.Fatalf("published = %+v partial=%v", store.published, store.partial)
 	}
 	payload := string(store.published[0].Payload)
@@ -88,6 +88,36 @@ func TestWorkerPublishesOneCompleteCardPerRecipient(t *testing.T) {
 	var decoded map[string]any
 	if err := json.Unmarshal(store.published[0].Payload, &decoded); err != nil {
 		t.Fatalf("payload invalid: %v", err)
+	}
+}
+
+func TestWorkerRefusesPartialMaterializedReportSet(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	period := report.Period{Preset: report.Yesterday, DateFrom: "2026-07-09", DateTo: "2026-07-09"}
+	store := &memoryNotificationStore{work: Work{
+		ID: uuid.New(), TenantID: uuid.New(), TenantName: "Shop", Timezone: "Asia/Bangkok", Partial: true,
+		Reports: []ReportResult{{
+			RunID: uuid.New(), Key: report.SalesGoodsServices, Period: period, FinishedAt: now,
+			Metrics: map[string]string{"document_count": "2", "total_amount": "30.00"},
+		}},
+		Targets: []Target{{RecipientID: uuid.New(), ReportKeys: []report.Key{report.SalesGoodsServices}}},
+	}}
+	if err := testNotificationWorker(t, store, now).ProcessOne(context.Background()); err != nil || store.failedCode != "REPORT_SET_INCOMPLETE" || len(store.published) != 0 {
+		t.Fatalf("ProcessOne() error=%v failedCode=%q published=%d", err, store.failedCode, len(store.published))
+	}
+}
+
+func TestWorkerTerminalFailureTakesPrecedenceOverPendingSiblings(t *testing.T) {
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	store := &memoryNotificationStore{work: Work{
+		ID: uuid.New(), Pending: true, Partial: true,
+	}}
+
+	if err := testNotificationWorker(t, store, now).ProcessOne(context.Background()); err != nil {
+		t.Fatalf("ProcessOne() error = %v", err)
+	}
+	if store.failedCode != "REPORT_SET_INCOMPLETE" || store.deferred || len(store.published) != 0 {
+		t.Fatalf("failedCode=%q deferred=%v published=%d", store.failedCode, store.deferred, len(store.published))
 	}
 }
 

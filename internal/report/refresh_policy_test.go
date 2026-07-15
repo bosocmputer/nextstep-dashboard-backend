@@ -58,3 +58,18 @@ func TestRefreshPolicySupportsDisablingAClass(t *testing.T) {
 		t.Fatalf("disabled fast interval = %s enabled=%v", interval, enabled)
 	}
 }
+
+func TestRefreshPolicyReportsRolloutStateWithoutPersistingIt(t *testing.T) {
+	enabledTenant, disabledTenant := uuid.New(), uuid.New()
+	store := &policyStoreFake{policy: DefaultRefreshPolicy(enabledTenant)}
+	service := NewRefreshPolicyService(store, time.Now).ConfigureRollout(true, []uuid.UUID{enabledTenant}, false)
+	policy, err := service.Get(context.Background(), enabledTenant)
+	if err != nil || policy.RolloutStatus == nil || *policy.RolloutStatus != "REVALIDATION_DISABLED" {
+		t.Fatalf("enabled tenant rollout = %+v, %v", policy, err)
+	}
+	store.policy = DefaultRefreshPolicy(disabledTenant)
+	policy, err = service.Get(context.Background(), disabledTenant)
+	if err != nil || policy.RolloutStatus == nil || *policy.RolloutStatus != "TENANT_NOT_ENABLED" {
+		t.Fatalf("disabled tenant rollout = %+v, %v", policy, err)
+	}
+}

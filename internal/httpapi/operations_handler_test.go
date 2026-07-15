@@ -71,6 +71,7 @@ func TestAdminOperationsReturnRedactedHistoryPages(t *testing.T) {
 	tenantID, deliveryID := uuid.New(), uuid.New()
 	api := &fakeOperationsAPI{deliveryPage: operations.DeliveryPage{Data: []operations.Delivery{{
 		ID: deliveryID, TenantID: tenantID, TenantName: "ร้านตัวอย่าง", RecipientName: "เจ้าของร้าน",
+		ReportKeys: []report.Key{report.SalesGoodsServices}, ReportCount: 1,
 		Status: "ACCEPTED", Attempt: 1, CreatedAt: time.Now(), ExpiresAt: time.Now().AddDate(1, 0, 0),
 	}}}}
 	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: &fakeAdminAuth{}, Operations: api})
@@ -83,6 +84,7 @@ func TestAdminOperationsReturnRedactedHistoryPages(t *testing.T) {
 	body := response.Body.String()
 	if response.Code != http.StatusOK || api.calls != 1 || !strings.Contains(body, deliveryID.String()) ||
 		!strings.Contains(body, `"tenantName":"ร้านตัวอย่าง"`) || !strings.Contains(body, `"recipientDisplayName":"เจ้าของร้าน"`) ||
+		!strings.Contains(body, `"reportKeys":["sales_goods_services"]`) || !strings.Contains(body, `"reportCount":1`) ||
 		strings.Contains(body, "recipientId") || strings.Contains(body, "StoredRecipient") {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, api.calls, response.Body.String())
 	}

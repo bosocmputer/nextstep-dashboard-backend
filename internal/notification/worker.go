@@ -38,17 +38,19 @@ type Target struct {
 }
 
 type Work struct {
-	ID                   uuid.UUID
-	TenantID             uuid.UUID
-	ScheduleID           uuid.UUID
-	TenantName           string
-	Timezone             string
-	SchedulePeriodPreset report.Preset
-	ScheduledFor         time.Time
-	Pending              bool
-	Partial              bool
-	Reports              []ReportResult
-	Targets              []Target
+	ID                     uuid.UUID
+	TenantID               uuid.UUID
+	ScheduleID             uuid.UUID
+	MaterializationVersion int16
+	OrderStatus            string
+	TenantName             string
+	Timezone               string
+	SchedulePeriodPreset   report.Preset
+	ScheduledFor           time.Time
+	Pending                bool
+	Partial                bool
+	Reports                []ReportResult
+	Targets                []Target
 }
 
 type PreparedDelivery struct {
@@ -91,6 +93,12 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 	work, err := worker.store.Claim(ctx, worker.workerID, time.Minute, now)
 	if err != nil {
 		return err
+	}
+	// A terminal report failure is authoritative even while sibling reports are
+	// still queued. Deferring first would allow those siblings to keep querying
+	// SML although this occurrence can no longer be delivered atomically.
+	if work.Partial {
+		return worker.store.Fail(ctx, work.ID, worker.workerID, "REPORT_SET_INCOMPLETE", now)
 	}
 	if work.Pending {
 		return worker.store.Defer(ctx, work.ID, worker.workerID, now.Add(5*time.Second), now)
@@ -150,7 +158,7 @@ func (worker *Worker) ProcessOne(ctx context.Context) error {
 	if len(prepared) == 0 {
 		return worker.store.Fail(ctx, work.ID, worker.workerID, "NO_ELIGIBLE_RECIPIENTS", now)
 	}
-	return worker.store.Publish(ctx, work.ID, worker.workerID, prepared, work.Partial, now)
+	return worker.store.Publish(ctx, work.ID, worker.workerID, prepared, false, now)
 }
 
 func validReportContext(work Work) bool {

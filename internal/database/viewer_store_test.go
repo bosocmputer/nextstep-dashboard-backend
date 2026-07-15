@@ -27,12 +27,13 @@ func TestViewerStoreFiltersActiveTenantAndReportPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
-	tenantID, expiredTenantID, recipientID := uuid.New(), uuid.New(), uuid.New()
+	tenantID, noReportTenantID, expiredTenantID, recipientID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if _, err := pool.Exec(ctx, `
 		insert into tenants (id, slug, name, timezone, status, access_ends_at) values
-		($1, 'viewer-active', 'Active Shop', 'Asia/Bangkok', 'ACTIVE', $3),
-		($2, 'viewer-expired', 'Expired Shop', 'Asia/Bangkok', 'ACTIVE', $4)`,
-		tenantID, expiredTenantID, now.AddDate(1, 0, 0), now.Add(-time.Hour)); err != nil {
+		($1, 'viewer-active', 'Active Shop', 'Asia/Bangkok', 'ACTIVE', $4),
+		($2, 'viewer-no-reports', 'Pending Reports Shop', 'Asia/Bangkok', 'ACTIVE', $4),
+		($3, 'viewer-expired', 'Expired Shop', 'Asia/Bangkok', 'ACTIVE', $5)`,
+		tenantID, noReportTenantID, expiredTenantID, now.AddDate(1, 0, 0), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -42,8 +43,9 @@ func TestViewerStoreFiltersActiveTenantAndReportPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
-		insert into tenant_memberships (tenant_id, recipient_id, status) values ($1, $3, 'ACTIVE'), ($2, $3, 'ACTIVE')`,
-		tenantID, expiredTenantID, recipientID); err != nil {
+		insert into tenant_memberships (tenant_id, recipient_id, status) values
+		($1, $4, 'ACTIVE'), ($2, $4, 'ACTIVE'), ($3, $4, 'ACTIVE')`,
+		tenantID, noReportTenantID, expiredTenantID, recipientID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -62,8 +64,11 @@ func TestViewerStoreFiltersActiveTenantAndReportPermissions(t *testing.T) {
 		t.Fatalf("FindSession() = %+v, %v", loaded, err)
 	}
 	tenants, err := store.ListTenants(ctx, recipientID, now)
-	if err != nil || len(tenants) != 1 || tenants[0].ID != tenantID || len(tenants[0].ReportKeys) != 2 {
+	if err != nil || len(tenants) != 2 || tenants[0].ID != tenantID || len(tenants[0].ReportKeys) != 2 {
 		t.Fatalf("ListTenants() = %+v, %v", tenants, err)
+	}
+	if tenants[1].ID != noReportTenantID || len(tenants[1].ReportKeys) != 0 {
+		t.Fatalf("ListTenants() tenant without reports = %+v", tenants[1])
 	}
 	reports, err := store.ListReports(ctx, recipientID, tenantID, now)
 	if err != nil || len(reports) != 2 {

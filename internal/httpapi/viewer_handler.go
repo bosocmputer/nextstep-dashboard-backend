@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/line"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/viewer"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 func registerViewerRoutes(router chi.Router, viewerAuth ViewerAPI, secureCookies bool) {
@@ -21,18 +23,97 @@ func registerViewerRoutes(router chi.Router, viewerAuth ViewerAPI, secureCookies
 			IDToken             string `json:"idToken"`
 			InvitationReference string `json:"invitationReference"`
 			DeliveryReference   string `json:"deliveryReference"`
+			ExpectedTenantID    string `json:"expectedTenantId"`
 		}
-		if err := decodeJSON(response, request, &input); err != nil || !validViewerSessionInput(input.IDToken, input.InvitationReference, input.DeliveryReference) {
+		if err := decodeJSON(response, request, &input); err != nil || !validViewerSessionInput(input.IDToken, input.InvitationReference, input.DeliveryReference, input.ExpectedTenantID) {
 			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "LINE session input is invalid.", false)
 			return
 		}
-		result, err := viewerAuth.Exchange(request.Context(), input.IDToken, input.InvitationReference, input.DeliveryReference)
+		var expectedTenantID *uuid.UUID
+		if input.ExpectedTenantID != "" {
+			parsed, _ := uuid.Parse(input.ExpectedTenantID)
+			expectedTenantID = &parsed
+		}
+		result, err := viewerAuth.Exchange(request.Context(), input.IDToken, input.InvitationReference, input.DeliveryReference, expectedTenantID)
 		if handleViewerExchangeError(response, request, err) {
 			return
 		}
 		setViewerSessionCookie(response, result.RawToken, result.ExpiresAt, secureCookies)
 		setViewerCSRFCookie(response, result.CSRFToken, result.ExpiresAt, secureCookies)
-		writeJSON(response, http.StatusOK, viewerResponse(result.RecipientID.String(), result.DisplayName, result.CSRFToken, result.ExpiresAt))
+		payload := viewerResponse(result.RecipientID.String(), result.DisplayName, result.CSRFToken, result.ExpiresAt)
+		if result.DeliveryContext != nil {
+			payload["deliveryContext"] = result.DeliveryContext
+		}
+		if result.DeliveryContextErrorCode != "" {
+			payload["deliveryContextErrorCode"] = result.DeliveryContextErrorCode
+		}
+		writeJSON(response, http.StatusOK, payload)
+	})
+
+	router.Post("/api/v1/viewer/delivery-contexts", func(response http.ResponseWriter, request *http.Request) {
+		if !isJSONRequest(request) {
+			writeProblem(response, request, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json.", false)
+			return
+		}
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok || !authorizeViewerCSRF(response, request, viewerAuth, authenticated) {
+			return
+		}
+		var input struct {
+			DeliveryReference string `json:"deliveryReference"`
+			ExpectedTenantID  string `json:"expectedTenantId"`
+		}
+		if err := decodeJSON(response, request, &input); err != nil || len(input.DeliveryReference) < 32 || len(input.DeliveryReference) > 512 {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Delivery context input is invalid.", false)
+			return
+		}
+		tenantID, err := uuid.Parse(input.ExpectedTenantID)
+		if err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Delivery context input is invalid.", false)
+			return
+		}
+		item, err := viewerAuth.ResolveDeliveryContext(request.Context(), authenticated, input.DeliveryReference, &tenantID)
+		if handleDeliveryContextError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, item)
+	})
+
+	router.Get("/api/v1/viewer/tenants/{tenantId}/deliveries/{deliveryId}/context", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, deliveryID, ok := parseDeliveryContextIDs(response, request)
+		if !ok {
+			return
+		}
+		item, err := viewerAuth.GetDeliveryContext(request.Context(), authenticated, tenantID, deliveryID)
+		if handleDeliveryContextError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, item)
+	})
+
+	router.Get("/api/v1/viewer/tenants/{tenantId}/deliveries/{deliveryId}/reports/{reportKey}", func(response http.ResponseWriter, request *http.Request) {
+		authenticated, ok := authenticateViewer(response, request, viewerAuth)
+		if !ok {
+			return
+		}
+		tenantID, deliveryID, ok := parseDeliveryContextIDs(response, request)
+		if !ok {
+			return
+		}
+		reportKey := report.Key(chi.URLParam(request, "reportKey"))
+		if _, found := report.DefinitionFor(reportKey); !found {
+			writeProblem(response, request, http.StatusNotFound, "DELIVERY_CONTEXT_UNAVAILABLE", "Delivery context is not available.", false)
+			return
+		}
+		item, err := viewerAuth.GetDeliveryReport(request.Context(), authenticated, tenantID, deliveryID, reportKey)
+		if handleDeliveryContextError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, item)
 	})
 
 	router.Get("/api/v1/viewer/me", func(response http.ResponseWriter, request *http.Request) {
@@ -85,21 +166,79 @@ func registerViewerRoutes(router chi.Router, viewerAuth ViewerAPI, secureCookies
 			return
 		}
 		if len(items) == 0 {
-			writeProblem(response, request, http.StatusForbidden, "REPORT_ACCESS_FORBIDDEN", "This tenant is not available to the verified LINE identity.", false)
-			return
+			tenants, tenantErr := viewerAuth.ListTenants(request.Context(), authenticated.RecipientID)
+			if tenantErr != nil {
+				writeProblem(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to verify viewer tenant access.", false)
+				return
+			}
+			available := false
+			for _, tenant := range tenants {
+				if tenant.ID == tenantID {
+					available = true
+					break
+				}
+			}
+			if !available {
+				writeProblem(response, request, http.StatusForbidden, "REPORT_ACCESS_FORBIDDEN", "This tenant is not available to the verified LINE identity.", false)
+				return
+			}
+			items = []viewer.ReportAccess{}
 		}
 		writeJSON(response, http.StatusOK, map[string]any{"data": items})
 	})
 }
 
-func validViewerSessionInput(idToken, invitationReference, deliveryReference string) bool {
+func validViewerSessionInput(idToken, invitationReference, deliveryReference, expectedTenantID string) bool {
 	if len(idToken) < 32 || len(idToken) > 8192 {
 		return false
 	}
 	if invitationReference != "" && (len(invitationReference) < 32 || len(invitationReference) > 128) {
 		return false
 	}
-	return deliveryReference == "" || len(deliveryReference) >= 32 && len(deliveryReference) <= 512
+	if invitationReference != "" && deliveryReference != "" {
+		return false
+	}
+	if deliveryReference != "" && (len(deliveryReference) < 32 || len(deliveryReference) > 512) {
+		return false
+	}
+	if deliveryReference != "" && expectedTenantID == "" {
+		return false
+	}
+	if expectedTenantID == "" {
+		return true
+	}
+	_, err := uuid.Parse(expectedTenantID)
+	return deliveryReference != "" && err == nil
+}
+
+func parseDeliveryContextIDs(response http.ResponseWriter, request *http.Request) (uuid.UUID, uuid.UUID, bool) {
+	tenantID, err := uuid.Parse(chi.URLParam(request, "tenantId"))
+	if err != nil {
+		writeProblem(response, request, http.StatusNotFound, "DELIVERY_CONTEXT_UNAVAILABLE", "Delivery context is not available.", false)
+		return uuid.Nil, uuid.Nil, false
+	}
+	deliveryID, err := uuid.Parse(chi.URLParam(request, "deliveryId"))
+	if err != nil {
+		writeProblem(response, request, http.StatusNotFound, "DELIVERY_CONTEXT_UNAVAILABLE", "Delivery context is not available.", false)
+		return uuid.Nil, uuid.Nil, false
+	}
+	return tenantID, deliveryID, true
+}
+
+func handleDeliveryContextError(response http.ResponseWriter, request *http.Request, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, viewer.ErrDeliveryContextPermissionChanged) {
+		writeProblem(response, request, http.StatusForbidden, "DELIVERY_CONTEXT_PERMISSION_CHANGED", "Delivery context is not available for the current permissions.", false)
+		return true
+	}
+	if errors.Is(err, viewer.ErrDeliveryContextUnavailable) {
+		writeProblem(response, request, http.StatusNotFound, "DELIVERY_CONTEXT_UNAVAILABLE", "Delivery context is not available.", false)
+		return true
+	}
+	writeProblem(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to load delivery context.", false)
+	return true
 }
 
 func handleViewerExchangeError(response http.ResponseWriter, request *http.Request, err error) bool {

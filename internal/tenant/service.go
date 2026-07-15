@@ -31,8 +31,14 @@ type Store interface {
 }
 
 type Service struct {
-	store Store
-	now   func() time.Time
+	store         Store
+	now           func() time.Time
+	publicBaseURL string
+}
+
+func (service *Service) ConfigurePublicBaseURL(value string) *Service {
+	service.publicBaseURL = strings.TrimRight(strings.TrimSpace(value), "/")
+	return service
 }
 
 func NewService(store Store, now func() time.Time) *Service {
@@ -47,7 +53,8 @@ func (service *Service) Create(ctx context.Context, actorHash []byte, requestID,
 	if err != nil {
 		return Tenant{}, err
 	}
-	return service.store.Create(ctx, actorHash, requestID, idempotencyKey, normalized, service.now().UTC())
+	created, err := service.store.Create(ctx, actorHash, requestID, idempotencyKey, normalized, service.now().UTC())
+	return service.withViewerURL(created), err
 }
 
 func (service *Service) List(ctx context.Context, filter ListFilter) (Page, error) {
@@ -64,11 +71,19 @@ func (service *Service) List(ctx context.Context, filter ListFilter) (Page, erro
 	if filter.Status != nil && *filter.Status != StatusActive && *filter.Status != StatusDisabled && *filter.Status != StatusExpired {
 		return Page{}, validation("status", "INVALID_STATUS", "Tenant status is invalid.")
 	}
-	return service.store.List(ctx, filter, service.now().UTC())
+	page, err := service.store.List(ctx, filter, service.now().UTC())
+	if err != nil {
+		return Page{}, err
+	}
+	for index := range page.Data {
+		page.Data[index] = service.withViewerURL(page.Data[index])
+	}
+	return page, nil
 }
 
 func (service *Service) Get(ctx context.Context, id uuid.UUID) (Tenant, error) {
-	return service.store.Get(ctx, id, service.now().UTC())
+	item, err := service.store.Get(ctx, id, service.now().UTC())
+	return service.withViewerURL(item), err
 }
 
 func (service *Service) Update(ctx context.Context, actorHash []byte, requestID string, id uuid.UUID, input PatchInput) (Tenant, error) {
@@ -76,7 +91,15 @@ func (service *Service) Update(ctx context.Context, actorHash []byte, requestID 
 	if err != nil {
 		return Tenant{}, err
 	}
-	return service.store.Update(ctx, actorHash, requestID, id, normalized, service.now().UTC())
+	updated, err := service.store.Update(ctx, actorHash, requestID, id, normalized, service.now().UTC())
+	return service.withViewerURL(updated), err
+}
+
+func (service *Service) withViewerURL(item Tenant) Tenant {
+	if service.publicBaseURL != "" && item.ID != uuid.Nil {
+		item.ViewerURL = service.publicBaseURL + "/app/tenant/" + item.ID.String()
+	}
+	return item
 }
 
 func (service *Service) Archive(ctx context.Context, actorHash []byte, requestID string, id uuid.UUID, version int) error {

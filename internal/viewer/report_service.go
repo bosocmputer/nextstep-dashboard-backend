@@ -39,6 +39,11 @@ type ViewerSnapshotStore interface {
 	GetExactSnapshotsForPeriods(context.Context, uuid.UUID, []SnapshotPeriodRequest, time.Time) (map[report.Key]DashboardSnapshot, error)
 }
 
+type ViewerGenerationStore interface {
+	GetLatestPublishedOverview(context.Context, uuid.UUID, []report.Key, time.Time) (ExecutiveOverview, error)
+	GetPublishedOverviewForPeriods(context.Context, uuid.UUID, []SnapshotPeriodRequest, time.Time) (ExecutiveOverview, error)
+}
+
 func (service *ReportService) ExactSnapshot(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, input CreateReportRunInput) (DashboardSnapshot, error) {
 	definition, ok := report.DefinitionFor(reportKey)
 	if !ok {
@@ -79,15 +84,21 @@ type ReportRows struct {
 }
 
 type ReportService struct {
-	access               ReportAccessControl
-	store                ViewerRunStore
-	now                  func() time.Time
-	snapshotFirstEnabled bool
-	snapshotFirstTenants map[uuid.UUID]struct{}
+	access                   ReportAccessControl
+	store                    ViewerRunStore
+	now                      func() time.Time
+	snapshotFirstEnabled     bool
+	staleRevalidationEnabled bool
+	snapshotFirstTenants     map[uuid.UUID]struct{}
 }
 
 func NewReportService(access ReportAccessControl, store ViewerRunStore, now func() time.Time) *ReportService {
-	return &ReportService{access: access, store: store, now: now, snapshotFirstEnabled: true}
+	return &ReportService{access: access, store: store, now: now, snapshotFirstEnabled: true, staleRevalidationEnabled: true}
+}
+
+func (service *ReportService) ConfigureStaleRevalidation(enabled bool) *ReportService {
+	service.staleRevalidationEnabled = enabled
+	return service
 }
 
 func (service *ReportService) ConfigureSnapshotFirst(enabled bool, tenantIDs []uuid.UUID) *ReportService {
@@ -197,6 +208,17 @@ func (service *ReportService) Revalidate(ctx context.Context, recipientID, tenan
 	if !ok {
 		return ReportRevalidation{}, errors.New("viewer snapshot store is unavailable")
 	}
+	if !service.staleRevalidationEnabled {
+		snapshot, snapshotErr := store.GetExactSnapshotForPeriod(ctx, tenantID, reportKey, period, now)
+		if snapshotErr != nil && !errors.Is(snapshotErr, report.ErrRunNotFound) {
+			return ReportRevalidation{}, snapshotErr
+		}
+		result := ReportRevalidation{Disposition: RevalidationDisabled}
+		if snapshotErr == nil {
+			result.Snapshot = &snapshot
+		}
+		return result, nil
+	}
 	return store.RevalidateSnapshot(ctx, tenantID, reportKey, period, now)
 }
 
@@ -236,6 +258,16 @@ func (service *ReportService) ExactOverview(ctx context.Context, recipientID, te
 		}
 		periods = append(periods, SnapshotPeriodRequest{ReportKey: key, Period: period})
 	}
+	if generationStore, ok := service.store.(ViewerGenerationStore); ok {
+		generation, generationErr := generationStore.GetPublishedOverviewForPeriods(ctx, tenantID, periods, now)
+		if generationErr == nil {
+			generation.Timezone = tenant.Timezone
+			return generation, nil
+		}
+		if !errors.Is(generationErr, report.ErrRunNotFound) {
+			return ExecutiveOverview{}, generationErr
+		}
+	}
 	exactSnapshots, err := store.GetExactSnapshotsForPeriods(ctx, tenantID, periods, now)
 	if err != nil {
 		return ExecutiveOverview{}, err
@@ -253,6 +285,10 @@ func (service *ReportService) RevalidateOverview(ctx context.Context, recipientI
 	if !service.snapshotFirstAllowed(tenantID) {
 		overview, err := service.ExecutiveOverview(ctx, recipientID, tenantID)
 		return OverviewRevalidation{Disposition: RevalidationDisabled, Overview: overview, LegacyFallback: true}, err
+	}
+	if !service.staleRevalidationEnabled {
+		overview, err := service.ExactOverview(ctx, recipientID, tenantID, input)
+		return OverviewRevalidation{Disposition: RevalidationDisabled, Overview: overview}, err
 	}
 	tenant, err := service.authorizedTenant(ctx, recipientID, tenantID)
 	if err != nil {
@@ -383,6 +419,16 @@ func (service *ReportService) ExecutiveOverview(ctx context.Context, recipientID
 	tenant, err := service.authorizedTenant(ctx, recipientID, tenantID)
 	if err != nil {
 		return ExecutiveOverview{}, err
+	}
+	if generationStore, ok := service.store.(ViewerGenerationStore); ok {
+		generation, generationErr := generationStore.GetLatestPublishedOverview(ctx, tenantID, tenant.ReportKeys, service.now().UTC())
+		if generationErr == nil {
+			generation.Timezone = tenant.Timezone
+			return generation, nil
+		}
+		if !errors.Is(generationErr, report.ErrRunNotFound) {
+			return ExecutiveOverview{}, generationErr
+		}
 	}
 	items, err := service.store.ListLatestDashboards(ctx, tenantID, tenant.ReportKeys)
 	if err != nil {

@@ -4,7 +4,18 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+func TestServiceBuildsViewerURLFromConfiguredPublicBaseURL(t *testing.T) {
+	id := uuid.New()
+	service := NewService(nil, time.Now).ConfigurePublicBaseURL("https://dashboard.nextstep-soft.com/")
+	item := service.withViewerURL(Tenant{ID: id})
+	if item.ViewerURL != "https://dashboard.nextstep-soft.com/app/tenant/"+id.String() {
+		t.Fatalf("ViewerURL = %q", item.ViewerURL)
+	}
+}
 
 func TestCreateInputNormalizeAndValidate(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)

@@ -113,8 +113,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 
 		if migration.NoTransaction {
-			if _, err := connection.Exec(ctx, migration.SQL); err != nil {
-				return fmt.Errorf("apply non-transactional migration %06d: %w", migration.Version, err)
+			for _, statement := range nonTransactionalStatements(migration.SQL) {
+				if _, err := connection.Exec(ctx, statement); err != nil {
+					return fmt.Errorf("apply non-transactional migration %06d: %w", migration.Version, err)
+				}
 			}
 			if _, err := connection.Exec(ctx, `insert into schema_migrations (version, name, checksum) values ($1, $2, $3)`, migration.Version, migration.Name, migration.Checksum); err != nil {
 				return fmt.Errorf("record non-transactional migration %06d: %w", migration.Version, err)
@@ -138,4 +140,26 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 	return nil
+}
+
+func nonTransactionalStatements(sql string) []string {
+	// Non-transactional migrations are intentionally restricted to simple DDL
+	// such as CREATE INDEX CONCURRENTLY. Sending multiple statements in one
+	// PostgreSQL request creates an implicit transaction block and is rejected.
+	lines := strings.Split(sql, "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+	parts := strings.Split(strings.Join(cleaned, "\n"), ";")
+	statements := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if statement := strings.TrimSpace(part); statement != "" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
 }

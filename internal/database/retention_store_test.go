@@ -39,6 +39,17 @@ func TestRetentionStoreApplies24Hour90DayAnd365DayBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldSnapshot := now.Add(-100 * 24 * time.Hour)
+	generationID := uuid.New()
+	generationKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, err := pool.Exec(ctx, `
+		insert into dashboard_generations (
+		  id, tenant_id, generation_key, status, period_preset, period_from, period_to,
+		  request_json, report_set_hash, query_plan_set_fingerprint, data_source_version,
+		  projection, source_consistency, total, completed, published_at, finished_at, created_at, updated_at
+		) values ($1, $2, $3, 'PUBLISHED', 'CUSTOM', '2026-01-01', '2026-01-01', '[]', $3, $3, 0,
+		  'SUMMARY', 'SERIAL_WINDOW', 1, 1, $4, $4, $4, $4)`, generationID, tenantID, generationKey, oldSnapshot); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `
 		insert into report_runs (
 		  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
@@ -48,6 +59,16 @@ func TestRetentionStoreApplies24Hour90DayAnd365DayBoundaries(t *testing.T) {
 		($1, $3, 'sales_goods_services', 'DASHBOARD', 'retention-dashboard-001', 'SUCCEEDED', 'CUSTOM', '2026-01-01', '2026-01-01', '{"total":"1"}', '{"status":"OK"}', '1.0.0', '{"reportKey":"sales_goods_services"}', $4, $4, $4, $4, $4),
 		($2, $3, 'stock_balance', 'SCHEDULE', 'retention-schedule-001', 'SUCCEEDED', 'AS_OF_RUN', '2026-01-01', '2026-01-01', '{"total":"2"}', '{"status":"OK"}', '1.0.0', '{"reportKey":"stock_balance"}', $4, $4, $4, $4, $4)`,
 		dashboardRunID, scheduledRunID, tenantID, oldSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into dashboard_generation_reports (generation_id, tenant_id, report_key, report_run_id, position)
+		values ($1, $2, 'sales_goods_services', $3, 1)`, generationID, tenantID, dashboardRunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into dashboard_generation_heads (tenant_id, generation_key, published_generation_id)
+		values ($1, $2, $3)`, tenantID, generationKey, generationID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -81,7 +102,7 @@ func TestRetentionStoreApplies24Hour90DayAnd365DayBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if counts.ReportRows != 1 || counts.ReportRuns != 1 || counts.DashboardRefreshes != 1 || counts.ScrubbedReportRuns != 1 || counts.AuditLogs != 1 || counts.IdempotencyRequests != 1 {
+	if counts.ReportRows != 1 || counts.ReportRuns != 1 || counts.DashboardRefreshes != 1 || counts.DashboardGenerations != 1 || counts.ScrubbedReportRuns != 1 || counts.AuditLogs != 1 || counts.IdempotencyRequests != 1 {
 		t.Fatalf("Run() counts = %+v", counts)
 	}
 	var dashboardExists, refreshExists bool
@@ -91,12 +112,16 @@ func TestRetentionStoreApplies24Hour90DayAnd365DayBoundaries(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select exists(select 1 from dashboard_refreshes where id = $1)`, refreshID).Scan(&refreshExists); err != nil {
 		t.Fatal(err)
 	}
+	var publishedGenerationID *uuid.UUID
+	if err := pool.QueryRow(ctx, `select published_generation_id from dashboard_generation_heads where tenant_id = $1 and generation_key = $2`, tenantID, generationKey).Scan(&publishedGenerationID); err != nil {
+		t.Fatal(err)
+	}
 	var scheduledSummary, scheduledDashboard string
 	var scheduledDashboardVersion *string
 	if err := pool.QueryRow(ctx, `select summary_json::text, dashboard_json::text, dashboard_version from report_runs where id = $1`, scheduledRunID).Scan(&scheduledSummary, &scheduledDashboard, &scheduledDashboardVersion); err != nil {
 		t.Fatal(err)
 	}
-	if dashboardExists || refreshExists || scheduledSummary != "{}" || scheduledDashboard != "{}" || scheduledDashboardVersion != nil {
-		t.Fatalf("dashboardExists=%v refreshExists=%v scheduledSummary=%s scheduledDashboard=%s version=%v", dashboardExists, refreshExists, scheduledSummary, scheduledDashboard, scheduledDashboardVersion)
+	if dashboardExists || refreshExists || publishedGenerationID != nil || scheduledSummary != "{}" || scheduledDashboard != "{}" || scheduledDashboardVersion != nil {
+		t.Fatalf("dashboardExists=%v refreshExists=%v publishedGeneration=%v scheduledSummary=%s scheduledDashboard=%s version=%v", dashboardExists, refreshExists, publishedGenerationID, scheduledSummary, scheduledDashboard, scheduledDashboardVersion)
 	}
 }

@@ -31,6 +31,8 @@ type Config struct {
 	LineMessagingAccessToken     string
 	SMLAllowedPrefixes           []netip.Prefix
 	SMLAllowedHosts              []string
+	SMLAllowPublicEndpoints      bool
+	SMLAllowedPorts              []uint16
 	DatabaseMaxConnections       int
 	DatabaseMinConnections       int
 	ReportWorkerConcurrency      int
@@ -39,6 +41,12 @@ type Config struct {
 	SnapshotFirstTenantIDs       []uuid.UUID
 	SmartSchedulePeriodsEnabled  bool
 	SmartSchedulePeriodTenantIDs []uuid.UUID
+	SummaryQueryEnabled          bool
+	GenerationCacheEnabled       bool
+	StaleRevalidationEnabled     bool
+	HeavyChunkEnabled            bool
+	HeavyChunkTenantReports      []string
+	ScheduleChunkEnabled         bool
 }
 
 func Load(lookup LookupFunc) (Config, error) {
@@ -115,6 +123,14 @@ func Load(lookup LookupFunc) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	allowPublicEndpoints, err := boolValue(lookup, "SML_ALLOW_PUBLIC_ENDPOINTS", false)
+	if err != nil {
+		return Config{}, err
+	}
+	allowedPorts, err := parseAllowedPorts(valueOrDefault(lookup, "SML_ALLOWED_PORTS", "*"))
+	if err != nil {
+		return Config{}, err
+	}
 	workerConcurrency, err := intValue(lookup, "REPORT_WORKER_CONCURRENCY", 4, 1, 16)
 	if err != nil {
 		return Config{}, err
@@ -150,6 +166,42 @@ func Load(lookup LookupFunc) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	summaryQueryEnabled, err := boolValue(lookup, "SUMMARY_QUERY_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	generationCacheEnabled, err := boolValue(lookup, "GENERATION_CACHE_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	staleRevalidationEnabled, err := boolValue(lookup, "STALE_REVALIDATION_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	heavyChunkEnabled, err := boolValue(lookup, "HEAVY_CHUNK_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	heavyChunkTenantReports, err := parseTenantReportList("HEAVY_CHUNK_TENANT_REPORTS", valueOrDefault(lookup, "HEAVY_CHUNK_TENANT_REPORTS", ""))
+	if err != nil {
+		return Config{}, err
+	}
+	scheduleChunkEnabled, err := boolValue(lookup, "SCHEDULE_CHUNK_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	if generationCacheEnabled && !summaryQueryEnabled {
+		return Config{}, errors.New("GENERATION_CACHE_ENABLED requires SUMMARY_QUERY_ENABLED")
+	}
+	if staleRevalidationEnabled && !generationCacheEnabled {
+		return Config{}, errors.New("STALE_REVALIDATION_ENABLED requires GENERATION_CACHE_ENABLED")
+	}
+	if scheduleChunkEnabled && !heavyChunkEnabled {
+		return Config{}, errors.New("SCHEDULE_CHUNK_ENABLED requires HEAVY_CHUNK_ENABLED")
+	}
+	if heavyChunkEnabled && len(heavyChunkTenantReports) == 0 {
+		return Config{}, errors.New("HEAVY_CHUNK_ENABLED requires at least one HEAVY_CHUNK_TENANT_REPORTS entry")
+	}
 
 	sessionKey, err := decodeKey("SESSION_HMAC_KEY", values["SESSION_HMAC_KEY"], 32, false)
 	if err != nil {
@@ -174,6 +226,8 @@ func Load(lookup LookupFunc) (Config, error) {
 		LineMessagingAccessToken:     lineMessagingAccessToken,
 		SMLAllowedPrefixes:           allowedPrefixes,
 		SMLAllowedHosts:              allowedHosts,
+		SMLAllowPublicEndpoints:      allowPublicEndpoints,
+		SMLAllowedPorts:              allowedPorts,
 		DatabaseMaxConnections:       databaseMaxConnections,
 		DatabaseMinConnections:       databaseMinConnections,
 		ReportWorkerConcurrency:      workerConcurrency,
@@ -182,7 +236,68 @@ func Load(lookup LookupFunc) (Config, error) {
 		SnapshotFirstTenantIDs:       snapshotFirstTenantIDs,
 		SmartSchedulePeriodsEnabled:  smartSchedulePeriodsEnabled,
 		SmartSchedulePeriodTenantIDs: smartSchedulePeriodTenantIDs,
+		SummaryQueryEnabled:          summaryQueryEnabled,
+		GenerationCacheEnabled:       generationCacheEnabled,
+		StaleRevalidationEnabled:     staleRevalidationEnabled,
+		HeavyChunkEnabled:            heavyChunkEnabled,
+		HeavyChunkTenantReports:      heavyChunkTenantReports,
+		ScheduleChunkEnabled:         scheduleChunkEnabled,
 	}, nil
+}
+
+func parseAllowedPorts(raw string) ([]uint16, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "*" {
+		return []uint16{}, nil
+	}
+	if strings.Contains(raw, "*") {
+		return nil, errors.New("SML_ALLOWED_PORTS must be * or contain comma-separated ports between 1 and 65535")
+	}
+	parts := strings.Split(raw, ",")
+	ports := make([]uint16, 0, len(parts))
+	seen := make(map[uint16]struct{}, len(parts))
+	for _, part := range parts {
+		value, err := strconv.ParseUint(strings.TrimSpace(part), 10, 16)
+		if err != nil || value == 0 {
+			return nil, errors.New("SML_ALLOWED_PORTS must be * or contain comma-separated ports between 1 and 65535")
+		}
+		port := uint16(value)
+		if _, duplicate := seen[port]; duplicate {
+			return nil, errors.New("SML_ALLOWED_PORTS must not contain duplicate ports")
+		}
+		seen[port] = struct{}{}
+		ports = append(ports, port)
+	}
+	return ports, nil
+}
+
+func parseTenantReportList(name, raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}, nil
+	}
+	allowed := map[string]struct{}{"stock_balance": {}, "ar_customer_movement": {}}
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		fields := strings.Split(strings.TrimSpace(part), "/")
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("%s must contain comma-separated tenant-uuid/report-key pairs", name)
+		}
+		tenantID, err := uuid.Parse(fields[0])
+		if err != nil {
+			return nil, fmt.Errorf("%s contains an invalid tenant UUID", name)
+		}
+		reportKey := strings.TrimSpace(fields[1])
+		if _, ok := allowed[reportKey]; !ok {
+			return nil, fmt.Errorf("%s supports only stock_balance and ar_customer_movement", name)
+		}
+		canonical := tenantID.String() + "/" + reportKey
+		if _, exists := seen[canonical]; !exists {
+			seen[canonical] = struct{}{}
+			result = append(result, canonical)
+		}
+	}
+	return result, nil
 }
 
 func boolValue(lookup LookupFunc, name string, fallback bool) (bool, error) {

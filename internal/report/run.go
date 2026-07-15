@@ -22,6 +22,21 @@ const (
 	ResultSummary ResultKind = "SUMMARY"
 )
 
+type ExecutionStrategy string
+
+const (
+	ExecutionDirect  ExecutionStrategy = "DIRECT"
+	ExecutionChunked ExecutionStrategy = "CHUNKED"
+)
+
+type SourceConsistency string
+
+const (
+	ConsistencyStatement    SourceConsistency = "STATEMENT"
+	ConsistencySerialWindow SourceConsistency = "SERIAL_WINDOW"
+	ConsistencyChunkWindow  SourceConsistency = "CHUNK_WINDOW"
+)
+
 type ProgressPhase string
 
 const (
@@ -100,6 +115,11 @@ type Run struct {
 	UpdatedAt               time.Time
 	ReportDefinitionVersion string
 	DataSourceVersion       int
+	QueryPlanFingerprint    string
+	ExecutionStrategy       ExecutionStrategy
+	SourceConsistency       SourceConsistency
+	SourceStartedAt         *time.Time
+	SourceFinishedAt        *time.Time
 	ProgressPhase           ProgressPhase
 	ProgressSequence        int
 	ProgressCompletedSteps  int
@@ -108,6 +128,8 @@ type Run struct {
 	ExpectedP50MS           int64
 	ExpectedP90MS           int64
 	ExpectedSampleCount     int
+	ProgressCompletedChunks int
+	ProgressTotalChunks     int
 	QueuePosition           int
 }
 
@@ -115,4 +137,18 @@ type RowsPage struct {
 	Rows        []map[string]string
 	NextOrdinal int
 	HasMore     bool
+}
+
+type ChunkManifest struct {
+	Number     int
+	Key        string
+	CursorFrom string
+	CursorTo   string
+	UnitKeys   []string
+}
+
+type LeaseRecovery struct {
+	RequeuedClaimed   int
+	FailedRunning     int
+	CancelledSiblings int
 }

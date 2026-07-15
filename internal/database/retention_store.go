@@ -47,6 +47,35 @@ func (store *RetentionStore) Run(ctx context.Context, policy retention.Policy, n
 		)`, snapshotCutoff, policy.BatchSize); err != nil {
 		return retention.Counts{}, err
 	}
+	// Clear composite references before deleting expired generations. Keeping
+	// tenant_id in each foreign key makes cross-tenant pointers impossible; it
+	// also means PostgreSQL cannot use a broad ON DELETE SET NULL on both columns.
+	for _, statement := range []string{
+		`update dashboard_generation_heads set published_generation_id = null, updated_at = $3
+		 where published_generation_id in (
+		   select id from dashboard_generations
+		   where coalesce(published_at, finished_at, created_at) <= $1
+		   order by coalesce(published_at, finished_at, created_at) limit $2
+		 )`,
+		`update dashboard_refreshes set generation_id = null, updated_at = $3
+		 where generation_id in (
+		   select id from dashboard_generations
+		   where coalesce(published_at, finished_at, created_at) <= $1
+		   order by coalesce(published_at, finished_at, created_at) limit $2
+		 )`,
+	} {
+		if _, err := tx.Exec(ctx, statement, snapshotCutoff, policy.BatchSize, now); err != nil {
+			return retention.Counts{}, fmt.Errorf("clear expired dashboard generation reference: %w", err)
+		}
+	}
+	if counts.DashboardGenerations, err = execRetention(ctx, tx, `
+		delete from dashboard_generations where id in (
+		  select id from dashboard_generations
+		  where coalesce(published_at, finished_at, created_at) <= $1
+		  order by coalesce(published_at, finished_at, created_at) limit $2
+		)`, snapshotCutoff, policy.BatchSize); err != nil {
+		return retention.Counts{}, err
+	}
 	if counts.ScrubbedReportRuns, err = execRetention(ctx, tx, `
 		update report_runs
 		set summary_json = '{}'::jsonb, reconciliation_json = '{}'::jsonb,

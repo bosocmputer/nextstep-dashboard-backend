@@ -2,20 +2,43 @@ package sml
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net"
 	"net/netip"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 )
+
+// CanonicalHostKey identifies the JavaWS origin without retaining or exposing
+// the customer's hostname. Paths intentionally do not affect host concurrency.
+func CanonicalHostKey(rawURL string) ([32]byte, error) {
+	endpoint, err := url.Parse(rawURL)
+	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+		return [32]byte{}, errors.New("SML endpoint URL is invalid")
+	}
+	port := endpoint.Port()
+	if port == "" {
+		if endpoint.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	canonical := strings.ToLower(endpoint.Scheme) + "://" + net.JoinHostPort(strings.ToLower(strings.TrimSuffix(endpoint.Hostname(), ".")), port)
+	return sha256.Sum256([]byte(canonical)), nil
+}
 
 type LookupNetIPFunc func(context.Context, string, string) ([]net.IP, error)
 
 type EndpointPolicy struct {
-	AllowedPrefixes []netip.Prefix
-	AllowedHosts    []string
-	LookupNetIP     LookupNetIPFunc
+	AllowedPrefixes      []netip.Prefix
+	AllowedHosts         []string
+	AllowPublicEndpoints bool
+	AllowedPorts         []uint16
+	LookupNetIP          LookupNetIPFunc
 }
 
 type ResolvedEndpoint struct {
@@ -37,8 +60,20 @@ func (policy EndpointPolicy) Resolve(ctx context.Context, rawURL string) (Resolv
 	if endpoint.RawQuery != "" || endpoint.RawPath != "" {
 		return ResolvedEndpoint{}, errors.New("SML endpoint must not include a query or encoded path")
 	}
-	if len(policy.AllowedPrefixes) == 0 && len(policy.AllowedHosts) == 0 {
+	if len(policy.AllowedPrefixes) == 0 && len(policy.AllowedHosts) == 0 && !policy.AllowPublicEndpoints {
 		return ResolvedEndpoint{}, errors.New("SML endpoint allowlist is empty")
+	}
+	port := endpoint.Port()
+	if port == "" {
+		if endpoint.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	parsedPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || !policy.allowedPort(uint16(parsedPort)) {
+		return ResolvedEndpoint{}, errors.New("SML endpoint port is not permitted")
 	}
 	endpoint.Path = normalizeJavaWSPath(endpoint.Path)
 
@@ -66,12 +101,26 @@ func (policy EndpointPolicy) Resolve(ctx context.Context, rawURL string) (Resolv
 		}
 	}
 	for _, address := range addresses {
-		allowedByHostname := policy.allowedHost(hostname) && address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback()
-		if isAlwaysBlockedAddress(address) || (!policy.allowed(address) && !allowedByHostname) {
+		isSafePublicAddress := address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() && !isAlwaysBlockedAddress(address)
+		allowedByHostname := policy.allowedHost(hostname) && isSafePublicAddress
+		allowedByPublicEndpoint := policy.AllowPublicEndpoints && isSafePublicAddress
+		if isAlwaysBlockedAddress(address) || (!policy.allowed(address) && !allowedByHostname && !allowedByPublicEndpoint) {
 			return ResolvedEndpoint{}, errors.New("SML endpoint address is not permitted")
 		}
 	}
 	return ResolvedEndpoint{URL: endpoint, IP: addresses[0]}, nil
+}
+
+func (policy EndpointPolicy) allowedPort(port uint16) bool {
+	if len(policy.AllowedPorts) == 0 {
+		return true
+	}
+	for _, allowed := range policy.AllowedPorts {
+		if port == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func (policy EndpointPolicy) allowedHost(hostname string) bool {

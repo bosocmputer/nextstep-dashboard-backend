@@ -322,6 +322,54 @@ paths:
         '409': {$ref: '#/components/responses/Conflict'}
         '404': {$ref: '#/components/responses/NotFound'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/recipients/{recipientId}/invitation:
+    post:
+      tags: [Admin configuration]
+      operationId: reissueRecipientInvitation
+      description: Replaces the unused invitation for a pending recipient. The previous invitation reference becomes invalid immediately.
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/RecipientID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200':
+          description: Pending recipient with a newly issued one-time invitation URL.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Recipient'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/recipients/{recipientId}/permission-dependencies:
+    get:
+      tags: [Admin configuration]
+      operationId: getRecipientPermissionDependencies
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/RecipientID'}
+      responses:
+        '200':
+          description: Active schedules that currently require each recipient permission. Schedule details are bounded to five per report.
+          content: {application/json: {schema: {$ref: '#/components/schemas/PermissionDependencies'}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/admin/tenants/{tenantId}/schedule-recipient-options/query:
+    post:
+      tags: [Admin configuration]
+      operationId: queryScheduleRecipientOptions
+      description: Read-only, tenant-scoped recipient eligibility query. This operation never changes a schedule.
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/TenantID'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleRecipientOptionsInput'}}}
+      responses:
+        '200':
+          description: Paginated recipients plus every currently selected recipient, including invalid selections.
+          content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleRecipientOptions'}}}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/tenants/{tenantId}/recipients/{recipientId}:
     get:
       tags: [Admin configuration]
@@ -603,6 +651,61 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ViewerMe'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/viewer/delivery-contexts:
+    post:
+      tags: [Viewer]
+      operationId: resolveViewerDeliveryContext
+      security: [{ViewerSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DeliveryContextResolveInput'}
+      responses:
+        '200':
+          description: Exact immutable report set for the referenced delivery.
+          headers:
+            Cache-Control: {schema: {type: string, example: no-store}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeliveryContext'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/viewer/tenants/{tenantId}/deliveries/{deliveryId}/context:
+    get:
+      tags: [Viewer]
+      operationId: getViewerDeliveryContext
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {name: deliveryId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Exact immutable report set for one authorized delivery.
+          headers:
+            Cache-Control: {schema: {type: string, example: no-store}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeliveryContext'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/viewer/tenants/{tenantId}/deliveries/{deliveryId}/reports/{reportKey}:
+    get:
+      tags: [Viewer]
+      operationId: getViewerDeliveryReport
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {name: deliveryId, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/ReportKey'}
+      responses:
+        '200':
+          description: One report snapshot from the immutable delivery report set.
+          headers:
+            Cache-Control: {schema: {type: string, example: no-store}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeliveryReportContext'}
         '403': {$ref: '#/components/responses/Forbidden'}
   /api/v1/viewer/logout:
     post:
@@ -1006,6 +1109,7 @@ components:
         version: {type: integer, minimum: 1}
         smlReadiness: {type: string, enum: [UNCONFIGURED, UNTESTED, READY, FAILED]}
         nextScheduleAt: {type: string, format: date-time, nullable: true}
+        viewerUrl: {type: string, format: uri, readOnly: true, description: Canonical Dashboard link generated from configured PUBLIC_BASE_URL; opening it never grants access.}
         createdAt: {type: string, format: date-time}
         updatedAt: {type: string, format: date-time}
     TenantInput:
@@ -1042,6 +1146,7 @@ components:
         fastIntervalMinutes: {type: integer, enum: [5, 10, 15, 30, 60], nullable: true}
         standardIntervalMinutes: {type: integer, enum: [15, 30, 60], nullable: true}
         heavyIntervalMinutes: {type: integer, enum: [30, 60, 120], nullable: true}
+        rolloutStatus: {type: string, enum: [ACTIVE, SNAPSHOT_FIRST_DISABLED, TENANT_NOT_ENABLED, REVALIDATION_DISABLED]}
         version: {type: integer, minimum: 0}
     DashboardRefreshPolicyInput:
       type: object
@@ -1113,6 +1218,62 @@ components:
       properties:
         reportKeys: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
         version: {type: integer, minimum: 1}
+    PermissionDependencies:
+      type: object
+      additionalProperties: false
+      required: [recipientId, permissionsVersion, items]
+      properties:
+        recipientId: {type: string, format: uuid}
+        permissionsVersion: {type: integer, minimum: 1}
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [reportKey, activeScheduleCount, schedules, additionalCount]
+            properties:
+              reportKey: {$ref: '#/components/schemas/ReportKey'}
+              activeScheduleCount: {type: integer, minimum: 1}
+              schedules:
+                type: array
+                maxItems: 5
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [id, name]
+                  properties:
+                    id: {type: string, format: uuid}
+                    name: {type: string}
+              additionalCount: {type: integer, minimum: 0}
+    ScheduleRecipientOptionsInput:
+      type: object
+      additionalProperties: false
+      required: [reportKeys, selectedRecipientIds, search, page, pageSize]
+      properties:
+        reportKeys: {type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+        selectedRecipientIds: {type: array, maxItems: 500, uniqueItems: true, items: {type: string, format: uuid}}
+        search: {type: string, maxLength: 160}
+        page: {type: integer, minimum: 0}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+    ScheduleRecipientOption:
+      allOf:
+        - {$ref: '#/components/schemas/Recipient'}
+        - type: object
+          required: [eligible, missingReportKeys]
+          properties:
+            eligible: {type: boolean}
+            missingReportKeys: {type: array, items: {$ref: '#/components/schemas/ReportKey'}}
+    ScheduleRecipientOptions:
+      type: object
+      additionalProperties: false
+      required: [data, selected, page, pageSize, total, hasMore]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/ScheduleRecipientOption'}}
+        selected: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ScheduleRecipientOption'}}
+        page: {type: integer, minimum: 0}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+        hasMore: {type: boolean}
     ReportKey:
       type: string
       enum: [sales_goods_services, purchase_goods_payables, gross_profit_by_product, gross_profit_by_ar_customer, stock_balance, stock_reorder, ar_customer_movement, ar_debt_receipt, cash_bank_receipts, cash_bank_payments]
@@ -1299,6 +1460,9 @@ components:
         tenantName: {type: string, description: Present on Admin report history responses.}
         reportKey: {$ref: '#/components/schemas/ReportKey'}
         status: {$ref: '#/components/schemas/ReportRunStatus'}
+        runtimeStatus: {type: string, enum: [ACTIVE, STALLED], description: Operational lease health for Admin monitoring.}
+        retryAvailableAt: {type: string, format: date-time, nullable: true}
+        waitReason: {type: string, enum: [TENANT_BUSY, HOST_BUSY, TENANT_COOLDOWN, HOST_COOLDOWN, SCHEDULE_RESERVED]}
         resultKind: {type: string, enum: [SUMMARY, DETAIL]}
         periodPreset: {type: string}
         dateFrom: {type: string, format: date, nullable: true}
@@ -1456,6 +1620,8 @@ components:
         freshnessStatus: {type: string, enum: [FRESH, STALE, EXPIRED, MISSING, REFRESHING, REFRESH_FAILED]}
         reportDefinitionVersion: {type: string}
         dataSourceVersion: {type: integer, minimum: 0}
+        queryPlanFingerprint: {type: string, pattern: '^[0-9a-f]{64}$'}
+        sourceConsistency: {type: string, enum: [STATEMENT, SERIAL_WINDOW, CHUNK_WINDOW]}
         detailsAvailable: {type: boolean}
         detailsExpiresAt: {type: string, format: date-time, nullable: true}
     ExecutiveOverview:
@@ -1465,6 +1631,14 @@ components:
       properties:
         tenantId: {type: string, format: uuid}
         timezone: {type: string, enum: [Asia/Bangkok]}
+        generationId: {type: string, format: uuid, nullable: true}
+        generationKey: {type: string, pattern: '^[0-9a-f]{64}$'}
+        requestedPeriod: {$ref: '#/components/schemas/ReportPeriod'}
+        dataStatus: {type: string, enum: [FRESH, STALE, EXPIRED, MISSING, REFRESHING, REFRESH_FAILED]}
+        sourceConsistency: {type: string, enum: [STATEMENT, SERIAL_WINDOW, CHUNK_WINDOW]}
+        sourceStartedAt: {type: string, format: date-time, nullable: true}
+        sourceFinishedAt: {type: string, format: date-time, nullable: true}
+        publishedAt: {type: string, format: date-time, nullable: true}
         items:
           type: array
           maxItems: 10
@@ -1482,6 +1656,10 @@ components:
         expectedP50Ms: {type: integer, minimum: 1}
         expectedP90Ms: {type: integer, minimum: 1}
         expectedSampleCount: {type: integer, minimum: 0}
+        executionStrategy: {type: string, enum: [DIRECT, CHUNKED]}
+        sourceConsistency: {type: string, enum: [STATEMENT, SERIAL_WINDOW, CHUNK_WINDOW]}
+        completedChunks: {type: integer, minimum: 0}
+        totalChunks: {type: integer, minimum: 0}
     DashboardRefresh:
       type: object
       additionalProperties: false
@@ -1489,6 +1667,7 @@ components:
       properties:
         id: {type: string, format: uuid}
         tenantId: {type: string, format: uuid}
+        generationId: {type: string, format: uuid, nullable: true}
         status: {type: string, enum: [QUEUED, RUNNING, PARTIAL, SUCCEEDED, FAILED]}
         total: {type: integer, minimum: 1, maximum: 10}
         completed: {type: integer, minimum: 0, maximum: 10}
@@ -1528,6 +1707,12 @@ components:
       properties:
         refreshId: {type: string, format: uuid}
         tenantId: {type: string, format: uuid}
+        generationId: {type: string, format: uuid, nullable: true}
+        generationKey: {type: string, pattern: '^[0-9a-f]{64}$'}
+        sourceConsistency: {type: string, enum: [STATEMENT, SERIAL_WINDOW, CHUNK_WINDOW]}
+        sourceStartedAt: {type: string, format: date-time, nullable: true}
+        sourceFinishedAt: {type: string, format: date-time, nullable: true}
+        publishedAt: {type: string, format: date-time, nullable: true}
         status: {type: string, enum: [PARTIAL, SUCCEEDED, FAILED]}
         items:
           type: array
@@ -1568,6 +1753,7 @@ components:
         idToken: {type: string, minLength: 32, maxLength: 8192, writeOnly: true}
         invitationReference: {type: string, minLength: 32, maxLength: 128, writeOnly: true}
         deliveryReference: {type: string, minLength: 32, maxLength: 512, writeOnly: true}
+        expectedTenantId: {type: string, format: uuid, description: Explicit tenant from the viewer route; mismatch is rejected without redirecting to another tenant.}
     ViewerMe:
       type: object
       required: [recipientId, displayName, expiresAt]
@@ -1576,6 +1762,8 @@ components:
         displayName: {type: string}
         csrfToken: {type: string, writeOnly: true}
         expiresAt: {type: string, format: date-time}
+        deliveryContext: {$ref: '#/components/schemas/DeliveryContext'}
+        deliveryContextErrorCode: {type: string, enum: [DELIVERY_CONTEXT_UNAVAILABLE, DELIVERY_CONTEXT_PERMISSION_CHANGED]}
     ViewerTenant:
       type: object
       required: [id, name, timezone, reportKeys]
@@ -1584,14 +1772,58 @@ components:
         name: {type: string}
         timezone: {type: string}
         reportKeys: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
+    DeliveryContextResolveInput:
+      type: object
+      additionalProperties: false
+      required: [deliveryReference, expectedTenantId]
+      properties:
+        deliveryReference: {type: string, minLength: 32, maxLength: 512, writeOnly: true}
+        expectedTenantId: {type: string, format: uuid}
+    DeliverySnapshotStatus:
+      type: string
+      enum: [AVAILABLE, DETAIL_EXPIRED, SNAPSHOT_EXPIRED, UNAVAILABLE]
+    DeliveryContextReport:
+      type: object
+      required: [reportKey, label, reportRunId, snapshotStatus]
+      properties:
+        reportKey: {$ref: '#/components/schemas/ReportKey'}
+        label: {type: string}
+        position: {type: integer, minimum: 1, maximum: 10}
+        reportRunId: {type: string, format: uuid}
+        snapshotStatus: {$ref: '#/components/schemas/DeliverySnapshotStatus'}
+        summary: {$ref: '#/components/schemas/DashboardSnapshot'}
+    DeliveryContext:
+      type: object
+      additionalProperties: false
+      required: [deliveryId, tenantId, scheduledFor, materializationVersion, orderStatus, dataStatus, reports]
+      properties:
+        deliveryId: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid}
+        scheduledFor: {type: string, format: date-time}
+        materializationVersion: {type: integer, minimum: 1}
+        orderStatus: {type: string, enum: [EXACT, LEGACY]}
+        dataStatus: {type: string, enum: [AVAILABLE, PARTIAL_EXPIRED, EXPIRED]}
+        reports: {type: array, minItems: 1, maxItems: 10, items: {$ref: '#/components/schemas/DeliveryContextReport'}}
+    DeliveryReportContext:
+      type: object
+      additionalProperties: false
+      required: [deliveryId, tenantId, scheduledFor, orderStatus, report]
+      properties:
+        deliveryId: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid}
+        scheduledFor: {type: string, format: date-time}
+        orderStatus: {type: string, enum: [EXACT, LEGACY]}
+        report: {$ref: '#/components/schemas/DeliveryContextReport'}
     Delivery:
       type: object
-      required: [id, tenantId, tenantName, recipientDisplayName, status, attempt, createdAt, expiresAt]
+      required: [id, tenantId, tenantName, recipientDisplayName, reportKeys, reportCount, status, attempt, createdAt, expiresAt]
       properties:
         id: {type: string, format: uuid}
         tenantId: {type: string, format: uuid}
         tenantName: {type: string}
         recipientDisplayName: {type: string, description: Decrypted recipient label for authenticated Admin display only.}
+        reportKeys: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/ReportKey'}, description: Immutable report set materialized for this delivery occurrence.}
+        reportCount: {type: integer, minimum: 0, maximum: 10}
         status: {type: string, enum: [PENDING, SENDING, ACCEPTED, RETRY_WAIT, UNCERTAIN, FAILED_PERMANENT]}
         attempt: {type: integer, minimum: 0}
         safeErrorCode: {type: string, nullable: true}

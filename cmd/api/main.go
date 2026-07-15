@@ -48,21 +48,23 @@ func main() {
 		os.Exit(1)
 	}
 	adminService := auth.NewAdminService(database.NewAdminStore(pool), sessionManager, cfg.AdminPasswordHash, rand.Reader, time.Now)
-	tenantService := tenant.NewService(database.NewTenantStore(pool), time.Now)
-	refreshPolicyService := report.NewRefreshPolicyService(database.NewRefreshPolicyStore(pool), time.Now)
+	tenantService := tenant.NewService(database.NewTenantStore(pool), time.Now).ConfigurePublicBaseURL(cfg.PublicBaseURL.String())
+	refreshPolicyService := report.NewRefreshPolicyService(database.NewRefreshPolicyStore(pool), time.Now).
+		ConfigureRollout(cfg.SnapshotFirstEnabled, cfg.SnapshotFirstTenantIDs, cfg.StaleRevalidationEnabled)
 	secretBox, err := secret.NewBox(cfg.EncryptionMasterKey, cfg.EncryptionKeyID, rand.Reader)
 	if err != nil {
 		logger.Error("create secret box", "error", "encryption configuration rejected")
 		os.Exit(1)
 	}
-	smlPolicy := sml.EndpointPolicy{AllowedPrefixes: cfg.SMLAllowedPrefixes, AllowedHosts: cfg.SMLAllowedHosts}
+	smlPolicy := sml.EndpointPolicy{AllowedPrefixes: cfg.SMLAllowedPrefixes, AllowedHosts: cfg.SMLAllowedHosts, AllowPublicEndpoints: cfg.SMLAllowPublicEndpoints, AllowedPorts: cfg.SMLAllowedPorts}
 	smlClient := sml.NewClient(smlPolicy, 30*time.Second, 32*1024*1024, 200_000)
 	smlService := sml.NewConnectionService(database.NewSMLConnectionStore(pool), secretBox, smlPolicy, smlClient, time.Now)
 	recipientService := recipient.NewService(database.NewRecipientStore(pool), secretBox, sessionManager, rand.Reader, cfg.PublicBaseURL.String(), time.Now)
 	lineVerifier := line.NewIDTokenVerifier(cfg.LineLoginChannelID, line.DefaultIDTokenVerifyEndpoint, 10*time.Second, time.Now)
 	viewerService := viewer.NewService(lineVerifier, recipientService, database.NewViewerStore(pool), sessionManager, time.Now)
-	viewerReportService := viewer.NewReportService(viewerService, database.NewReportStore(pool), time.Now).
-		ConfigureSnapshotFirst(cfg.SnapshotFirstEnabled, cfg.SnapshotFirstTenantIDs)
+	viewerReportService := viewer.NewReportService(viewerService, database.NewReportStore(pool).ConfigureGenerationCache(cfg.GenerationCacheEnabled), time.Now).
+		ConfigureSnapshotFirst(cfg.SnapshotFirstEnabled, cfg.SnapshotFirstTenantIDs).
+		ConfigureStaleRevalidation(cfg.StaleRevalidationEnabled)
 	periodObserver := func(preset report.Preset, mode report.ParameterKind, result string) {
 		logger.Info("schedule period resolved", "event", "schedule_period_resolution", "preset", preset, "mode", mode, "result", result, "schedulePeriodResolutionTotal", 1)
 	}

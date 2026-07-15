@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"time"
 )
@@ -25,11 +26,20 @@ type Connection struct {
 type SafeError struct {
 	Code      string
 	Retryable bool
+	Phase     TransportPhase
 }
 
 func (err *SafeError) Error() string {
 	return err.Code
 }
+
+type TransportPhase string
+
+const (
+	BeforeRequestSent        TransportPhase = "BEFORE_REQUEST_SENT"
+	RequestSentResultUnknown TransportPhase = "REQUEST_SENT_RESULT_UNKNOWN"
+	ResponseStarted          TransportPhase = "RESPONSE_STARTED"
+)
 
 type Client struct {
 	policy               EndpointPolicy
@@ -37,6 +47,11 @@ type Client struct {
 	maximumResponseBytes int64
 	maximumRows          int
 }
+
+const (
+	defaultConnectTimeout      = 10 * time.Second
+	defaultTLSHandshakeTimeout = 10 * time.Second
+)
 
 func NewClient(policy EndpointPolicy, timeout time.Duration, maximumResponseBytes int64, maximumRows int) *Client {
 	return &Client{policy: policy, timeout: timeout, maximumResponseBytes: maximumResponseBytes, maximumRows: maximumRows}
@@ -67,20 +82,33 @@ func (client *Client) Query(ctx context.Context, connection Connection, sql stri
 	if connection.Username != "" || connection.Password != "" {
 		request.SetBasicAuth(connection.Username, connection.Password)
 	}
+	wroteRequest, responseStarted := false, false
+	trace := &httptrace.ClientTrace{
+		WroteRequest:         func(httptrace.WroteRequestInfo) { wroteRequest = true },
+		GotFirstResponseByte: func() { responseStarted = true },
+	}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
 
 	httpClient, transport := pinnedHTTPClient(resolved, client.timeout)
 	defer transport.CloseIdleConnections()
 	response, err := httpClient.Do(request)
 	if err != nil {
-		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			return nil, &SafeError{Code: "SML_TIMEOUT", Retryable: true}
+		phase := BeforeRequestSent
+		if wroteRequest {
+			phase = RequestSentResultUnknown
 		}
-		return nil, &SafeError{Code: "SML_UNREACHABLE", Retryable: true}
+		if responseStarted {
+			phase = ResponseStarted
+		}
+		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+			return nil, &SafeError{Code: "SML_TIMEOUT", Retryable: phase == BeforeRequestSent, Phase: phase}
+		}
+		return nil, &SafeError{Code: "SML_UNREACHABLE", Retryable: phase == BeforeRequestSent, Phase: phase}
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, client.maximumResponseBytes+1))
 	if err != nil {
-		return nil, &SafeError{Code: "SML_RESPONSE_READ_FAILED", Retryable: true}
+		return nil, &SafeError{Code: "SML_RESPONSE_READ_FAILED", Retryable: false, Phase: ResponseStarted}
 	}
 	if int64(len(body)) > client.maximumResponseBytes {
 		return nil, &SafeError{Code: "SML_RESPONSE_TOO_LARGE", Retryable: false}
@@ -118,14 +146,17 @@ func pinnedHTTPClient(endpoint ResolvedEndpoint, timeout time.Duration) (*http.C
 		}
 	}
 	dialAddress := net.JoinHostPort(endpoint.IP.String(), port)
-	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+	// Connection establishment has a short, independent budget. The request
+	// deadline may be five minutes for heavy reports, but an unreachable host
+	// must not consume that entire budget before any bytes are sent.
+	dialer := &net.Dialer{Timeout: defaultConnectTimeout, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, dialAddress)
 		},
 		ForceAttemptHTTP2:     true,
-		TLSHandshakeTimeout:   10 * time.Second,
+		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
 		ResponseHeaderTimeout: timeout,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,

@@ -47,10 +47,73 @@ require_value() {
   fi
 }
 
-required_keys='DASHBOARD_DOMAIN BACKEND_SHA FRONTEND_SHA FRONTEND_BIND_ADDRESS POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL ADMIN_USERNAME ADMIN_PASSWORD_HASH SESSION_HMAC_KEY ENCRYPTION_MASTER_KEY ENCRYPTION_KEY_ID SML_ALLOWED_CIDRS SML_ALLOWED_HOSTS LINE_LOGIN_CHANNEL_ID LINE_MESSAGING_CHANNEL_ACCESS_TOKEN'
+require_key() {
+  if ! env_value "$1" >/dev/null; then
+    echo "Environment key must appear exactly once: $1" >&2
+    exit 1
+  fi
+}
+
+required_keys='DASHBOARD_DOMAIN BACKEND_SHA FRONTEND_SHA FRONTEND_BIND_ADDRESS POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD DATABASE_URL ADMIN_USERNAME ADMIN_PASSWORD_HASH SESSION_HMAC_KEY ENCRYPTION_MASTER_KEY ENCRYPTION_KEY_ID SML_ALLOWED_CIDRS SML_ALLOW_PUBLIC_ENDPOINTS SML_ALLOWED_PORTS LINE_LOGIN_CHANNEL_ID LINE_MESSAGING_CHANNEL_ACCESS_TOKEN'
 for key in $required_keys; do
   require_value "$key"
 done
+require_key SML_ALLOWED_HOSTS
+
+feature_keys='SNAPSHOT_FIRST_ENABLED SNAPSHOT_FIRST_TENANT_IDS SUMMARY_QUERY_ENABLED GENERATION_CACHE_ENABLED STALE_REVALIDATION_ENABLED HEAVY_CHUNK_ENABLED HEAVY_CHUNK_TENANT_REPORTS SCHEDULE_CHUNK_ENABLED SMART_SCHEDULE_PERIODS_ENABLED SMART_SCHEDULE_PERIOD_TENANT_IDS REPORT_GLOBAL_QUERY_CONCURRENCY REPORT_HOST_QUERY_CONCURRENCY'
+for key in $feature_keys; do
+  require_key "$key"
+done
+
+for key in SML_ALLOW_PUBLIC_ENDPOINTS SNAPSHOT_FIRST_ENABLED SUMMARY_QUERY_ENABLED GENERATION_CACHE_ENABLED STALE_REVALIDATION_ENABLED HEAVY_CHUNK_ENABLED SCHEDULE_CHUNK_ENABLED SMART_SCHEDULE_PERIODS_ENABLED; do
+  value=$(env_value "$key")
+  case "$value" in
+    true|false) ;;
+    *) echo "$key must be true or false" >&2; exit 1 ;;
+  esac
+done
+
+old_ifs=$IFS
+allowed_ports=$(env_value SML_ALLOWED_PORTS)
+if [ "$allowed_ports" != '*' ]; then
+  IFS=,
+  for port in $allowed_ports; do
+    if ! printf '%s' "$port" | grep -Eq '^[0-9]{1,5}$' || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      echo "SML_ALLOWED_PORTS must be * or contain comma-separated ports between 1 and 65535" >&2
+      exit 1
+    fi
+  done
+fi
+IFS=$old_ifs
+
+global_query_concurrency=$(env_value REPORT_GLOBAL_QUERY_CONCURRENCY)
+host_query_concurrency=$(env_value REPORT_HOST_QUERY_CONCURRENCY)
+if ! printf '%s' "$global_query_concurrency" | grep -Eq '^[0-9]+$' ||
+   [ "$global_query_concurrency" -lt 1 ] || [ "$global_query_concurrency" -gt 32 ]; then
+  echo "REPORT_GLOBAL_QUERY_CONCURRENCY must be an integer between 1 and 32" >&2
+  exit 1
+fi
+if ! printf '%s' "$host_query_concurrency" | grep -Eq '^[0-9]+$' ||
+   [ "$host_query_concurrency" -lt 1 ] || [ "$host_query_concurrency" -gt 16 ]; then
+  echo "REPORT_HOST_QUERY_CONCURRENCY must be an integer between 1 and 16" >&2
+  exit 1
+fi
+if [ "$(env_value GENERATION_CACHE_ENABLED)" = true ] && [ "$(env_value SUMMARY_QUERY_ENABLED)" != true ]; then
+  echo "GENERATION_CACHE_ENABLED requires SUMMARY_QUERY_ENABLED" >&2
+  exit 1
+fi
+if [ "$(env_value STALE_REVALIDATION_ENABLED)" = true ] && [ "$(env_value GENERATION_CACHE_ENABLED)" != true ]; then
+  echo "STALE_REVALIDATION_ENABLED requires GENERATION_CACHE_ENABLED" >&2
+  exit 1
+fi
+if [ "$(env_value SCHEDULE_CHUNK_ENABLED)" = true ] && [ "$(env_value HEAVY_CHUNK_ENABLED)" != true ]; then
+  echo "SCHEDULE_CHUNK_ENABLED requires HEAVY_CHUNK_ENABLED" >&2
+  exit 1
+fi
+if [ "$(env_value HEAVY_CHUNK_ENABLED)" = true ] && [ -z "$(env_value HEAVY_CHUNK_TENANT_REPORTS)" ]; then
+  echo "HEAVY_CHUNK_ENABLED requires an explicit HEAVY_CHUNK_TENANT_REPORTS allowlist" >&2
+  exit 1
+fi
 
 mode_value=$(file_mode "$env_file")
 case "$mode_value" in

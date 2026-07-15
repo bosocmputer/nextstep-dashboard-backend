@@ -143,19 +143,19 @@ func buildDashboardMetrics(key Key, current, previous SummaryResult, currentStep
 			{key: "net_cost", label: "ต้นทุนสุทธิ", unit: UnitTHB, current: stringValue(current.Reconciliation["netCost"]), previous: stringValue(previous.Reconciliation["netCost"])},
 		}, nil
 	case StockBalance:
-		currentIn, err := sumField(currentSteps["rows"], "amount_in")
+		currentIn, err := metricOrSum(current, "amount_in", currentSteps["rows"], "amount_in")
 		if err != nil {
 			return nil, err
 		}
-		previousIn, err := sumField(previousSteps["rows"], "amount_in")
+		previousIn, err := metricOrSum(previous, "amount_in", previousSteps["rows"], "amount_in")
 		if err != nil {
 			return nil, err
 		}
-		currentOut, err := sumField(currentSteps["rows"], "amount_out")
+		currentOut, err := metricOrSum(current, "amount_out", currentSteps["rows"], "amount_out")
 		if err != nil {
 			return nil, err
 		}
-		previousOut, err := sumField(previousSteps["rows"], "amount_out")
+		previousOut, err := metricOrSum(previous, "amount_out", previousSteps["rows"], "amount_out")
 		if err != nil {
 			return nil, err
 		}
@@ -167,11 +167,11 @@ func buildDashboardMetrics(key Key, current, previous SummaryResult, currentStep
 	case StockReorder:
 		return []dashboardMetricInput{metric("reorder_item_count", "สินค้าที่ต้องสั่ง", UnitCount), metric("shortage_qty", "จำนวนขาดรวม", UnitQuantity)}, nil
 	case ARCustomerMovement:
-		currentDebit, currentCredit, err := movementTotals(currentSteps["rows"])
+		currentDebit, currentCredit, err := movementTotalsFromSummary(current, currentSteps["rows"])
 		if err != nil {
 			return nil, err
 		}
-		previousDebit, previousCredit, err := movementTotals(previousSteps["rows"])
+		previousDebit, previousCredit, err := movementTotalsFromSummary(previous, previousSteps["rows"])
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +187,7 @@ func buildDashboardMetrics(key Key, current, previous SummaryResult, currentStep
 		}
 		return []dashboardMetricInput{
 			metric("total_received_amount", "ยอดรับชำระ", UnitTHB), metric("receipt_count", "จำนวนเอกสาร", UnitCount), averageMetric,
-			{key: "payment_split_missing_count", label: "เอกสารแยกวิธีชำระไม่ครบ", unit: UnitCount, current: strconv.Itoa(countTrue(currentSteps["rows"], "payment_split_missing")), previous: strconv.Itoa(countTrue(previousSteps["rows"], "payment_split_missing"))},
+			{key: "payment_split_missing_count", label: "เอกสารแยกวิธีชำระไม่ครบ", unit: UnitCount, current: firstNonEmpty(current.Metrics["payment_split_missing_count"], strconv.Itoa(countTrue(currentSteps["rows"], "payment_split_missing"))), previous: firstNonEmpty(previous.Metrics["payment_split_missing_count"], strconv.Itoa(countTrue(previousSteps["rows"], "payment_split_missing")))},
 		}, nil
 	case CashBankReceipts, CashBankPayments:
 		label := "ยอดรับเงิน"
@@ -300,6 +300,8 @@ func buildDashboardVisualizations(key Key, period, comparisonPeriod Period, curr
 }
 
 func buildTrend(key, title string, unit MetricUnit, period, comparisonPeriod Period, currentRows, previousRows []map[string]string, amountField string) (DashboardVisualization, error) {
+	currentRows = rowsForSummaryKind(currentRows, "trend")
+	previousRows = rowsForSummaryKind(previousRows, "trend")
 	currentBuckets, currentLabels, err := aggregatePeriodRows(period, currentRows, amountField)
 	if err != nil {
 		return DashboardVisualization{}, err
@@ -398,6 +400,7 @@ func dashboardBucketKey(from, date time.Time, mode string) string {
 }
 
 func buildRanking(key, title string, unit MetricUnit, rows []map[string]string, codeField, nameField string, value func(map[string]string) (*big.Rat, error), ascending bool) (DashboardVisualization, error) {
+	rows = rowsForSummaryKind(rows, "ranking")
 	grouped := make(map[string]*rankedValue)
 	for _, row := range rows {
 		amount, err := value(row)
@@ -633,6 +636,44 @@ func movementTotals(rows []map[string]string) (*big.Rat, *big.Rat, error) {
 		}
 	}
 	return debit, credit, nil
+}
+
+func rowsForSummaryKind(rows []map[string]string, kind string) []map[string]string {
+	filtered := make([]map[string]string, 0, len(rows))
+	for _, row := range realSummaryRows(rows) {
+		rowKind := row["_summary_kind"]
+		if rowKind != "" && rowKind != kind {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	return filtered
+}
+
+func metricOrSum(summary SummaryResult, metric string, rows []map[string]string, field string) (*big.Rat, error) {
+	if value := summary.Metrics[metric]; value != "" {
+		parsed, err := decimal(value)
+		if err != nil {
+			return nil, fieldDecimalError(metric, err)
+		}
+		return parsed, nil
+	}
+	return sumField(realSummaryRows(rows), field)
+}
+
+func movementTotalsFromSummary(summary SummaryResult, rows []map[string]string) (*big.Rat, *big.Rat, error) {
+	if summary.Metrics["debit_amount"] != "" || summary.Metrics["credit_amount"] != "" {
+		debit, err := decimal(summary.Metrics["debit_amount"])
+		if err != nil {
+			return nil, nil, fieldDecimalError("debit_amount", err)
+		}
+		credit, err := decimal(summary.Metrics["credit_amount"])
+		if err != nil {
+			return nil, nil, fieldDecimalError("credit_amount", err)
+		}
+		return debit, credit, nil
+	}
+	return movementTotals(realSummaryRows(rows))
 }
 
 func countTrue(rows []map[string]string, field string) int {

@@ -6,9 +6,15 @@ import (
 	"math/big"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
-var decimalPattern = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?$`)
+const (
+	maximumDecimalTextLength = 256
+	maximumDecimalExponent   = 10_000
+)
+
+var decimalPattern = regexp.MustCompile(`^-?([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$`)
 
 type SummaryResult struct {
 	Metrics        map[string]string
@@ -28,29 +34,44 @@ func Summarize(key Key, steps map[string][]map[string]string) (SummaryResult, er
 		Reconciliation: map[string]any{"status": "OK"},
 	}
 	result.RowCount = len(result.Rows)
+	if value, ok := summaryMetric(steps, "row_count"); ok {
+		if count, parseErr := strconv.Atoi(integerText(value)); parseErr == nil {
+			result.RowCount = count
+		}
+	}
 	rows := steps["rows"]
 	var err error
 	switch key {
 	case SalesGoodsServices, PurchaseGoodsPayables:
 		headers := steps["headers"]
-		result.Metrics["document_count"] = strconv.Itoa(len(headers))
-		total, sumErr := sumField(headers, "total_amount")
+		result.Metrics["document_count"] = summaryMetricOr(steps, "document_count", strconv.Itoa(len(realSummaryRows(headers))))
+		total, sumErr := sumField(realSummaryRows(headers), "total_amount")
 		if sumErr != nil {
 			return SummaryResult{}, sumErr
 		}
-		result.Metrics["total_amount"] = money(total)
-		detailTotal, sumErr := sumField(steps["details"], "sum_amount")
+		result.Metrics["total_amount"] = moneyMetricOr(steps, "total_amount", total)
+		detailTotal, sumErr := sumField(realSummaryRows(steps["details"]), "sum_amount")
 		if sumErr != nil {
 			return SummaryResult{}, sumErr
 		}
-		result.Reconciliation["headerTotal"] = money(total)
+		metricTotal, parseErr := decimal(result.Metrics["total_amount"])
+		if parseErr != nil {
+			return SummaryResult{}, fieldDecimalError("_metric_total_amount", parseErr)
+		}
+		if value, ok := summaryMetric(steps, "detail_total"); ok {
+			detailTotal, parseErr = decimal(value)
+			if parseErr != nil {
+				return SummaryResult{}, fieldDecimalError("_metric_detail_total", parseErr)
+			}
+		}
+		result.Reconciliation["headerTotal"] = money(metricTotal)
 		result.Reconciliation["detailTotal"] = money(detailTotal)
-		result.Reconciliation["difference"] = money(new(big.Rat).Sub(total, detailTotal))
+		result.Reconciliation["difference"] = money(new(big.Rat).Sub(metricTotal, detailTotal))
 	case GrossProfitByProduct, GrossProfitByARCustomer:
-		amountSale, e1 := sumField(rows, "amount_sale")
-		costSale, e2 := sumField(rows, "cost_sale")
-		amountReturn, e3 := sumField(rows, "amount_sale_return")
-		costReturn, e4 := sumField(rows, "cost_sale_return")
+		amountSale, e1 := summaryDecimalOr(steps, "amount_sale", rows, "amount_sale")
+		costSale, e2 := summaryDecimalOr(steps, "cost_sale", rows, "cost_sale")
+		amountReturn, e3 := summaryDecimalOr(steps, "amount_sale_return", rows, "amount_sale_return")
+		costReturn, e4 := summaryDecimalOr(steps, "cost_sale_return", rows, "cost_sale_return")
 		if err = firstError(e1, e2, e3, e4); err != nil {
 			return SummaryResult{}, err
 		}
@@ -68,16 +89,26 @@ func Summarize(key Key, steps map[string][]map[string]string) (SummaryResult, er
 		result.Reconciliation["netAmount"] = money(netAmount)
 		result.Reconciliation["netCost"] = money(netCost)
 	case StockBalance:
-		result.Metrics["item_count"] = strconv.Itoa(len(rows))
-		balance, sumErr := sumField(rows, "balance_amount")
+		result.Metrics["item_count"] = summaryMetricOr(steps, "item_count", strconv.Itoa(len(realSummaryRows(rows))))
+		balance, sumErr := summaryDecimalOr(steps, "balance_amount", rows, "balance_amount")
 		if sumErr != nil {
 			return SummaryResult{}, sumErr
 		}
 		result.Metrics["balance_amount"] = money(balance)
+		result.Metrics["amount_in"] = decimalMetricOrZero(steps, "amount_in")
+		result.Metrics["amount_out"] = decimalMetricOrZero(steps, "amount_out")
 	case StockReorder:
-		result.Metrics["reorder_item_count"] = strconv.Itoa(len(rows))
+		result.Metrics["reorder_item_count"] = summaryMetricOr(steps, "reorder_item_count", strconv.Itoa(len(realSummaryRows(rows))))
+		if value, ok := summaryMetric(steps, "shortage_qty"); ok {
+			parsed, parseErr := decimal(value)
+			if parseErr != nil {
+				return SummaryResult{}, fieldDecimalError("_metric_shortage_qty", parseErr)
+			}
+			result.Metrics["shortage_qty"] = parsed.FloatString(4)
+			break
+		}
 		shortage := new(big.Rat)
-		for _, row := range rows {
+		for _, row := range realSummaryRows(rows) {
 			purchasePoint, parseErr := decimal(row["purchase_point"])
 			if parseErr != nil {
 				return SummaryResult{}, fieldDecimalError("purchase_point", parseErr)
@@ -93,6 +124,13 @@ func Summarize(key Key, steps map[string][]map[string]string) (SummaryResult, er
 		}
 		result.Metrics["shortage_qty"] = shortage.FloatString(4)
 	case ARCustomerMovement:
+		if customerCount, ok := summaryMetric(steps, "customer_count"); ok {
+			result.Metrics["customer_count"] = integerText(customerCount)
+			result.Metrics["net_movement_amount"] = moneyMetricOr(steps, "net_movement_amount", new(big.Rat))
+			result.Metrics["debit_amount"] = moneyMetricOr(steps, "debit_amount", new(big.Rat))
+			result.Metrics["credit_amount"] = moneyMetricOr(steps, "credit_amount", new(big.Rat))
+			break
+		}
 		customers := make(map[string]struct{})
 		netMovement := new(big.Rat)
 		for _, row := range rows {
@@ -110,15 +148,16 @@ func Summarize(key Key, steps map[string][]map[string]string) (SummaryResult, er
 		result.Metrics["customer_count"] = strconv.Itoa(len(customers))
 		result.Metrics["net_movement_amount"] = money(netMovement)
 	case ARDebtReceipt:
-		result.Metrics["receipt_count"] = strconv.Itoa(len(rows))
-		total, sumErr := sumField(rows, "total_net_value")
+		result.Metrics["receipt_count"] = summaryMetricOr(steps, "receipt_count", strconv.Itoa(len(realSummaryRows(rows))))
+		total, sumErr := summaryDecimalOr(steps, "total_amount", rows, "total_net_value")
 		if sumErr != nil {
 			return SummaryResult{}, sumErr
 		}
 		result.Metrics["total_received_amount"] = money(total)
+		result.Metrics["payment_split_missing_count"] = summaryMetricOr(steps, "payment_split_missing_count", strconv.Itoa(countTrue(realSummaryRows(rows), "payment_split_missing")))
 	case CashBankReceipts, CashBankPayments:
-		result.Metrics["document_count"] = strconv.Itoa(len(rows))
-		total, sumErr := sumField(rows, "total_amount")
+		result.Metrics["document_count"] = summaryMetricOr(steps, "document_count", strconv.Itoa(len(realSummaryRows(rows))))
+		total, sumErr := summaryDecimalOr(steps, "total_amount", rows, "total_amount")
 		if sumErr != nil {
 			return SummaryResult{}, sumErr
 		}
@@ -135,11 +174,11 @@ func flattenRows(key Key, steps map[string][]map[string]string) []map[string]str
 	}
 	rowCount := 0
 	for _, name := range orderedNames {
-		rowCount += len(steps[name])
+		rowCount += len(realSummaryRows(steps[name]))
 	}
 	flattened := make([]map[string]string, 0, rowCount)
 	for _, name := range orderedNames {
-		for _, source := range steps[name] {
+		for _, source := range realSummaryRows(steps[name]) {
 			row := make(map[string]string, len(source)+1)
 			for key, value := range source {
 				row[key] = value
@@ -151,6 +190,68 @@ func flattenRows(key Key, steps map[string][]map[string]string) []map[string]str
 		}
 	}
 	return flattened
+}
+
+func realSummaryRows(rows []map[string]string) []map[string]string {
+	filtered := make([]map[string]string, 0, len(rows))
+	for _, row := range rows {
+		if row["_summary_metric_row"] == "true" || row["_summary_metric_row"] == "1" {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	return filtered
+}
+
+func summaryMetric(steps map[string][]map[string]string, key string) (string, bool) {
+	field := "_metric_" + key
+	for _, rows := range steps {
+		for _, row := range rows {
+			if value, exists := row[field]; exists && value != "" {
+				return value, true
+			}
+		}
+	}
+	return "", false
+}
+
+func summaryMetricOr(steps map[string][]map[string]string, key, fallback string) string {
+	if value, ok := summaryMetric(steps, key); ok {
+		return value
+	}
+	return fallback
+}
+
+func summaryDecimalOr(steps map[string][]map[string]string, metric string, rows []map[string]string, field string) (*big.Rat, error) {
+	if value, ok := summaryMetric(steps, metric); ok {
+		parsed, err := decimal(value)
+		if err != nil {
+			return nil, fieldDecimalError("_metric_"+metric, err)
+		}
+		return parsed, nil
+	}
+	return sumField(realSummaryRows(rows), field)
+}
+
+func moneyMetricOr(steps map[string][]map[string]string, key string, fallback *big.Rat) string {
+	if value, ok := summaryMetric(steps, key); ok {
+		if parsed, err := decimal(value); err == nil {
+			return money(parsed)
+		}
+	}
+	return money(fallback)
+}
+
+func decimalMetricOrZero(steps map[string][]map[string]string, key string) string {
+	return moneyMetricOr(steps, key, new(big.Rat))
+}
+
+func integerText(value string) string {
+	parsed, err := decimal(value)
+	if err != nil {
+		return value
+	}
+	return parsed.Num().Quo(parsed.Num(), parsed.Denom()).String()
 }
 
 func sumField(rows []map[string]string, field string) (*big.Rat, error) {
@@ -169,8 +270,22 @@ func decimal(value string) (*big.Rat, error) {
 	if value == "" {
 		return new(big.Rat), nil
 	}
-	if !decimalPattern.MatchString(value) {
+	if len(value) > maximumDecimalTextLength {
+		return nil, errors.New("decimal value exceeds the length limit")
+	}
+	matches := decimalPattern.FindStringSubmatch(value)
+	if matches == nil {
 		return nil, errors.New("value is not a decimal")
+	}
+	coefficient := matches[1] + matches[2]
+	if strings.Trim(coefficient, "0") == "" {
+		return new(big.Rat), nil
+	}
+	if matches[3] != "" {
+		exponent, err := strconv.ParseInt(matches[3], 10, 32)
+		if err != nil || exponent < -maximumDecimalExponent || exponent > maximumDecimalExponent {
+			return nil, errors.New("decimal exponent exceeds the limit")
+		}
 	}
 	parsed, ok := new(big.Rat).SetString(value)
 	if !ok {

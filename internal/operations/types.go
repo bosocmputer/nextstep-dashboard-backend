@@ -30,8 +30,11 @@ type ReportRunPage struct {
 }
 
 type ReportRun struct {
-	Run        report.Run
-	TenantName string
+	Run              report.Run
+	TenantName       string
+	RuntimeStatus    string
+	RetryAvailableAt *time.Time
+	WaitReason       *string
 }
 
 type DeliveryStatus string
@@ -41,6 +44,8 @@ type Delivery struct {
 	TenantID          uuid.UUID                 `json:"tenantId"`
 	TenantName        string                    `json:"tenantName"`
 	RecipientName     string                    `json:"recipientDisplayName"`
+	ReportKeys        []report.Key              `json:"reportKeys"`
+	ReportCount       int                       `json:"reportCount"`
 	Status            DeliveryStatus            `json:"status"`
 	Attempt           int                       `json:"attempt"`
 	SafeErrorCode     *string                   `json:"safeErrorCode"`

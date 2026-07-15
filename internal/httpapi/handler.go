@@ -204,13 +204,16 @@ type ViewerReportAPI interface {
 }
 
 type ViewerAPI interface {
-	Exchange(context.Context, string, string, string) (viewer.ExchangeResult, error)
+	Exchange(context.Context, string, string, string, *uuid.UUID) (viewer.ExchangeResult, error)
 	Authenticate(context.Context, string) (viewer.AuthenticatedViewer, error)
 	ValidateCSRF(viewer.AuthenticatedViewer, string) error
 	Logout(context.Context, viewer.AuthenticatedViewer) error
 	ListTenants(context.Context, uuid.UUID) ([]viewer.TenantAccess, error)
 	ListReports(context.Context, uuid.UUID, uuid.UUID) ([]viewer.ReportAccess, error)
 	CanAccessReport(context.Context, uuid.UUID, uuid.UUID, report.Key) (bool, error)
+	ResolveDeliveryContext(context.Context, viewer.AuthenticatedViewer, string, *uuid.UUID) (viewer.DeliveryContext, error)
+	GetDeliveryContext(context.Context, viewer.AuthenticatedViewer, uuid.UUID, uuid.UUID) (viewer.DeliveryContext, error)
+	GetDeliveryReport(context.Context, viewer.AuthenticatedViewer, uuid.UUID, uuid.UUID, report.Key) (viewer.DeliveryReportContext, error)
 }
 
 func writeValidationProblem(response http.ResponseWriter, request *http.Request, validationError *tenant.ValidationError) {

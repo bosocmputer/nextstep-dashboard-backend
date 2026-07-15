@@ -10,8 +10,11 @@
   volume and verified TLS. It must never publish a host port.
 - The LINE Login channel and central Messaging API channel are production
   channels. The LIFF endpoint is `https://dashboard.nextstep-soft.com/app`.
-- SML endpoints are private addresses inside `SML_ALLOWED_CIDRS` and are
-  reachable from the worker network.
+- Private or raw-IP SML endpoints must be inside `SML_ALLOWED_CIDRS` and be
+  reachable from the worker network. Customer-owned public DNS endpoints can
+  be enabled with `SML_ALLOW_PUBLIC_ENDPOINTS=true`; their resolved addresses
+  must remain public. Set `SML_ALLOWED_PORTS=*` to allow any customer TCP port,
+  or provide an explicit comma-separated port allowlist when a deployment needs one.
 - Secrets come from the deployment secret store. Never commit the populated env
   file or print `docker compose config` in shared CI logs.
 - Authenticate the host to GHCR with a read-only package token before `pull`;
@@ -135,6 +138,10 @@ test delivery succeeds.
 - Start with one worker, `REPORT_WORKER_CONCURRENCY=4`, and
   `DELIVERY_WORKER_CONCURRENCY=4`. Increase only after measuring SML latency,
   worker memory, PostgreSQL wait time, LINE 429 responses, and queue age.
+- Keep JavaWS admission at `REPORT_GLOBAL_QUERY_CONCURRENCY=4` and
+  `REPORT_HOST_QUERY_CONCURRENCY=2`; the runtime additionally permits only one
+  active SML query per tenant. Lower these limits before increasing worker
+  concurrency when multiple tenants share one JavaWS host.
 - Dashboard detail rows are paginated and expire after 24 hours. Summary
   snapshots are versioned by report definition and SML connection and may be
   reused for their configured freshness window. Historical summaries remain
@@ -144,6 +151,29 @@ test delivery succeeds.
   `SNAPSHOT_FIRST_ENABLED=true` plus an explicit
   `SNAPSHOT_FIRST_TENANT_IDS` allowlist, then observe cache hit ratio, queue age,
   SML timeouts, and schedule latency before expanding the allowlist.
+
+### Summary generation and heavy-query rollout
+
+All new query/cache flags default to `false`. Roll them out independently and
+never enable them for every tenant in the first release:
+
+1. Deploy the additive migrations and instrumentation with all flags disabled.
+2. Enable `SUMMARY_QUERY_ENABLED=true` and validate Summary/Detail parity for
+   all ten reports off-peak. Then enable `GENERATION_CACHE_ENABLED=true` for the
+   application release.
+3. Enable `STALE_REVALIDATION_ENABLED=true` only after published generations,
+   cache-hit behavior, schedule queue age, and SML load are healthy.
+4. Keep `HEAVY_CHUNK_ENABLED=false` until Direct Stock or AR breaches its SLA
+   and DEV parity has passed. When needed, set exact allowlist entries such as
+   `<tenant-uuid>/stock_balance` or
+   `<tenant-uuid>/ar_customer_movement` in
+   `HEAVY_CHUNK_TENANT_REPORTS` before enabling the flag.
+5. Keep `SCHEDULE_CHUNK_ENABLED=false`; Schedule stays Direct until LINE
+   parity and chunk-window consistency have passed a separate release gate.
+
+If JavaWS times out after a request was sent, do not retry or restart the
+worker. The tenant uncertainty circuit intentionally blocks new SML queries for
+ten minutes because PostgreSQL may still be executing the first query.
 
 ## Retention and privacy checks
 

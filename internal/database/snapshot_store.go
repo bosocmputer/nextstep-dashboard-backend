@@ -65,12 +65,13 @@ func (store *ReportStore) RevalidateSnapshot(ctx context.Context, tenantID uuid.
 	if openUntil != nil && openUntil.After(now) {
 		return viewer.ReportRevalidation{Disposition: viewer.RevalidationCircuitOpen, Snapshot: optionalSnapshot(snapshot, err), RetryAfter: max(1, int(openUntil.Sub(now).Seconds()))}, nil
 	}
-	executionKey := snapshotExecutionKey(tenantID, reportKey, period, definition.ParameterKind, definition.Version, dataSourceVersion)
+	fingerprint := report.QueryPlanFingerprint(reportKey, report.ResultSummary)
+	executionKey := snapshotExecutionKey(tenantID, reportKey, period, definition.ParameterKind, definition.Version, dataSourceVersion, fingerprint, report.ResultSummary)
 	bucket := now.Unix() / max(1, int64(interval.Seconds()))
 	idempotencyKey := "background-" + executionKey[:24] + fmt.Sprintf("-%d", bucket)
 	run, enqueueErr := store.Enqueue(ctx, report.EnqueueInput{
 		TenantID: tenantID, ReportKey: reportKey, Source: report.SourceBackground,
-		ResultKind: report.ResultSummary, Priority: 20, ExecutionKey: executionKey,
+		ResultKind: report.ResultSummary, Priority: backgroundPriority(definition.RefreshClass), ExecutionKey: executionKey,
 		IdempotencyKey: idempotencyKey, Period: period,
 	}, now)
 	if enqueueErr != nil {
@@ -90,6 +91,17 @@ func (store *ReportStore) RevalidateSnapshot(ctx context.Context, tenantID uuid.
 		disposition = viewer.RevalidationJoined
 	}
 	return viewer.ReportRevalidation{Disposition: disposition, Snapshot: optionalSnapshot(snapshot, err), Run: &run}, nil
+}
+
+func backgroundPriority(class report.RefreshClass) int {
+	switch class {
+	case report.RefreshFast:
+		return 30
+	case report.RefreshStandard:
+		return 25
+	default:
+		return 20
+	}
 }
 
 func (store *ReportStore) GetExactSnapshotForPeriod(ctx context.Context, tenantID uuid.UUID, reportKey report.Key, period report.Period, now time.Time) (viewer.DashboardSnapshot, error) {
@@ -116,6 +128,7 @@ func (store *ReportStore) GetExactSnapshotsForPeriods(ctx context.Context, tenan
 	reportKeys := make([]string, 0, len(requests))
 	dateFrom := make([]string, 0, len(requests))
 	dateTo := make([]string, 0, len(requests))
+	fingerprints := make([]string, 0, len(requests))
 	periods := make(map[report.Key]report.Period, len(requests))
 	for _, request := range requests {
 		if _, ok := report.DefinitionFor(request.ReportKey); !ok {
@@ -124,29 +137,35 @@ func (store *ReportStore) GetExactSnapshotsForPeriods(ctx context.Context, tenan
 		reportKeys = append(reportKeys, string(request.ReportKey))
 		dateFrom = append(dateFrom, request.Period.DateFrom)
 		dateTo = append(dateTo, request.Period.DateTo)
+		fingerprints = append(fingerprints, report.QueryPlanFingerprint(request.ReportKey, report.ResultSummary))
 		periods[request.ReportKey] = request.Period
 	}
 	rows, err := store.pool.Query(ctx, `
 		with requested as (
-		  select report_key, period_from, period_to, ordinal
-		  from unnest($2::text[], $3::date[], $4::date[]) with ordinality
-		       as input(report_key, period_from, period_to, ordinal)
+		  select report_key, period_from, period_to, query_plan_fingerprint, ordinal
+		  from unnest($2::text[], $3::date[], $4::date[], $5::text[]) with ordinality
+		       as input(report_key, period_from, period_to, query_plan_fingerprint, ordinal)
 		), latest as (
 		  select distinct on (requested.ordinal)
 		         requested.ordinal, requested.report_key, r.id, r.dashboard_json,
-		         r.period_from::text, r.period_to::text, r.started_at, r.finished_at,
-		         r.report_definition_version, r.data_source_version, r.result_kind, r.expires_at
+		         r.period_from::text, r.period_to::text,
+		         coalesce(r.source_started_at, r.started_at) as source_started_at,
+		         coalesce(r.source_finished_at, r.finished_at) as source_finished_at,
+		         r.report_definition_version, r.data_source_version, r.query_plan_fingerprint,
+		         r.source_consistency, r.result_kind, r.expires_at
 		  from requested
 		  join report_runs r on r.tenant_id = $1 and r.report_key = requested.report_key
 		    and r.period_from = requested.period_from and r.period_to = requested.period_to
+		    and r.query_plan_fingerprint = requested.query_plan_fingerprint
 		  join report_definitions d on d.report_key = r.report_key and d.version = r.report_definition_version
 		  join tenant_sml_connections c on c.tenant_id = r.tenant_id and c.version = r.data_source_version
 		  where r.status = 'SUCCEEDED' and r.dashboard_json <> '{}'::jsonb
 		  order by requested.ordinal, r.finished_at desc nulls last, r.id desc
 		)
-		select report_key, id, dashboard_json, period_from, period_to, started_at, finished_at,
-		       report_definition_version, data_source_version, result_kind, expires_at
-		from latest order by ordinal`, tenantID, reportKeys, dateFrom, dateTo)
+		select report_key, id, dashboard_json, period_from, period_to, source_started_at, source_finished_at,
+		       report_definition_version, data_source_version, query_plan_fingerprint,
+		       source_consistency, result_kind, expires_at
+		from latest order by ordinal`, tenantID, reportKeys, dateFrom, dateTo, fingerprints)
 	if err != nil {
 		return nil, fmt.Errorf("get exact dashboard snapshots: %w", err)
 	}
@@ -159,7 +178,8 @@ func (store *ReportStore) GetExactSnapshotsForPeriods(ctx context.Context, tenan
 		var expiresAt time.Time
 		if err := rows.Scan(&reportKey, &snapshot.RunID, &dashboardJSON, &snapshot.PeriodFrom, &snapshot.PeriodTo,
 			&snapshot.SourceStartedAt, &snapshot.SourceFinishedAt, &snapshot.ReportDefinitionVersion,
-			&snapshot.DataSourceVersion, &resultKind, &expiresAt); err != nil {
+			&snapshot.DataSourceVersion, &snapshot.QueryPlanFingerprint, &snapshot.SourceConsistency,
+			&resultKind, &expiresAt); err != nil {
 			return nil, fmt.Errorf("scan exact dashboard snapshot: %w", err)
 		}
 		if err := json.Unmarshal(dashboardJSON, &snapshot.Dashboard); err != nil {
@@ -194,22 +214,25 @@ func (store *ReportStore) getExactSnapshotWithPolicy(ctx context.Context, tenant
 	var dashboardJSON []byte
 	var resultKind report.ResultKind
 	var expiresAt time.Time
+	fingerprint := report.QueryPlanFingerprint(reportKey, report.ResultSummary)
 	err := store.pool.QueryRow(ctx, `
 		select r.id, r.dashboard_json, r.period_from::text, r.period_to::text,
-		       r.started_at, r.finished_at, r.report_definition_version,
-		       r.data_source_version, r.result_kind, r.expires_at
+		       coalesce(r.source_started_at, r.started_at), coalesce(r.source_finished_at, r.finished_at),
+		       r.report_definition_version, r.data_source_version, r.query_plan_fingerprint,
+		       r.source_consistency, r.result_kind, r.expires_at
 		from report_runs r
 		join report_definitions d on d.report_key = r.report_key and d.version = r.report_definition_version
 		join tenant_sml_connections c on c.tenant_id = r.tenant_id and c.version = r.data_source_version
 		where r.tenant_id = $1 and r.report_key = $2
 		  and r.period_from = $3::date and r.period_to = $4::date
+		  and r.query_plan_fingerprint = $5
 		  and r.status = 'SUCCEEDED' and r.dashboard_json <> '{}'::jsonb
 		order by r.finished_at desc nulls last, r.id desc
-		limit 1`, tenantID, reportKey, period.DateFrom, period.DateTo).Scan(
+		limit 1`, tenantID, reportKey, period.DateFrom, period.DateTo, fingerprint).Scan(
 		&snapshot.RunID, &dashboardJSON, &snapshot.PeriodFrom, &snapshot.PeriodTo,
 		&snapshot.SourceStartedAt, &snapshot.SourceFinishedAt,
 		&snapshot.ReportDefinitionVersion, &snapshot.DataSourceVersion,
-		&resultKind, &expiresAt,
+		&snapshot.QueryPlanFingerprint, &snapshot.SourceConsistency, &resultKind, &expiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return viewer.DashboardSnapshot{}, report.ErrRunNotFound
@@ -259,8 +282,8 @@ func finalizeSnapshot(snapshot *viewer.DashboardSnapshot, resultKind report.Resu
 	return nil
 }
 
-func snapshotExecutionKey(tenantID uuid.UUID, reportKey report.Key, period report.Period, periodMode report.ParameterKind, definitionVersion string, dataSourceVersion int) string {
-	sum := sha256.Sum256([]byte(tenantID.String() + "\x00" + string(reportKey) + "\x00" + string(periodMode) + "\x00" + period.DateFrom + "\x00" + period.DateTo + "\x00" + definitionVersion + fmt.Sprintf("\x00%d\x00SUMMARY", dataSourceVersion)))
+func snapshotExecutionKey(tenantID uuid.UUID, reportKey report.Key, period report.Period, periodMode report.ParameterKind, definitionVersion string, dataSourceVersion int, queryPlanFingerprint string, projection report.ResultKind) string {
+	sum := sha256.Sum256([]byte(tenantID.String() + "\x00" + string(reportKey) + "\x00" + string(periodMode) + "\x00" + period.DateFrom + "\x00" + period.DateTo + "\x00" + definitionVersion + fmt.Sprintf("\x00%d\x00%s\x00%s", dataSourceVersion, queryPlanFingerprint, projection)))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,7 +26,7 @@ func TestEmbeddedMigrationsAreSequential(t *testing.T) {
 			t.Fatalf("migration %q has empty checksum", migration.Name)
 		}
 	}
-	if len(migrations) < 14 || !migrations[12].NoTransaction || !migrations[13].NoTransaction {
+	if len(migrations) < 21 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction {
 		t.Fatalf("snapshot indexes must use non-transactional concurrent migrations: %+v", migrations)
 	}
 }
@@ -109,6 +110,29 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'tenants' and column_name = 'archived_at')`).Scan(&hasTenantArchivedAt); err != nil || !hasTenantArchivedAt {
 		t.Fatalf("tenants.archived_at missing: exists=%v err=%v", hasTenantArchivedAt, err)
 	}
+	var hasMaterializationVersion, hasMaterializedPosition bool
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'notification_runs' and column_name = 'materialization_version')`).Scan(&hasMaterializationVersion); err != nil || !hasMaterializationVersion {
+		t.Fatalf("notification_runs.materialization_version missing: exists=%v err=%v", hasMaterializationVersion, err)
+	}
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'notification_run_reports' and column_name = 'position')`).Scan(&hasMaterializedPosition); err != nil || !hasMaterializedPosition {
+		t.Fatalf("notification_run_reports.position missing: exists=%v err=%v", hasMaterializedPosition, err)
+	}
+	var hasQueryFingerprint, hasGenerationTables, hasHostCircuit, hasFairnessState, hasLeaseIndex bool
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'report_runs' and column_name = 'query_plan_fingerprint')`).Scan(&hasQueryFingerprint); err != nil || !hasQueryFingerprint {
+		t.Fatalf("report_runs.query_plan_fingerprint missing: exists=%v err=%v", hasQueryFingerprint, err)
+	}
+	if err := pool.QueryRow(ctx, `select to_regclass('dashboard_generations') is not null and to_regclass('dashboard_generation_heads') is not null and to_regclass('report_run_chunks') is not null`).Scan(&hasGenerationTables); err != nil || !hasGenerationTables {
+		t.Fatalf("generation or chunk tables missing: exists=%v err=%v", hasGenerationTables, err)
+	}
+	if err := pool.QueryRow(ctx, `select to_regclass('sml_host_circuits') is not null`).Scan(&hasHostCircuit); err != nil || !hasHostCircuit {
+		t.Fatalf("sml_host_circuits missing: exists=%v err=%v", hasHostCircuit, err)
+	}
+	if err := pool.QueryRow(ctx, `select to_regclass('tenant_query_runtime') is not null`).Scan(&hasFairnessState); err != nil || !hasFairnessState {
+		t.Fatalf("tenant_query_runtime missing: exists=%v err=%v", hasFairnessState, err)
+	}
+	if err := pool.QueryRow(ctx, `select to_regclass('report_runs_active_lease_expiry_idx') is not null`).Scan(&hasLeaseIndex); err != nil || !hasLeaseIndex {
+		t.Fatalf("active lease recovery index missing: exists=%v err=%v", hasLeaseIndex, err)
+	}
 	var acceptsPositionTen bool
 	if err := pool.QueryRow(ctx, `
 		select pg_get_constraintdef(oid) ~ 'position.*>= 1.*position.*<= 10'
@@ -126,6 +150,10 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 		"notification_schedules",
 		"line_delivery_outbox",
 		"dashboard_refreshes",
+		"dashboard_generations",
+		"dashboard_generation_reports",
+		"dashboard_generation_heads",
+		"report_run_chunks",
 		"recipient_invitations",
 		"audit_logs",
 	} {
@@ -136,5 +164,12 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 		if !exists {
 			t.Fatalf("table %s was not created", table)
 		}
+	}
+}
+
+func TestNonTransactionalMigrationStatementsExecuteSeparately(t *testing.T) {
+	statements := nonTransactionalStatements("-- nextstep:no-transaction\ncreate index concurrently one on a(id);\ncreate index concurrently two on b(id);\n")
+	if len(statements) != 2 || strings.Contains(statements[0], ";") || strings.Contains(statements[1], ";") {
+		t.Fatalf("statements = %#v", statements)
 	}
 }

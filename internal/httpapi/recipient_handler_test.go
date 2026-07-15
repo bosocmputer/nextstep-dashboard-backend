@@ -13,12 +13,18 @@ import (
 )
 
 type fakeRecipientAPI struct {
-	item        recipient.Recipient
-	revokeErr   error
-	revokeCalls int
+	item         recipient.Recipient
+	revokeErr    error
+	revokeCalls  int
+	reissueCalls int
 }
 
 func (fake *fakeRecipientAPI) CreateInvitation(context.Context, []byte, string, string, uuid.UUID, string) (recipient.Recipient, error) {
+	return fake.item, nil
+}
+
+func (fake *fakeRecipientAPI) ReissueInvitation(context.Context, []byte, string, string, uuid.UUID, uuid.UUID) (recipient.Recipient, error) {
+	fake.reissueCalls++
 	return fake.item, nil
 }
 
@@ -28,6 +34,14 @@ func (fake *fakeRecipientAPI) List(context.Context, uuid.UUID, int, string) (rec
 
 func (fake *fakeRecipientAPI) GetForTenant(context.Context, uuid.UUID, uuid.UUID) (recipient.Recipient, error) {
 	return fake.item, nil
+}
+
+func (fake *fakeRecipientAPI) PermissionDependencies(context.Context, uuid.UUID, uuid.UUID) (recipient.PermissionDependencies, error) {
+	return recipient.PermissionDependencies{RecipientID: fake.item.ID, PermissionsVersion: fake.item.PermissionsVersion, Items: []recipient.PermissionDependency{}}, nil
+}
+
+func (fake *fakeRecipientAPI) ScheduleRecipientOptions(context.Context, uuid.UUID, recipient.ScheduleRecipientOptionsInput) (recipient.ScheduleRecipientOptions, error) {
+	return recipient.ScheduleRecipientOptions{Data: []recipient.ScheduleRecipientOption{}}, nil
 }
 
 func (fake *fakeRecipientAPI) ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, int) (recipient.Recipient, error) {
@@ -56,6 +70,23 @@ func TestAdminRevokesTenantRecipientWithCSRFGuard(t *testing.T) {
 
 	if response.Code != http.StatusNoContent || api.revokeCalls != 1 || response.Body.Len() != 0 {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, api.revokeCalls, response.Body.String())
+	}
+}
+
+func TestAdminReissuesPendingRecipientInvitationWithMutationGuards(t *testing.T) {
+	tenantID, recipientID := uuid.New(), uuid.New()
+	api := &fakeRecipientAPI{item: recipient.Recipient{ID: recipientID, Status: recipient.StatusPending, InvitationURL: "https://dashboard.nextstep-soft.com/app/invite?ref=new"}}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: &fakeAdminAuth{}, Recipients: api})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/tenants/"+tenantID.String()+"/recipients/"+recipientID.String()+"/invitation", nil)
+	request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "admin-session"})
+	request.Header.Set("X-CSRF-Token", "admin-csrf")
+	request.Header.Set("Idempotency-Key", "recipient-reissue-test")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || api.reissueCalls != 1 || !strings.Contains(response.Body.String(), `"invitationUrl":"https://dashboard.nextstep-soft.com/app/invite?ref=new"`) {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, api.reissueCalls, response.Body.String())
 	}
 }
 

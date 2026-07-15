@@ -37,7 +37,8 @@ func (resolver *fakeRecipientResolver) Get(context.Context, uuid.UUID) (recipien
 
 type memoryViewerStore struct {
 	session         SessionRecord
-	deliveryAllowed bool
+	deliveryContext DeliveryContext
+	deliveryErr     error
 	tenants         []TenantAccess
 	reports         []ReportAccess
 	findSessionErr  error
@@ -75,8 +76,12 @@ func (store *memoryViewerStore) RevokeSession(_ context.Context, _ []byte, now t
 	return nil
 }
 
-func (store *memoryViewerStore) CheckDeliveryReference(context.Context, []byte, uuid.UUID, time.Time) (bool, error) {
-	return store.deliveryAllowed, nil
+func (store *memoryViewerStore) ResolveDeliveryReference(context.Context, []byte, uuid.UUID, *uuid.UUID, time.Time) (DeliveryContext, error) {
+	return store.deliveryContext, store.deliveryErr
+}
+
+func (store *memoryViewerStore) GetDeliveryContext(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) (DeliveryContext, error) {
+	return store.deliveryContext, store.deliveryErr
 }
 
 func (store *memoryViewerStore) ListTenants(context.Context, uuid.UUID, time.Time) ([]TenantAccess, error) {
@@ -104,7 +109,7 @@ func TestServiceExchangesVerifiedIdentityForOpaqueSession(t *testing.T) {
 		return line.Identity{Subject: "U123", DisplayName: "Owner"}, nil
 	}), resolver, store, tokens, func() time.Time { return now })
 
-	result, err := service.Exchange(context.Background(), "opaque-line-id-token-value", "invitation-reference-value-123456", "")
+	result, err := service.Exchange(context.Background(), "opaque-line-id-token-value", "invitation-reference-value-123456", "", nil)
 	if err != nil {
 		t.Fatalf("Exchange() error = %v", err)
 	}
@@ -120,18 +125,34 @@ func TestServiceExchangesVerifiedIdentityForOpaqueSession(t *testing.T) {
 	}
 }
 
-func TestServiceDeniesCopiedDeliveryReferenceBeforeCreatingSession(t *testing.T) {
+func TestServiceCreatesSessionButFailsClosedForCopiedDeliveryReference(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{1}, 32), bytes.NewReader(bytes.Repeat([]byte{2}, 64)), func() time.Time { return now })
 	resolver := &fakeRecipientResolver{recipient: recipient.Recipient{ID: uuid.New(), Status: recipient.StatusActive}}
-	store := &memoryViewerStore{deliveryAllowed: false}
+	store := &memoryViewerStore{deliveryErr: ErrDeliveryContextUnavailable}
 	service := NewService(identityVerifierFunc(func(context.Context, string) (line.Identity, error) {
 		return line.Identity{Subject: "U-other"}, nil
 	}), resolver, store, tokens, func() time.Time { return now })
 
-	_, err := service.Exchange(context.Background(), "opaque-line-id-token-value", "", "copied-delivery-reference-value")
-	if !errors.Is(err, ErrDeliveryReferenceForbidden) || len(store.session.TokenHash) != 0 {
-		t.Fatalf("Exchange() error = %v session=%+v", err, store.session)
+	result, err := service.Exchange(context.Background(), "opaque-line-id-token-value", "", "copied-delivery-reference-value", nil)
+	if err != nil || result.DeliveryContextErrorCode != "DELIVERY_CONTEXT_UNAVAILABLE" || len(store.session.TokenHash) == 0 {
+		t.Fatalf("Exchange() = %+v, %v session=%+v", result, err, store.session)
+	}
+}
+
+func TestServiceRejectsDeliveryReferenceWhoseTenantDoesNotMatchExplicitRoute(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{1}, 32), bytes.NewReader(bytes.Repeat([]byte{2}, 64)), func() time.Time { return now })
+	recipientID, krabiID, wawaID := uuid.New(), uuid.New(), uuid.New()
+	resolver := &fakeRecipientResolver{recipient: recipient.Recipient{ID: recipientID, Status: recipient.StatusActive}}
+	store := &memoryViewerStore{deliveryContext: DeliveryContext{TenantID: wawaID}}
+	service := NewService(identityVerifierFunc(func(context.Context, string) (line.Identity, error) {
+		return line.Identity{Subject: "U-owner"}, nil
+	}), resolver, store, tokens, func() time.Time { return now })
+
+	result, err := service.Exchange(context.Background(), "opaque-line-id-token-value", "", "valid-delivery-reference-value-1234", &krabiID)
+	if err != nil || result.DeliveryContext != nil || result.DeliveryContextErrorCode != "DELIVERY_CONTEXT_UNAVAILABLE" {
+		t.Fatalf("Exchange() = %+v, %v", result, err)
 	}
 }
 

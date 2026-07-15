@@ -45,7 +45,7 @@ func TestReportDefinitionsExposeSafeRefreshClasses(t *testing.T) {
 		SalesGoodsServices: RefreshFast, ARDebtReceipt: RefreshFast,
 		CashBankReceipts: RefreshFast, CashBankPayments: RefreshFast,
 		PurchaseGoodsPayables: RefreshStandard, GrossProfitByProduct: RefreshStandard,
-		GrossProfitByARCustomer: RefreshStandard, ARCustomerMovement: RefreshStandard,
+		GrossProfitByARCustomer: RefreshStandard, ARCustomerMovement: RefreshHeavy,
 		StockReorder: RefreshStandard, StockBalance: RefreshHeavy,
 	}
 	for key, refreshClass := range want {
@@ -62,6 +62,16 @@ func TestReportDefinitionsExposeSafeRefreshClasses(t *testing.T) {
 	}
 	if got := DefaultRefreshInterval(RefreshHeavy); got != 30*time.Minute {
 		t.Fatalf("heavy refresh = %s", got)
+	}
+}
+
+func TestOnlyValidatedHeavyReportsAdvertiseChunkSafety(t *testing.T) {
+	for _, key := range Keys() {
+		definition, _ := DefinitionFor(key)
+		wantChunkSafe := key == StockBalance || key == ARCustomerMovement
+		if definition.ChunkSafe != wantChunkSafe {
+			t.Fatalf("DefinitionFor(%s).ChunkSafe = %v, want %v", key, definition.ChunkSafe, wantChunkSafe)
+		}
 	}
 }
 

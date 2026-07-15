@@ -60,6 +60,27 @@ func TestEndpointPolicyRequiresEveryResolvedAddressInAllowlist(t *testing.T) {
 	}
 }
 
+func TestCanonicalHostKeyNormalizesDefaultPortsAndIgnoresJavaWSPath(t *testing.T) {
+	httpsDefault, err := CanonicalHostKey("https://SML-Shop.Example.com/SMLJavaWebService/DotNetFrameWork")
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpsExplicit, err := CanonicalHostKey("https://sml-shop.example.com:443/other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpKey, err := CanonicalHostKey("http://sml-shop.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if httpsDefault != httpsExplicit {
+		t.Fatal("equivalent HTTPS origins produced different host keys")
+	}
+	if httpsDefault == httpKey {
+		t.Fatal("HTTP and HTTPS origins must not share a host circuit")
+	}
+}
+
 func TestEndpointPolicyAllowsExactHostnameAndNormalizesJavaWSPath(t *testing.T) {
 	policy := EndpointPolicy{
 		AllowedHosts: []string{"sml-shop.example.com"},
@@ -86,6 +107,72 @@ func TestEndpointPolicyAllowsExactHostnameAndNormalizesJavaWSPath(t *testing.T) 
 	}
 	if _, err := policy.Resolve(context.Background(), "http://sml-shop.example.com:8092"); err == nil {
 		t.Fatal("hostname allowlist accepted a loopback DNS answer")
+	}
+}
+
+func TestEndpointPolicyAllowsPublicEndpointsWithoutPerTenantAllowlist(t *testing.T) {
+	policy := EndpointPolicy{
+		AllowPublicEndpoints: true,
+		AllowedPorts:         []uint16{80, 443, 8080, 8092},
+		LookupNetIP: func(context.Context, string, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("113.53.47.214")}, nil
+		},
+	}
+
+	resolved, err := policy.Resolve(context.Background(), "http://cspromart.thaiddns.com:8080")
+	if err != nil {
+		t.Fatalf("Resolve() public customer hostname error = %v", err)
+	}
+	if got := resolved.URL.String(); got != "http://cspromart.thaiddns.com:8080/SMLJavaWebService/DotNetFrameWork" {
+		t.Fatalf("resolved URL = %q", got)
+	}
+
+	resolvedIP, err := policy.Resolve(context.Background(), "http://103.76.180.199:8080")
+	if err != nil {
+		t.Fatalf("Resolve() public customer IP error = %v", err)
+	}
+	if got := resolvedIP.URL.String(); got != "http://103.76.180.199:8080/SMLJavaWebService/DotNetFrameWork" {
+		t.Fatalf("resolved public IP URL = %q", got)
+	}
+	if _, err := policy.Resolve(context.Background(), "http://cspromart.thaiddns.com:9000"); err == nil {
+		t.Fatal("unapproved public endpoint port was accepted")
+	}
+
+	policy.LookupNetIP = func(context.Context, string, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("10.121.19.150")}, nil
+	}
+	if _, err := policy.Resolve(context.Background(), "http://cspromart.thaiddns.com:8080"); err == nil {
+		t.Fatal("public hostname mode accepted a private DNS answer without an allowed CIDR")
+	}
+	if _, err := policy.Resolve(context.Background(), "http://10.121.19.150:8080"); err == nil {
+		t.Fatal("public endpoint mode accepted a private address without an allowed CIDR")
+	}
+	if _, err := policy.Resolve(context.Background(), "http://169.254.169.254:8080"); err == nil {
+		t.Fatal("public endpoint mode accepted the cloud metadata address")
+	}
+}
+
+func TestEndpointPolicyAllowsAnyPortForSafePublicDNSWhenPortRestrictionIsEmpty(t *testing.T) {
+	policy := EndpointPolicy{
+		AllowPublicEndpoints: true,
+		LookupNetIP: func(context.Context, string, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("49.228.131.14")}, nil
+		},
+	}
+
+	resolved, err := policy.Resolve(context.Background(), "http://cspromart.thddns.com:2210")
+	if err != nil {
+		t.Fatalf("Resolve() arbitrary public port error = %v", err)
+	}
+	if got := resolved.URL.String(); got != "http://cspromart.thddns.com:2210/SMLJavaWebService/DotNetFrameWork" {
+		t.Fatalf("resolved URL = %q", got)
+	}
+
+	policy.LookupNetIP = func(context.Context, string, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("169.254.169.254")}, nil
+	}
+	if _, err := policy.Resolve(context.Background(), "http://cspromart.thddns.com:2210"); err == nil {
+		t.Fatal("unrestricted port mode bypassed the metadata address block")
 	}
 }
 

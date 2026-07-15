@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
@@ -16,11 +18,31 @@ import (
 )
 
 type ReportStore struct {
-	pool *pgxpool.Pool
+	pool                   *pgxpool.Pool
+	globalQueryConcurrency int
+	hostQueryConcurrency   int
+	generationCacheEnabled bool
+}
+
+func (store *ReportStore) ConfigureGenerationCache(enabled bool) *ReportStore {
+	store.generationCacheEnabled = enabled
+	return store
 }
 
 func NewReportStore(pool *pgxpool.Pool) *ReportStore {
-	return &ReportStore{pool: pool}
+	return &ReportStore{
+		pool:                   pool,
+		globalQueryConcurrency: boundedEnvInt("REPORT_GLOBAL_QUERY_CONCURRENCY", 4, 1, 32),
+		hostQueryConcurrency:   boundedEnvInt("REPORT_HOST_QUERY_CONCURRENCY", 2, 1, 16),
+	}
+}
+
+func boundedEnvInt(key string, fallback, minimum, maximum int) int {
+	value, err := strconv.Atoi(os.Getenv(key))
+	if err != nil || value < minimum || value > maximum {
+		return fallback
+	}
+	return value
 }
 
 func (store *ReportStore) Enqueue(ctx context.Context, input report.EnqueueInput, now time.Time) (report.Run, error) {
@@ -47,9 +69,17 @@ func (store *ReportStore) Enqueue(ctx context.Context, input report.EnqueueInput
 		case report.SourceSchedule:
 			input.Priority = 100
 		case report.SourceDashboard:
-			input.Priority = 80
+			input.Priority = 90
 		default:
-			input.Priority = 20
+			definition, _ := report.DefinitionFor(input.ReportKey)
+			switch definition.RefreshClass {
+			case report.RefreshFast:
+				input.Priority = 30
+			case report.RefreshStandard:
+				input.Priority = 25
+			default:
+				input.Priority = 20
+			}
 		}
 	}
 	lockScope := input.TenantID.String() + ":" + string(input.Source) + ":" + input.IdempotencyKey
@@ -108,6 +138,9 @@ func (store *ReportStore) Enqueue(ctx context.Context, input report.EnqueueInput
 			return report.Run{}, fmt.Errorf("lock tenant SML circuit: %w", circuitErr)
 		}
 		if openUntil != nil && openUntil.After(now) {
+			return report.Run{}, report.ErrRunCircuitOpen
+		}
+		if openUntil != nil && !openUntil.After(now) {
 			if halfOpenRunID != nil {
 				return report.Run{}, report.ErrRunCircuitOpen
 			}
@@ -178,6 +211,10 @@ func (store *ReportStore) Enqueue(ctx context.Context, input report.EnqueueInput
 		where d.report_key = $1`, input.ReportKey, input.TenantID).Scan(&reportDefinitionVersion, &dataSourceVersion); err != nil {
 		return report.Run{}, fmt.Errorf("load report execution versions: %w", err)
 	}
+	queryPlanFingerprint := report.QueryPlanFingerprint(input.ReportKey, input.ResultKind)
+	if queryPlanFingerprint == "" {
+		return report.Run{}, report.ErrRunNotFound
+	}
 	expectedP50MS, expectedP90MS, expectedSampleCount, err := loadDurationEstimate(ctx, tx, input.TenantID, input.ReportKey, input.Period)
 	if err != nil {
 		return report.Run{}, err
@@ -190,15 +227,15 @@ func (store *ReportStore) Enqueue(ctx context.Context, input report.EnqueueInput
 		  queued_at, expires_at, created_at, updated_at, result_kind, priority,
 		  execution_key, report_definition_version, data_source_version,
 		  progress_phase, progress_updated_at, expected_p50_ms, expected_p90_ms,
-		  expected_sample_count
+		  expected_sample_count, query_plan_fingerprint
 		) values ($1, $2, $3, $4, 'QUEUED', $5, nullif($6, '')::date, nullif($7, '')::date, $8, $9, $10, $11, $10, $10,
-		          $12, $13, nullif($14, ''), $15, $16, 'QUEUED', $10, nullif($17, 0), nullif($18, 0), $19)
+		          $12, $13, nullif($14, ''), $15, $16, 'QUEUED', $10, nullif($17, 0), nullif($18, 0), $19, $20)
 		on conflict do nothing
 		returning `+reportRunColumns,
 		input.TenantID, input.ReportKey, input.Source, input.IdempotencyKey, input.Period.Preset,
 		input.Period.DateFrom, input.Period.DateTo, paramsJSON, input.RequestedByRecipient, now, now.Add(24*time.Hour),
 		input.ResultKind, input.Priority, input.ExecutionKey, reportDefinitionVersion, dataSourceVersion,
-		expectedP50MS, expectedP90MS, expectedSampleCount,
+		expectedP50MS, expectedP90MS, expectedSampleCount, queryPlanFingerprint,
 	)
 	created, err := scanReportRun(row, now)
 	if errors.Is(err, pgx.ErrNoRows) && input.Source == report.SourceBackground {
@@ -316,28 +353,62 @@ func (store *ReportStore) Claim(ctx context.Context, workerID string, lease time
 		return report.Run{}, fmt.Errorf("begin report claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `
-		update report_runs
-		set status = 'QUEUED', claimed_by = null, claimed_at = null,
-		    lease_expires_at = null, progress_phase = 'WAITING_RETRY',
-		    progress_sequence = progress_sequence + 1, progress_updated_at = $1, updated_at = $1
-		where status in ('CLAIMED', 'RUNNING') and lease_expires_at < $1`, now); err != nil {
-		return report.Run{}, fmt.Errorf("requeue expired report leases: %w", err)
-	}
 	var runID uuid.UUID
 	err = tx.QueryRow(ctx, `
 		select r.id
 		from report_runs r
 		where r.status = 'QUEUED' and r.queued_at <= $1
 		  and not exists (
+		    select 1 from tenant_sml_circuits circuit
+		    where circuit.tenant_id = r.tenant_id and circuit.open_until > $1
+		  )
+		  and (select count(*) from report_runs system_active where system_active.status in ('CLAIMED', 'RUNNING')) < $2
+		  and (
+		    r.source = 'SCHEDULE'
+		    or (select count(*) from report_runs interactive_active
+		        where interactive_active.status in ('CLAIMED', 'RUNNING')
+		          and interactive_active.source <> 'SCHEDULE') < greatest(1, $2 - 1)
+		  )
+		  and not exists (
 		    select 1 from report_runs active
 		    where active.tenant_id = r.tenant_id and active.id <> r.id
 		      and active.status in ('CLAIMED', 'RUNNING')
 		  )
+		  and (
+		    select count(*)
+		    from report_runs host_active
+		    join tenant_sml_connections active_connection on active_connection.tenant_id = host_active.tenant_id
+		    join tenant_sml_connections candidate_connection on candidate_connection.tenant_id = r.tenant_id
+		    where host_active.status in ('CLAIMED', 'RUNNING')
+		      and active_connection.endpoint_host_key = candidate_connection.endpoint_host_key
+		  ) < $3
+		  and not exists (
+		    select 1
+		    from tenant_sml_connections candidate_connection
+		    join sml_host_circuits host_circuit
+		      on host_circuit.host_key = candidate_connection.endpoint_host_key
+		     and host_circuit.open_until > $1
+		    where candidate_connection.tenant_id = r.tenant_id
+		  )
+		  and not (
+		    r.source in ('DASHBOARD', 'BACKGROUND')
+		    and r.report_key in ('stock_balance', 'ar_customer_movement')
+		    and exists (
+		      select 1
+		      from notification_schedules schedule
+		      join tenant_sml_connections scheduled_connection on scheduled_connection.tenant_id = schedule.tenant_id
+		      join tenant_sml_connections candidate_connection
+		        on candidate_connection.tenant_id = r.tenant_id
+		       and candidate_connection.endpoint_host_key = scheduled_connection.endpoint_host_key
+		      where schedule.status = 'ACTIVE'
+		        and schedule.next_run_at between $1::timestamptz and $1::timestamptz + make_interval(secs => greatest(300, least(900, coalesce(r.expected_p90_ms, 0) / 1000 + 60))::double precision)
+		    )
+		  )
 		order by greatest(r.priority, least(99, r.priority + floor(extract(epoch from ($1 - r.queued_at)) / 600)::integer)) desc,
+		         coalesce((select runtime.last_claimed_at from tenant_query_runtime runtime where runtime.tenant_id = r.tenant_id), '-infinity'::timestamptz),
 		         r.queued_at, r.id
 		for update skip locked
-		limit 1`, now).Scan(&runID)
+		limit 1`, now, store.globalQueryConcurrency, store.hostQueryConcurrency).Scan(&runID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return report.Run{}, report.ErrNoQueuedRun
 	}
@@ -358,10 +429,116 @@ func (store *ReportStore) Claim(ctx context.Context, workerID string, lease time
 	if err != nil {
 		return report.Run{}, fmt.Errorf("claim report run: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `
+		insert into tenant_query_runtime (tenant_id, last_claimed_at, updated_at)
+		values ($1, $2, $2)
+		on conflict (tenant_id) do update
+		set last_claimed_at = excluded.last_claimed_at, updated_at = excluded.updated_at`, claimed.TenantID, now); err != nil {
+		return report.Run{}, fmt.Errorf("record tenant report fairness: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return report.Run{}, fmt.Errorf("commit report claim: %w", err)
 	}
 	return claimed, nil
+}
+
+// RecoverExpiredLeases is deliberately separate from Claim. Recovery must
+// commit even when every queued run is blocked by the newly-opened cooldown;
+// coupling both operations caused expired RUNNING rows to be rolled back every
+// time Claim returned ErrNoQueuedRun.
+func (store *ReportStore) RecoverExpiredLeases(ctx context.Context, now time.Time) (report.LeaseRecovery, error) {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return report.LeaseRecovery{}, fmt.Errorf("begin report lease recovery: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	type expiredLease struct {
+		ID       uuid.UUID
+		TenantID uuid.UUID
+		Status   report.RunStatus
+		Source   report.Source
+	}
+	rows, err := tx.Query(ctx, `
+		select id, tenant_id, status, source
+		from report_runs
+		where status in ('CLAIMED', 'RUNNING') and lease_expires_at < $1
+		order by lease_expires_at, id
+		for update skip locked
+		limit 100`, now)
+	if err != nil {
+		return report.LeaseRecovery{}, fmt.Errorf("select expired report leases: %w", err)
+	}
+	expired := make([]expiredLease, 0)
+	for rows.Next() {
+		var item expiredLease
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.Status, &item.Source); err != nil {
+			rows.Close()
+			return report.LeaseRecovery{}, fmt.Errorf("scan expired report lease: %w", err)
+		}
+		expired = append(expired, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return report.LeaseRecovery{}, fmt.Errorf("iterate expired report leases: %w", err)
+	}
+	rows.Close()
+
+	result := report.LeaseRecovery{}
+	for _, item := range expired {
+		if item.Status == report.StatusClaimed {
+			command, err := tx.Exec(ctx, `
+				update report_runs
+				set status = 'QUEUED', claimed_by = null, claimed_at = null,
+				    lease_expires_at = null, progress_phase = 'WAITING_RETRY',
+				    queued_at = least(queued_at, $2), progress_sequence = progress_sequence + 1,
+				    progress_updated_at = $2, updated_at = $2
+				where id = $1 and status = 'CLAIMED' and lease_expires_at < $2`, item.ID, now)
+			if err != nil {
+				return report.LeaseRecovery{}, fmt.Errorf("requeue expired claimed report: %w", err)
+			}
+			result.RequeuedClaimed += int(command.RowsAffected())
+			continue
+		}
+		command, err := tx.Exec(ctx, `
+			update report_runs
+			set status = 'FAILED', safe_error_code = 'REPORT_LEASE_EXPIRED',
+			    safe_error_message = 'Report worker lease expired after query dispatch.',
+			    finished_at = $2, source_finished_at = $2, lease_expires_at = null,
+			    progress_updated_at = $2, updated_at = $2
+			where id = $1 and status = 'RUNNING' and lease_expires_at < $2`, item.ID, now)
+		if err != nil {
+			return report.LeaseRecovery{}, fmt.Errorf("fail expired running report: %w", err)
+		}
+		if command.RowsAffected() == 0 {
+			continue
+		}
+		result.FailedRunning++
+		if _, err := tx.Exec(ctx, `
+			insert into tenant_sml_circuits (
+			  tenant_id, consecutive_failures, window_started_at, open_until, half_open_run_id, updated_at
+			) values ($1, 1, $2::timestamptz, $2::timestamptz + interval '10 minutes', null, $2::timestamptz)
+			on conflict (tenant_id) do update
+			set consecutive_failures = greatest(tenant_sml_circuits.consecutive_failures, 1),
+			    window_started_at = coalesce(tenant_sml_circuits.window_started_at, $2::timestamptz),
+			    open_until = greatest(coalesce(tenant_sml_circuits.open_until, $2::timestamptz), $2::timestamptz + interval '10 minutes'),
+			    half_open_run_id = null, updated_at = $2::timestamptz`, item.TenantID, now); err != nil {
+			return report.LeaseRecovery{}, fmt.Errorf("open circuit for expired running report: %w", err)
+		}
+		if item.Source == report.SourceSchedule {
+			cancelled, err := failScheduledOccurrenceTx(ctx, tx, item.ID, now)
+			if err != nil {
+				return report.LeaseRecovery{}, err
+			}
+			result.CancelledSiblings += cancelled
+		}
+		if err := updateDashboardGenerationsForRun(ctx, tx, item.ID, now); err != nil {
+			return report.LeaseRecovery{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return report.LeaseRecovery{}, fmt.Errorf("commit report lease recovery: %w", err)
+	}
+	return result, nil
 }
 
 func (store *ReportStore) ExtendLease(ctx context.Context, runID uuid.UUID, workerID string, lease time.Duration, now time.Time) error {
@@ -425,10 +602,115 @@ func (store *ReportStore) Retry(ctx context.Context, runID uuid.UUID, workerID, 
 	return nil
 }
 
+func (store *ReportStore) RetryPreRequestFailure(ctx context.Context, runID uuid.UUID, workerID, safeCode string, availableAt, now time.Time) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin retry pre-request report failure: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var tenantID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		update report_runs
+		set status = 'QUEUED', queued_at = $4, claimed_by = null, claimed_at = null,
+		    lease_expires_at = null, safe_error_code = $3, safe_error_message = null,
+		    progress_phase = 'WAITING_RETRY', progress_sequence = progress_sequence + 1,
+		    progress_updated_at = $5, updated_at = $5
+		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
+		  and lease_expires_at >= $5
+		returning tenant_id`, runID, workerID, safeCode, availableAt, now).Scan(&tenantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return report.ErrRunLeaseLost
+	}
+	if err != nil {
+		return fmt.Errorf("retry pre-request report failure: %w", err)
+	}
+	if err := recordHostPreRequestFailureTx(ctx, tx, tenantID, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit retry pre-request report failure: %w", err)
+	}
+	return nil
+}
+
+func (store *ReportStore) FailPreRequestFailure(ctx context.Context, runID uuid.UUID, workerID, safeCode, safeMessage string, now time.Time) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin fail pre-request report failure: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var tenantID uuid.UUID
+	var source report.Source
+	err = tx.QueryRow(ctx, `
+		update report_runs
+		set status = 'FAILED', safe_error_code = $3, safe_error_message = $4,
+		    finished_at = $5, source_finished_at = $5, lease_expires_at = null,
+		    progress_updated_at = $5, updated_at = $5
+		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
+		  and lease_expires_at >= $5
+		returning tenant_id, source`, runID, workerID, safeCode, safeMessage, now).Scan(&tenantID, &source)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return report.ErrRunLeaseLost
+	}
+	if err != nil {
+		return fmt.Errorf("fail pre-request report failure: %w", err)
+	}
+	if err := recordHostPreRequestFailureTx(ctx, tx, tenantID, now); err != nil {
+		return err
+	}
+	if source == report.SourceSchedule {
+		if _, err := failScheduledOccurrenceTx(ctx, tx, runID, now); err != nil {
+			return err
+		}
+	}
+	if err := updateDashboardGenerationsForRun(ctx, tx, runID, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit fail pre-request report failure: %w", err)
+	}
+	return nil
+}
+
+func recordHostPreRequestFailureTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, now time.Time) error {
+	result, err := tx.Exec(ctx, `
+		insert into sml_host_circuits (
+		  host_key, consecutive_failures, window_started_at, open_until, half_open_run_id, updated_at
+		)
+		select connection.endpoint_host_key, 1, $2, null, null, $2
+		from tenant_sml_connections connection
+		where connection.tenant_id = $1
+		on conflict (host_key) do update
+		set consecutive_failures = case
+		      when sml_host_circuits.window_started_at is null
+		        or sml_host_circuits.window_started_at < $2 - interval '2 minutes' then 1
+		      else sml_host_circuits.consecutive_failures + 1 end,
+		    window_started_at = case
+		      when sml_host_circuits.window_started_at is null
+		        or sml_host_circuits.window_started_at < $2 - interval '2 minutes' then $2
+		      else sml_host_circuits.window_started_at end,
+		    open_until = case
+		      when (case
+		        when sml_host_circuits.window_started_at is null
+		          or sml_host_circuits.window_started_at < $2 - interval '2 minutes' then 1
+		        else sml_host_circuits.consecutive_failures + 1 end) >= 2
+		      then greatest(coalesce(sml_host_circuits.open_until, $2), $2 + interval '5 minutes')
+		      else sml_host_circuits.open_until end,
+		    half_open_run_id = null,
+		    updated_at = $2`, tenantID, now)
+	if err != nil {
+		return fmt.Errorf("record SML host pre-request failure: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("record SML host pre-request failure: connection missing")
+	}
+	return nil
+}
+
 func (store *ReportStore) MarkRunning(ctx context.Context, runID uuid.UUID, workerID string, lease time.Duration, now time.Time) error {
 	result, err := store.pool.Exec(ctx, `
 		update report_runs
-		set status = 'RUNNING', started_at = coalesce(started_at, $3),
+		set status = 'RUNNING', started_at = coalesce(started_at, $3), source_started_at = coalesce(source_started_at, $3),
 		    lease_expires_at = $4, updated_at = $3
 		where id = $1 and claimed_by = $2 and status = 'CLAIMED' and lease_expires_at >= $3`, runID, workerID, now, now.Add(lease))
 	if err != nil {
@@ -504,7 +786,7 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 		update report_runs
 		set status = 'SUCCEEDED', row_count = $3, summary_json = $4,
 		    reconciliation_json = $5, dashboard_version = $6, dashboard_json = $7,
-		    finished_at = $8, expires_at = $9, lease_expires_at = null,
+		    finished_at = $8, source_finished_at = $8, expires_at = $9, lease_expires_at = null,
 		    progress_phase = 'COMPLETED', progress_sequence = progress_sequence + 1,
 		    progress_completed_steps = progress_total_steps, progress_updated_at = $8, updated_at = $8
 		where id = $1 and claimed_by = $2 and status = 'RUNNING'`,
@@ -515,6 +797,9 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 	if result.RowsAffected() != 1 {
 		return report.ErrRunLeaseLost
 	}
+	if _, err := tx.Exec(ctx, `delete from report_run_chunks where run_id = $1`, runID); err != nil {
+		return fmt.Errorf("clear completed report chunks: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		insert into tenant_sml_circuits (tenant_id, consecutive_failures, window_started_at, open_until, half_open_run_id, updated_at)
 		values ($1, 0, null, null, null, $2)
@@ -522,6 +807,18 @@ func (store *ReportStore) Complete(ctx context.Context, runID uuid.UUID, workerI
 		set consecutive_failures = 0, window_started_at = null, open_until = null,
 		    half_open_run_id = null, updated_at = excluded.updated_at`, tenantID, now); err != nil {
 		return fmt.Errorf("reset tenant SML circuit: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update sml_host_circuits host_circuit
+		set consecutive_failures = 0, window_started_at = null, open_until = null,
+		    half_open_run_id = null, updated_at = $2
+		from tenant_sml_connections connection
+		where connection.tenant_id = $1
+		  and host_circuit.host_key = connection.endpoint_host_key`, tenantID, now); err != nil {
+		return fmt.Errorf("reset SML host circuit: %w", err)
+	}
+	if err := updateDashboardGenerationsForRun(ctx, tx, runID, now); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit report completion: %w", err)
@@ -554,18 +851,43 @@ func (store *ReportStore) ListLatestDashboards(ctx context.Context, tenantID uui
 		return []viewer.DashboardSnapshot{}, nil
 	}
 	keys := make([]string, len(reportKeys))
+	fingerprints := make([]string, len(reportKeys))
 	for index, key := range reportKeys {
 		if _, ok := report.DefinitionFor(key); !ok {
 			return nil, report.ErrRunForbidden
 		}
 		keys[index] = string(key)
+		fingerprints[index] = report.QueryPlanFingerprint(key, report.ResultSummary)
+	}
+	policy, err := NewRefreshPolicyStore(store.pool).GetRefreshPolicy(ctx, tenantID)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := store.pool.Query(ctx, `
-		select distinct on (report_key) id, report_key, dashboard_json
-		from report_runs
-		where tenant_id = $1 and report_key = any($2::text[])
-		  and status = 'SUCCEEDED' and dashboard_json <> '{}'::jsonb
-		order by report_key, finished_at desc nulls last, id desc`, tenantID, keys)
+		with requested as (
+		  select report_key, query_plan_fingerprint, ordinal
+		  from unnest($2::text[], $3::text[]) with ordinality
+		       as input(report_key, query_plan_fingerprint, ordinal)
+		), latest as (
+		  select distinct on (requested.ordinal)
+		         requested.ordinal, r.id, r.report_key, r.dashboard_json,
+		         r.period_from::text, r.period_to::text,
+		         coalesce(r.source_started_at, r.started_at) as source_started_at,
+		         coalesce(r.source_finished_at, r.finished_at) as source_finished_at,
+		         r.report_definition_version, r.data_source_version, r.query_plan_fingerprint,
+		         r.source_consistency, r.result_kind, r.expires_at
+		  from requested
+		  join report_runs r on r.tenant_id = $1 and r.report_key = requested.report_key
+		    and r.query_plan_fingerprint = requested.query_plan_fingerprint
+		  join report_definitions d on d.report_key = r.report_key and d.version = r.report_definition_version
+		  join tenant_sml_connections c on c.tenant_id = r.tenant_id and c.version = r.data_source_version
+		  where r.status = 'SUCCEEDED' and r.dashboard_json <> '{}'::jsonb
+		  order by requested.ordinal, r.finished_at desc nulls last, r.id desc
+		)
+		select id, report_key, dashboard_json, period_from, period_to,
+		       source_started_at, source_finished_at, report_definition_version,
+		       data_source_version, query_plan_fingerprint, source_consistency, result_kind, expires_at
+		from latest order by ordinal`, tenantID, keys, fingerprints)
 	if err != nil {
 		return nil, fmt.Errorf("list latest report dashboards: %w", err)
 	}
@@ -575,7 +897,12 @@ func (store *ReportStore) ListLatestDashboards(ctx context.Context, tenantID uui
 		var item viewer.DashboardSnapshot
 		var reportKey report.Key
 		var dashboardJSON []byte
-		if err := rows.Scan(&item.RunID, &reportKey, &dashboardJSON); err != nil {
+		var resultKind report.ResultKind
+		var expiresAt time.Time
+		if err := rows.Scan(&item.RunID, &reportKey, &dashboardJSON, &item.PeriodFrom, &item.PeriodTo,
+			&item.SourceStartedAt, &item.SourceFinishedAt, &item.ReportDefinitionVersion,
+			&item.DataSourceVersion, &item.QueryPlanFingerprint, &item.SourceConsistency,
+			&resultKind, &expiresAt); err != nil {
 			return nil, fmt.Errorf("scan latest report dashboard: %w", err)
 		}
 		if err := json.Unmarshal(dashboardJSON, &item.Dashboard); err != nil {
@@ -583,6 +910,11 @@ func (store *ReportStore) ListLatestDashboards(ctx context.Context, tenantID uui
 		}
 		if item.Dashboard.ReportKey != reportKey {
 			return nil, fmt.Errorf("stored dashboard report key does not match run")
+		}
+		definition, _ := report.DefinitionFor(reportKey)
+		period := report.Period{Preset: item.Dashboard.Period.Preset, DateFrom: item.PeriodFrom, DateTo: item.PeriodTo}
+		if err := finalizeSnapshot(&item, resultKind, expiresAt, definition, period, policy, time.Now().UTC()); err != nil {
+			continue
 		}
 		items = append(items, item)
 	}
@@ -664,50 +996,131 @@ func (store *ReportStore) CreateDashboardRefresh(ctx context.Context, recipientI
 	if permissionCount != len(keys) {
 		return viewer.DashboardRefresh{}, report.ErrRunForbidden
 	}
-	var active bool
-	if err := tx.QueryRow(ctx, `
-		select exists (
-		  select 1 from dashboard_refreshes refresh
-		  join dashboard_refresh_runs linked on linked.refresh_id = refresh.id
-		  join report_runs run on run.id = linked.report_run_id
-		  where refresh.tenant_id = $1 and run.status in ('QUEUED', 'CLAIMED', 'RUNNING')
-		)`, tenantID).Scan(&active); err != nil {
-		return viewer.DashboardRefresh{}, fmt.Errorf("check active dashboard refresh: %w", err)
+	var dataSourceVersion int
+	if err := tx.QueryRow(ctx, `select coalesce((select version from tenant_sml_connections where tenant_id = $1), 0)`, tenantID).Scan(&dataSourceVersion); err != nil {
+		return viewer.DashboardRefresh{}, fmt.Errorf("load dashboard refresh data source version: %w", err)
 	}
-	if active {
-		return viewer.DashboardRefresh{}, report.ErrRunConcurrencyLimit
+	if !store.generationCacheEnabled {
+		refreshID, createErr := createLegacyDashboardRefreshTx(ctx, tx, recipientID, tenantID, idempotencyKey, inputs, dataSourceVersion, now)
+		if createErr != nil {
+			return viewer.DashboardRefresh{}, createErr
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("commit legacy dashboard refresh: %w", err)
+		}
+		return store.GetDashboardRefresh(ctx, recipientID, tenantID, refreshID, now)
+	}
+
+	descriptor, err := describeDashboardGeneration(tenantID, inputs, dataSourceVersion)
+	if err != nil {
+		return viewer.DashboardRefresh{}, err
+	}
+	var generationID uuid.UUID
+	joinedGeneration := false
+	err = tx.QueryRow(ctx, `
+		select id from dashboard_generations
+		where tenant_id = $1 and generation_key = $2 and status = 'BUILDING'
+		for update`, tenantID, descriptor.GenerationKey).Scan(&generationID)
+	if err == nil {
+		joinedGeneration = true
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return viewer.DashboardRefresh{}, fmt.Errorf("find active dashboard generation: %w", err)
+	} else {
+		var activeGenerations int
+		if err := tx.QueryRow(ctx, `
+			select count(*) from dashboard_generations
+			where tenant_id = $1 and status = 'BUILDING'`, tenantID).Scan(&activeGenerations); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("count active dashboard generations: %w", err)
+		}
+		// One generation may execute and one may wait behind the tenant-level
+		// query lock. Further distinct periods are rejected instead of growing
+		// an unbounded SML queue.
+		if activeGenerations >= 2 {
+			return viewer.DashboardRefresh{}, report.ErrRunConcurrencyLimit
+		}
+		generationID = uuid.New()
+		if _, err := tx.Exec(ctx, `
+			insert into dashboard_generations (
+			  id, tenant_id, generation_key, period_preset, period_from, period_to,
+			  request_json, report_set_hash, query_plan_set_fingerprint,
+			  data_source_version, projection, source_consistency, total, created_at, updated_at
+			) values ($1, $2, $3, $4, $5::date, $6::date, $7, $8, $9, $10, 'SUMMARY', 'SERIAL_WINDOW', $11, $12, $12)`,
+			generationID, tenantID, descriptor.GenerationKey, descriptor.PeriodPreset,
+			descriptor.PeriodFrom, descriptor.PeriodTo, descriptor.RequestJSON,
+			descriptor.ReportSetHash, descriptor.QueryPlanSetFingerprint,
+			dataSourceVersion, len(inputs), now); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("insert dashboard generation: %w", err)
+		}
 	}
 
 	refreshID := uuid.New()
 	if _, err := tx.Exec(ctx, `
-		insert into dashboard_refreshes (id, tenant_id, requested_by_recipient_id, idempotency_key, total, created_at, updated_at)
-		values ($1, $2, $3, $4, $5, $6, $6)`, refreshID, tenantID, recipientID, idempotencyKey, len(inputs), now); err != nil {
+		insert into dashboard_refreshes (id, tenant_id, requested_by_recipient_id, idempotency_key, total, generation_id, request_hash, created_at, updated_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $8)`, refreshID, tenantID, recipientID, idempotencyKey, len(inputs), generationID, descriptor.GenerationKey, now); err != nil {
 		return viewer.DashboardRefresh{}, fmt.Errorf("insert dashboard refresh: %w", err)
 	}
-	for _, input := range inputs {
+	if joinedGeneration {
+		if _, err := tx.Exec(ctx, `
+			insert into dashboard_refresh_runs (refresh_id, report_key, report_run_id)
+			select $1, report_key, report_run_id
+			from dashboard_generation_reports where generation_id = $2`, refreshID, generationID); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("join dashboard refresh to generation: %w", err)
+		}
+	}
+	for position, input := range inputs {
+		if joinedGeneration {
+			continue
+		}
 		runID := uuid.New()
+		queryPlanFingerprint := report.QueryPlanFingerprint(input.ReportKey, report.ResultSummary)
+		definition, _ := report.DefinitionFor(input.ReportKey)
+		priority := 84
+		if definition.RefreshClass == report.RefreshFast {
+			priority = 85
+		} else if definition.RefreshClass == report.RefreshHeavy {
+			priority = 83
+		}
+		executionKey := snapshotExecutionKey(tenantID, input.ReportKey, input.Period, definition.ParameterKind, definition.Version, dataSourceVersion, queryPlanFingerprint, report.ResultSummary)
+		activeRunErr := tx.QueryRow(ctx, `
+			select id from report_runs
+			where tenant_id = $1 and execution_key = $2 and result_kind = 'SUMMARY'
+			  and source in ('DASHBOARD', 'BACKGROUND')
+			  and status in ('QUEUED', 'CLAIMED', 'RUNNING')
+			order by queued_at, id limit 1`, tenantID, executionKey).Scan(&runID)
+		if activeRunErr != nil && !errors.Is(activeRunErr, pgx.ErrNoRows) {
+			return viewer.DashboardRefresh{}, fmt.Errorf("find coalesced summary run: %w", activeRunErr)
+		}
 		paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": input.Period.DateFrom, "dateTo": input.Period.DateTo})
 		runIdempotency := "overview:" + refreshID.String() + ":" + string(input.ReportKey)
-		if _, err := tx.Exec(ctx, `
+		if errors.Is(activeRunErr, pgx.ErrNoRows) {
+			if _, err := tx.Exec(ctx, `
 			insert into report_runs (
 			  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
 			  period_from, period_to, params_json, requested_by_recipient_id,
 			  queued_at, expires_at, created_at, updated_at, result_kind, priority,
-			  report_definition_version, data_source_version, progress_phase, progress_updated_at
+			  report_definition_version, data_source_version, progress_phase, progress_updated_at,
+			  query_plan_fingerprint, execution_key
 			)
 			select $1, $2, $3, 'DASHBOARD', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9,
-			       $10, $11, $10, $10, 'DETAIL', 80, d.version, coalesce(c.version, 0), 'QUEUED', $10
+			       $10, $11, $10, $10, 'SUMMARY', $12, d.version, coalesce(c.version, 0), 'QUEUED', $10,
+			       $13, $14
 			from report_definitions d
 			left join tenant_sml_connections c on c.tenant_id = $2
 			where d.report_key = $3`,
-			runID, tenantID, input.ReportKey, runIdempotency, input.Period.Preset, input.Period.DateFrom, input.Period.DateTo,
-			paramsJSON, recipientID, now, now.Add(24*time.Hour)); err != nil {
-			return viewer.DashboardRefresh{}, fmt.Errorf("insert dashboard refresh report run: %w", err)
+				runID, tenantID, input.ReportKey, runIdempotency, input.Period.Preset, input.Period.DateFrom, input.Period.DateTo,
+				paramsJSON, recipientID, now, now.Add(24*time.Hour), priority, queryPlanFingerprint, executionKey); err != nil {
+				return viewer.DashboardRefresh{}, fmt.Errorf("insert dashboard refresh report run: %w", err)
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			insert into dashboard_refresh_runs (refresh_id, report_key, report_run_id)
 			values ($1, $2, $3)`, refreshID, input.ReportKey, runID); err != nil {
 			return viewer.DashboardRefresh{}, fmt.Errorf("link dashboard refresh report run: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into dashboard_generation_reports (generation_id, tenant_id, report_key, report_run_id, position)
+			values ($1, $2, $3, $4, $5)`, generationID, tenantID, input.ReportKey, runID, position+1); err != nil {
+			return viewer.DashboardRefresh{}, fmt.Errorf("link dashboard generation report run: %w", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -716,10 +1129,108 @@ func (store *ReportStore) CreateDashboardRefresh(ctx context.Context, recipientI
 	return store.GetDashboardRefresh(ctx, recipientID, tenantID, refreshID, now)
 }
 
+func createLegacyDashboardRefreshTx(ctx context.Context, tx pgx.Tx, recipientID, tenantID uuid.UUID, idempotencyKey string, inputs []report.EnqueueInput, dataSourceVersion int, now time.Time) (uuid.UUID, error) {
+	var active bool
+	if err := tx.QueryRow(ctx, `
+		select exists (
+		  select 1 from dashboard_refreshes refresh
+		  join dashboard_refresh_runs linked on linked.refresh_id = refresh.id
+		  join report_runs run on run.id = linked.report_run_id
+		  where refresh.tenant_id = $1 and run.status in ('QUEUED', 'CLAIMED', 'RUNNING')
+		)`, tenantID).Scan(&active); err != nil {
+		return uuid.Nil, fmt.Errorf("check active dashboard refresh: %w", err)
+	}
+	if active {
+		return uuid.Nil, report.ErrRunConcurrencyLimit
+	}
+	refreshID := uuid.New()
+	if _, err := tx.Exec(ctx, `
+		insert into dashboard_refreshes (id, tenant_id, requested_by_recipient_id, idempotency_key, total, created_at, updated_at)
+		values ($1, $2, $3, $4, $5, $6, $6)`, refreshID, tenantID, recipientID, idempotencyKey, len(inputs), now); err != nil {
+		return uuid.Nil, fmt.Errorf("insert legacy dashboard refresh: %w", err)
+	}
+	for _, input := range inputs {
+		runID := uuid.New()
+		queryPlanFingerprint := report.QueryPlanFingerprint(input.ReportKey, report.ResultSummary)
+		definition, _ := report.DefinitionFor(input.ReportKey)
+		priority := 84
+		if definition.RefreshClass == report.RefreshFast {
+			priority = 85
+		} else if definition.RefreshClass == report.RefreshHeavy {
+			priority = 83
+		}
+		executionKey := snapshotExecutionKey(tenantID, input.ReportKey, input.Period, definition.ParameterKind, definition.Version, dataSourceVersion, queryPlanFingerprint, report.ResultSummary)
+		paramsJSON, _ := json.Marshal(map[string]string{"dateFrom": input.Period.DateFrom, "dateTo": input.Period.DateTo})
+		if _, err := tx.Exec(ctx, `
+			insert into report_runs (
+			  id, tenant_id, report_key, source, idempotency_key, status, period_preset,
+			  period_from, period_to, params_json, requested_by_recipient_id,
+			  queued_at, expires_at, created_at, updated_at, result_kind, priority,
+			  report_definition_version, data_source_version, progress_phase, progress_updated_at,
+			  query_plan_fingerprint, execution_key
+			)
+			select $1, $2, $3, 'DASHBOARD', $4, 'QUEUED', $5, $6::date, $7::date, $8, $9,
+			       $10, $11, $10, $10, 'SUMMARY', $12, d.version, coalesce(c.version, 0), 'QUEUED', $10,
+			       $13, $14
+			from report_definitions d
+			left join tenant_sml_connections c on c.tenant_id = $2
+			where d.report_key = $3`,
+			runID, tenantID, input.ReportKey, "overview:"+refreshID.String()+":"+string(input.ReportKey),
+			input.Period.Preset, input.Period.DateFrom, input.Period.DateTo, paramsJSON, recipientID,
+			now, now.Add(24*time.Hour), priority, queryPlanFingerprint, executionKey); err != nil {
+			return uuid.Nil, fmt.Errorf("insert legacy dashboard report run: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into dashboard_refresh_runs (refresh_id, report_key, report_run_id)
+			values ($1, $2, $3)`, refreshID, input.ReportKey, runID); err != nil {
+			return uuid.Nil, fmt.Errorf("link legacy dashboard report run: %w", err)
+		}
+	}
+	return refreshID, nil
+}
+
 func (store *ReportStore) GetDashboardRefreshResult(ctx context.Context, recipientID, tenantID, refreshID uuid.UUID) (viewer.DashboardRefreshResult, error) {
+	result := viewer.DashboardRefreshResult{Items: []viewer.DashboardSnapshot{}, Failures: []viewer.DashboardRefreshFailure{}}
+	policy, err := NewRefreshPolicyStore(store.pool).GetRefreshPolicy(ctx, tenantID)
+	if err != nil {
+		return viewer.DashboardRefreshResult{}, err
+	}
+	var generationStatus *string
+	var generationKey *string
+	var sourceConsistency *report.SourceConsistency
+	err = store.pool.QueryRow(ctx, `
+		select refresh.id, refresh.tenant_id, refresh.generation_id,
+		       generation.generation_key, generation.status, generation.source_consistency,
+		       generation.source_started_at, generation.source_finished_at, generation.published_at
+		from dashboard_refreshes refresh
+		left join dashboard_generations generation on generation.id = refresh.generation_id
+		where refresh.id = $1 and refresh.tenant_id = $2 and refresh.requested_by_recipient_id = $3`,
+		refreshID, tenantID, recipientID).Scan(&result.RefreshID, &result.TenantID, &result.GenerationID,
+		&generationKey, &generationStatus, &sourceConsistency,
+		&result.SourceStartedAt, &result.SourceFinishedAt, &result.PublishedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return viewer.DashboardRefreshResult{}, report.ErrRunNotFound
+	}
+	if err != nil {
+		return viewer.DashboardRefreshResult{}, fmt.Errorf("get dashboard refresh generation: %w", err)
+	}
+	if generationKey != nil {
+		result.GenerationKey = *generationKey
+	}
+	if sourceConsistency != nil {
+		result.SourceConsistency = *sourceConsistency
+	}
+	if generationStatus != nil && *generationStatus == "BUILDING" {
+		return viewer.DashboardRefreshResult{}, viewer.ErrDashboardRefreshNotReady
+	}
 	rows, err := store.pool.Query(ctx, `
 		select refresh.id, refresh.tenant_id, linked.report_key, linked.report_run_id,
-		       run.status, coalesce(run.safe_error_code, ''), run.dashboard_json
+		       run.status, coalesce(run.safe_error_code, ''), run.dashboard_json,
+		       run.period_from::text, run.period_to::text,
+		       coalesce(run.source_started_at, run.started_at, run.queued_at),
+		       coalesce(run.source_finished_at, run.finished_at),
+		       run.report_definition_version, run.data_source_version,
+		       run.query_plan_fingerprint, run.source_consistency, run.result_kind, run.expires_at
 		from dashboard_refreshes refresh
 		join dashboard_refresh_runs linked on linked.refresh_id = refresh.id
 		join report_runs run on run.id = linked.report_run_id
@@ -729,7 +1240,6 @@ func (store *ReportStore) GetDashboardRefreshResult(ctx context.Context, recipie
 		return viewer.DashboardRefreshResult{}, fmt.Errorf("get dashboard refresh result: %w", err)
 	}
 	defer rows.Close()
-	result := viewer.DashboardRefreshResult{Items: []viewer.DashboardSnapshot{}, Failures: []viewer.DashboardRefreshFailure{}}
 	queued, running := 0, 0
 	for rows.Next() {
 		var reportKey report.Key
@@ -737,7 +1247,13 @@ func (store *ReportStore) GetDashboardRefreshResult(ctx context.Context, recipie
 		var status report.RunStatus
 		var safeCode string
 		var dashboardJSON []byte
-		if err := rows.Scan(&result.RefreshID, &result.TenantID, &reportKey, &runID, &status, &safeCode, &dashboardJSON); err != nil {
+		var snapshot viewer.DashboardSnapshot
+		var resultKind report.ResultKind
+		var expiresAt time.Time
+		if err := rows.Scan(&result.RefreshID, &result.TenantID, &reportKey, &runID, &status, &safeCode, &dashboardJSON,
+			&snapshot.PeriodFrom, &snapshot.PeriodTo, &snapshot.SourceStartedAt, &snapshot.SourceFinishedAt,
+			&snapshot.ReportDefinitionVersion, &snapshot.DataSourceVersion, &snapshot.QueryPlanFingerprint,
+			&snapshot.SourceConsistency, &resultKind, &expiresAt); err != nil {
 			return viewer.DashboardRefreshResult{}, fmt.Errorf("scan dashboard refresh result: %w", err)
 		}
 		switch status {
@@ -746,11 +1262,16 @@ func (store *ReportStore) GetDashboardRefreshResult(ctx context.Context, recipie
 		case report.StatusClaimed, report.StatusRunning:
 			running++
 		case report.StatusSucceeded:
-			var dashboard report.Dashboard
-			if err := json.Unmarshal(dashboardJSON, &dashboard); err != nil || dashboard.ReportKey != reportKey || dashboard.Version == "" {
+			if err := json.Unmarshal(dashboardJSON, &snapshot.Dashboard); err != nil || snapshot.Dashboard.ReportKey != reportKey || snapshot.Dashboard.Version == "" {
 				return viewer.DashboardRefreshResult{}, fmt.Errorf("decode dashboard refresh result for %s", reportKey)
 			}
-			result.Items = append(result.Items, viewer.DashboardSnapshot{RunID: runID, Dashboard: dashboard})
+			snapshot.RunID = runID
+			definition, _ := report.DefinitionFor(reportKey)
+			period := report.Period{Preset: snapshot.Dashboard.Period.Preset, DateFrom: snapshot.PeriodFrom, DateTo: snapshot.PeriodTo}
+			if err := finalizeSnapshot(&snapshot, resultKind, expiresAt, definition, period, policy, time.Now().UTC()); err != nil {
+				return viewer.DashboardRefreshResult{}, fmt.Errorf("finalize dashboard refresh snapshot for %s: %w", reportKey, err)
+			}
+			result.Items = append(result.Items, snapshot)
 		case report.StatusFailed, report.StatusCancelled, report.StatusExpired:
 			result.Failures = append(result.Failures, viewer.DashboardRefreshFailure{ReportKey: reportKey, Status: status, SafeErrorCode: safeCode})
 		default:
@@ -763,10 +1284,13 @@ func (store *ReportStore) GetDashboardRefreshResult(ctx context.Context, recipie
 	if result.RefreshID == uuid.Nil {
 		return viewer.DashboardRefreshResult{}, report.ErrRunNotFound
 	}
-	if queued > 0 || running > 0 {
+	if (generationStatus == nil || *generationStatus != "FAILED") && (queued > 0 || running > 0) {
 		return viewer.DashboardRefreshResult{}, viewer.ErrDashboardRefreshNotReady
 	}
 	switch {
+	case generationStatus != nil && *generationStatus == "FAILED":
+		result.Items = []viewer.DashboardSnapshot{}
+		result.Status = viewer.DashboardRefreshFailed
 	case len(result.Items) > 0 && len(result.Failures) == 0:
 		result.Status = viewer.DashboardRefreshSucceeded
 	case len(result.Items) > 0:
@@ -811,11 +1335,14 @@ func dashboardRefreshInputsMatch(ctx context.Context, tx pgx.Tx, refreshID uuid.
 
 func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, tenantID, refreshID uuid.UUID, now time.Time) (viewer.DashboardRefresh, error) {
 	var refresh viewer.DashboardRefresh
+	var generationStatus *string
 	err := store.pool.QueryRow(ctx, `
-		select id, tenant_id, total, created_at, finished_at
-		from dashboard_refreshes
-		where id = $1 and tenant_id = $2 and requested_by_recipient_id = $3`, refreshID, tenantID, recipientID).Scan(
-		&refresh.ID, &refresh.TenantID, &refresh.Total, &refresh.CreatedAt, &refresh.FinishedAt,
+		select refresh.id, refresh.tenant_id, refresh.generation_id, refresh.total, refresh.created_at, refresh.finished_at,
+		       generation.status
+		from dashboard_refreshes refresh
+		left join dashboard_generations generation on generation.id = refresh.generation_id
+		where refresh.id = $1 and refresh.tenant_id = $2 and refresh.requested_by_recipient_id = $3`, refreshID, tenantID, recipientID).Scan(
+		&refresh.ID, &refresh.TenantID, &refresh.GenerationID, &refresh.Total, &refresh.CreatedAt, &refresh.FinishedAt, &generationStatus,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return viewer.DashboardRefresh{}, report.ErrRunNotFound
@@ -826,7 +1353,9 @@ func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, 
 	rows, err := store.pool.Query(ctx, `
 		select linked.report_key, linked.report_run_id, run.status, run.progress_phase,
 		       run.progress_updated_at, coalesce(run.expected_p50_ms, 0),
-		       coalesce(run.expected_p90_ms, 0), run.expected_sample_count
+		       coalesce(run.expected_p90_ms, 0), run.expected_sample_count,
+		       run.execution_strategy, run.source_consistency,
+		       run.progress_completed_chunks, run.progress_total_chunks
 		from dashboard_refresh_runs linked
 		join report_runs run on run.id = linked.report_run_id
 		where linked.refresh_id = $1
@@ -840,7 +1369,8 @@ func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, 
 	for rows.Next() {
 		var item viewer.DashboardRefreshRun
 		if err := rows.Scan(&item.ReportKey, &item.RunID, &item.Status, &item.ProgressPhase,
-			&item.ProgressUpdatedAt, &item.ExpectedP50MS, &item.ExpectedP90MS, &item.ExpectedSampleCount); err != nil {
+			&item.ProgressUpdatedAt, &item.ExpectedP50MS, &item.ExpectedP90MS, &item.ExpectedSampleCount,
+			&item.ExecutionStrategy, &item.SourceConsistency, &item.CompletedChunks, &item.TotalChunks); err != nil {
 			return viewer.DashboardRefresh{}, fmt.Errorf("scan dashboard refresh run: %w", err)
 		}
 		switch item.Status {
@@ -859,6 +1389,10 @@ func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, 
 		return viewer.DashboardRefresh{}, fmt.Errorf("iterate dashboard refresh runs: %w", err)
 	}
 	switch {
+	case generationStatus != nil && *generationStatus == "FAILED":
+		refresh.Status = viewer.DashboardRefreshFailed
+	case generationStatus != nil && *generationStatus == "PUBLISHED":
+		refresh.Status = viewer.DashboardRefreshSucceeded
 	case running > 0:
 		refresh.Status = viewer.DashboardRefreshRunning
 	case queued > 0:
@@ -893,13 +1427,14 @@ func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID, s
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var tenantID uuid.UUID
+	var source report.Source
 	err = tx.QueryRow(ctx, `
 		update report_runs
 		set status = 'FAILED', safe_error_code = $3, safe_error_message = $4,
 		    finished_at = $5, lease_expires_at = null, progress_updated_at = $5, updated_at = $5
 		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
 		  and lease_expires_at >= $5
-		returning tenant_id`, runID, workerID, safeCode, safeMessage, now).Scan(&tenantID)
+		returning tenant_id, source`, runID, workerID, safeCode, safeMessage, now).Scan(&tenantID, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return report.ErrRunLeaseLost
 	}
@@ -927,7 +1462,106 @@ func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID, s
 			return fmt.Errorf("record tenant SML circuit failure: %w", err)
 		}
 	}
+	if source == report.SourceSchedule {
+		if _, err := failScheduledOccurrenceTx(ctx, tx, runID, now); err != nil {
+			return err
+		}
+	}
+	if err := updateDashboardGenerationsForRun(ctx, tx, runID, now); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
+}
+
+// FailRemoteUnknown atomically fails a dispatched JavaWS request and opens the
+// tenant uncertainty circuit. A timeout after bytes were sent is not safe to
+// retry because PostgreSQL may still be executing behind JavaWS.
+func (store *ReportStore) FailRemoteUnknown(ctx context.Context, runID uuid.UUID, workerID, safeCode, safeMessage string, now, openUntil time.Time) error {
+	if !openUntil.After(now) {
+		return fmt.Errorf("uncertainty circuit expiry must be in the future")
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin fail uncertain report run: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var tenantID uuid.UUID
+	var source report.Source
+	err = tx.QueryRow(ctx, `
+		update report_runs
+		set status = 'FAILED', safe_error_code = $3, safe_error_message = $4,
+		    finished_at = $5, source_finished_at = $5, lease_expires_at = null,
+		    progress_updated_at = $5, updated_at = $5
+		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
+		  and lease_expires_at >= $5
+		returning tenant_id, source`, runID, workerID, safeCode, safeMessage, now).Scan(&tenantID, &source)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return report.ErrRunLeaseLost
+	}
+	if err != nil {
+		return fmt.Errorf("fail uncertain report run: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into tenant_sml_circuits (
+		  tenant_id, consecutive_failures, window_started_at, open_until, half_open_run_id, updated_at
+		) values ($1, 1, $2, $3, null, $2)
+		on conflict (tenant_id) do update
+		set consecutive_failures = greatest(tenant_sml_circuits.consecutive_failures, 1),
+		    window_started_at = coalesce(tenant_sml_circuits.window_started_at, $2),
+		    open_until = greatest(coalesce(tenant_sml_circuits.open_until, $2), $3),
+		    half_open_run_id = null,
+		    updated_at = $2`, tenantID, now, openUntil); err != nil {
+		return fmt.Errorf("open tenant uncertainty circuit: %w", err)
+	}
+	if source == report.SourceSchedule {
+		if _, err := failScheduledOccurrenceTx(ctx, tx, runID, now); err != nil {
+			return err
+		}
+	}
+	if err := updateDashboardGenerationsForRun(ctx, tx, runID, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit fail uncertain report run: %w", err)
+	}
+	return nil
+}
+
+// failScheduledOccurrenceTx closes the immutable occurrence immediately and
+// removes queued sibling work. It is called in the same transaction that makes
+// a report terminal, preventing another worker lane from claiming a sibling in
+// the gap between report failure and notification failure.
+func failScheduledOccurrenceTx(ctx context.Context, tx pgx.Tx, failedRunID uuid.UUID, now time.Time) (int, error) {
+	var notificationRunID uuid.UUID
+	err := tx.QueryRow(ctx, `
+		update notification_runs notification
+		set status = 'FAILED', safe_error_code = 'REPORT_SET_INCOMPLETE',
+		    finished_at = $2, lease_expires_at = null, updated_at = $2
+		from notification_run_reports linked
+		where linked.report_run_id = $1
+		  and notification.id = linked.notification_run_id
+		  and notification.status in ('QUEUED', 'COLLECTING', 'READY')
+		returning notification.id`, failedRunID, now).Scan(&notificationRunID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("fail incomplete notification occurrence: %w", err)
+	}
+	command, err := tx.Exec(ctx, `
+		update report_runs sibling
+		set status = 'CANCELLED', safe_error_code = 'REPORT_SET_INCOMPLETE',
+		    safe_error_message = null, finished_at = $3, lease_expires_at = null,
+		    progress_updated_at = $3, updated_at = $3
+		from notification_run_reports linked
+		where linked.notification_run_id = $1
+		  and linked.report_run_id = sibling.id
+		  and sibling.id <> $2
+		  and sibling.status = 'QUEUED'`, notificationRunID, failedRunID, now)
+	if err != nil {
+		return 0, fmt.Errorf("cancel incomplete notification siblings: %w", err)
+	}
+	return int(command.RowsAffected()), nil
 }
 
 func isSMLCircuitFailure(code string) bool {
@@ -1066,7 +1700,9 @@ coalesce(safe_error_message, ''), queued_at, started_at, finished_at,
 expires_at, created_at, updated_at, coalesce(report_definition_version, ''),
 coalesce(data_source_version, 0), progress_phase, progress_sequence,
 progress_completed_steps, progress_total_steps, progress_updated_at,
-coalesce(expected_p50_ms, 0), coalesce(expected_p90_ms, 0), expected_sample_count`
+coalesce(expected_p50_ms, 0), coalesce(expected_p90_ms, 0), expected_sample_count,
+coalesce(query_plan_fingerprint, ''), execution_strategy, source_consistency,
+source_started_at, source_finished_at, progress_completed_chunks, progress_total_chunks`
 
 func scanReportRun(row rowScanner, now time.Time) (report.Run, error) {
 	return scanReportRunWithExtras(row, now)
@@ -1085,6 +1721,8 @@ func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ..
 		&run.ReportDefinitionVersion, &run.DataSourceVersion, &run.ProgressPhase, &run.ProgressSequence,
 		&run.ProgressCompletedSteps, &run.ProgressTotalSteps, &run.ProgressUpdatedAt,
 		&run.ExpectedP50MS, &run.ExpectedP90MS, &run.ExpectedSampleCount,
+		&run.QueryPlanFingerprint, &run.ExecutionStrategy, &run.SourceConsistency,
+		&run.SourceStartedAt, &run.SourceFinishedAt, &run.ProgressCompletedChunks, &run.ProgressTotalChunks,
 	}
 	destinations = append(destinations, extraDestinations...)
 	err := row.Scan(destinations...)

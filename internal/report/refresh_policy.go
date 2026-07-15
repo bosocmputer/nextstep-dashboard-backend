@@ -20,6 +20,7 @@ type RefreshPolicy struct {
 	StandardIntervalMinutes *int      `json:"standardIntervalMinutes"`
 	HeavyIntervalMinutes    *int      `json:"heavyIntervalMinutes"`
 	Version                 int       `json:"version"`
+	RolloutStatus           *string   `json:"rolloutStatus,omitempty"`
 }
 
 type RefreshPolicyInput struct {
@@ -59,8 +60,21 @@ type RefreshPolicyStore interface {
 }
 
 type RefreshPolicyService struct {
-	store RefreshPolicyStore
-	now   func() time.Time
+	store                    RefreshPolicyStore
+	now                      func() time.Time
+	snapshotFirstEnabled     bool
+	snapshotFirstTenantIDs   map[uuid.UUID]struct{}
+	staleRevalidationEnabled bool
+}
+
+func (service *RefreshPolicyService) ConfigureRollout(snapshotFirstEnabled bool, tenantIDs []uuid.UUID, staleRevalidationEnabled bool) *RefreshPolicyService {
+	service.snapshotFirstEnabled = snapshotFirstEnabled
+	service.staleRevalidationEnabled = staleRevalidationEnabled
+	service.snapshotFirstTenantIDs = make(map[uuid.UUID]struct{}, len(tenantIDs))
+	for _, id := range tenantIDs {
+		service.snapshotFirstTenantIDs[id] = struct{}{}
+	}
+	return service
 }
 
 func NewRefreshPolicyService(store RefreshPolicyStore, now func() time.Time) *RefreshPolicyService {
@@ -68,7 +82,11 @@ func NewRefreshPolicyService(store RefreshPolicyStore, now func() time.Time) *Re
 }
 
 func (service *RefreshPolicyService) Get(ctx context.Context, tenantID uuid.UUID) (RefreshPolicy, error) {
-	return service.store.GetRefreshPolicy(ctx, tenantID)
+	policy, err := service.store.GetRefreshPolicy(ctx, tenantID)
+	if err != nil {
+		return RefreshPolicy{}, err
+	}
+	return service.withRolloutStatus(policy), nil
 }
 
 func (service *RefreshPolicyService) Put(ctx context.Context, actorHash []byte, requestID string, tenantID uuid.UUID, input RefreshPolicyInput) (RefreshPolicy, error) {
@@ -82,7 +100,28 @@ func (service *RefreshPolicyService) Put(ctx context.Context, actorHash []byte, 
 		StandardIntervalMinutes: input.StandardIntervalMinutes,
 		HeavyIntervalMinutes:    input.HeavyIntervalMinutes, Version: input.Version,
 	}
-	return service.store.PutRefreshPolicy(ctx, actorHash, requestID, policy, input.Version, service.now().UTC())
+	updated, err := service.store.PutRefreshPolicy(ctx, actorHash, requestID, policy, input.Version, service.now().UTC())
+	if err != nil {
+		return RefreshPolicy{}, err
+	}
+	return service.withRolloutStatus(updated), nil
+}
+
+func (service *RefreshPolicyService) withRolloutStatus(policy RefreshPolicy) RefreshPolicy {
+	status := "ACTIVE"
+	if !service.snapshotFirstEnabled {
+		status = "SNAPSHOT_FIRST_DISABLED"
+	} else if len(service.snapshotFirstTenantIDs) > 0 {
+		if _, ok := service.snapshotFirstTenantIDs[policy.TenantID]; !ok {
+			status = "TENANT_NOT_ENABLED"
+		} else if !service.staleRevalidationEnabled {
+			status = "REVALIDATION_DISABLED"
+		}
+	} else if !service.staleRevalidationEnabled {
+		status = "REVALIDATION_DISABLED"
+	}
+	policy.RolloutStatus = &status
+	return policy
 }
 
 func validRefreshMinutes(value *int, allowed []int) bool {

@@ -369,12 +369,16 @@ func reportRevalidationResponse(result viewer.ReportRevalidation) map[string]any
 }
 
 func overviewRevalidationResponse(result viewer.OverviewRevalidation) map[string]any {
+	overview := result.Overview
+	if overview.Items == nil {
+		overview.Items = make([]viewer.DashboardSnapshot, 0)
+	}
 	runs := make([]map[string]any, 0, len(result.Runs))
 	for _, run := range result.Runs {
 		runs = append(runs, reportRunResponse(run))
 	}
 	return map[string]any{
-		"disposition": result.Disposition, "overview": result.Overview,
+		"disposition": result.Disposition, "overview": overview,
 		"runs": runs, "retryAfter": result.RetryAfter, "legacyFallback": result.LegacyFallback,
 	}
 }
