@@ -127,13 +127,31 @@ func (client *Client) Query(ctx context.Context, connection Connection, sql stri
 	}
 	xmlPayload, err := DecompressPayload(zippedResult, client.maximumResponseBytes*4)
 	if err != nil {
-		return nil, &SafeError{Code: "SML_ZIP_INVALID", Retryable: false}
+		// The HTTP body is already complete. A ZIP decoding failure does not
+		// mean the remote query may still be running, so it must not open the
+		// tenant uncertainty circuit used for transport timeouts.
+		return nil, &SafeError{Code: zipSafeErrorCode(err), Retryable: false}
 	}
 	rows, err := ParseRows(xmlPayload, client.maximumRows)
 	if err != nil {
 		return nil, &SafeError{Code: "SML_RESULT_INVALID", Retryable: false}
 	}
 	return rows, nil
+}
+
+func zipSafeErrorCode(err error) string {
+	switch {
+	case errors.Is(err, ErrZIPFormatInvalid):
+		return "SML_ZIP_FORMAT_INVALID"
+	case errors.Is(err, ErrZIPEmpty):
+		return "SML_ZIP_EMPTY"
+	case errors.Is(err, ErrZIPTooLarge):
+		return "SML_ZIP_TOO_LARGE"
+	case errors.Is(err, ErrZIPReadFailed):
+		return "SML_ZIP_READ_FAILED"
+	default:
+		return "SML_ZIP_INVALID"
+	}
 }
 
 func pinnedHTTPClient(endpoint ResolvedEndpoint, timeout time.Duration) (*http.Client, *http.Transport) {

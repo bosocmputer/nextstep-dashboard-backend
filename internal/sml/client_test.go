@@ -1,8 +1,11 @@
 package sml
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +14,64 @@ import (
 	"testing"
 	"time"
 )
+
+func TestDecompressPayloadClassifiesSafeZIPFailures(t *testing.T) {
+	emptyBuffer := new(bytes.Buffer)
+	emptyWriter := zip.NewWriter(emptyBuffer)
+	if err := emptyWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tooLarge, err := CompressPayload([]byte("12345"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corruptBuffer := new(bytes.Buffer)
+	corruptWriter := zip.NewWriter(corruptBuffer)
+	header := &zip.FileHeader{Name: "0", Method: zip.Store}
+	entry, err := corruptWriter.CreateHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := corruptWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := append([]byte(nil), corruptBuffer.Bytes()...)
+	dataAt := bytes.Index(corrupt, []byte("hello"))
+	if dataAt < 0 {
+		t.Fatal("stored ZIP payload did not contain test data")
+	}
+	corrupt[dataAt] ^= 0xff
+
+	tests := []struct {
+		name    string
+		payload []byte
+		limit   int64
+		want    error
+		code    string
+	}{
+		{name: "invalid format", payload: []byte("not-a-zip"), limit: 1024, want: ErrZIPFormatInvalid, code: "SML_ZIP_FORMAT_INVALID"},
+		{name: "empty archive", payload: emptyBuffer.Bytes(), limit: 1024, want: ErrZIPEmpty, code: "SML_ZIP_EMPTY"},
+		{name: "uncompressed too large", payload: tooLarge, limit: 4, want: ErrZIPTooLarge, code: "SML_ZIP_TOO_LARGE"},
+		{name: "corrupt entry", payload: corrupt, limit: 1024, want: ErrZIPReadFailed, code: "SML_ZIP_READ_FAILED"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := DecompressPayload(test.payload, test.limit)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("DecompressPayload() error = %v, want %v", err, test.want)
+			}
+			if got := zipSafeErrorCode(err); got != test.code {
+				t.Fatalf("zipSafeErrorCode() = %q, want %q", got, test.code)
+			}
+		})
+	}
+}
 
 func TestCompressedPayloadAndSOAPRowsRoundTrip(t *testing.T) {
 	compressed, err := CompressPayload([]byte("select 1 as ok"))

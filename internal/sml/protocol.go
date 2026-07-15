@@ -13,6 +13,13 @@ import (
 
 const soapNamespace = "http://SMLWebService/"
 
+var (
+	ErrZIPFormatInvalid = errors.New("JavaWS ZIP format is invalid")
+	ErrZIPEmpty         = errors.New("JavaWS ZIP archive is empty")
+	ErrZIPTooLarge      = errors.New("JavaWS ZIP payload exceeds the response limit")
+	ErrZIPReadFailed    = errors.New("JavaWS ZIP entry could not be read")
+)
+
 func CompressPayload(payload []byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := zip.NewWriter(&buffer)
@@ -34,24 +41,27 @@ func DecompressPayload(payload []byte, maximumBytes int64) ([]byte, error) {
 		return nil, errors.New("JavaWS decompression limit is invalid")
 	}
 	reader, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
-	if err != nil || len(reader.File) == 0 {
-		return nil, errors.New("JavaWS returned an invalid ZIP payload")
+	if err != nil {
+		return nil, ErrZIPFormatInvalid
+	}
+	if len(reader.File) == 0 {
+		return nil, ErrZIPEmpty
 	}
 	file := reader.File[0]
 	if file.UncompressedSize64 > uint64(maximumBytes) {
-		return nil, errors.New("JavaWS ZIP payload exceeds the response limit")
+		return nil, ErrZIPTooLarge
 	}
 	entry, err := file.Open()
 	if err != nil {
-		return nil, errors.New("open JavaWS ZIP payload")
+		return nil, ErrZIPReadFailed
 	}
 	defer entry.Close()
 	contents, err := io.ReadAll(io.LimitReader(entry, maximumBytes+1))
 	if err != nil {
-		return nil, errors.New("read JavaWS ZIP payload")
+		return nil, ErrZIPReadFailed
 	}
 	if int64(len(contents)) > maximumBytes {
-		return nil, errors.New("JavaWS ZIP payload exceeds the response limit")
+		return nil, ErrZIPTooLarge
 	}
 	return contents, nil
 }

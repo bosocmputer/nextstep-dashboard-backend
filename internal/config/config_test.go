@@ -113,6 +113,36 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadEnablesBoundedSummaryQueriesByDefault(t *testing.T) {
+	secret := base64.StdEncoding.EncodeToString([]byte("01234567890123456789012345678901"))
+	values := map[string]string{
+		"DATABASE_URL":          "postgres://nextstep@localhost/nextstep?sslmode=disable",
+		"PUBLIC_BASE_URL":       "http://localhost:6324",
+		"ADMIN_PASSWORD_HASH":   "$argon2id$v=19$m=65536,t=3,p=2$c2FsdA$aGFzaA",
+		"SESSION_HMAC_KEY":      secret,
+		"ENCRYPTION_MASTER_KEY": secret,
+		"ENCRYPTION_KEY_ID":     "key-2026-01",
+		"SML_ALLOWED_CIDRS":     "10.0.0.0/8",
+	}
+
+	cfg, err := Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.SummaryQueryEnabled {
+		t.Fatal("SummaryQueryEnabled = false, want safe bounded summaries enabled for every tenant by default")
+	}
+
+	values["SUMMARY_QUERY_ENABLED"] = "false"
+	cfg, err = Load(func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatalf("Load() with emergency kill switch error = %v", err)
+	}
+	if cfg.SummaryQueryEnabled {
+		t.Fatal("SummaryQueryEnabled = true after explicit false, want emergency kill switch to remain available")
+	}
+}
+
 func TestParseAllowedPortsAllowsWildcardForAnyPublicEndpointPort(t *testing.T) {
 	ports, err := parseAllowedPorts("*")
 	if err != nil {
@@ -165,7 +195,7 @@ func TestLoadRejectsUnsafeFeatureFlagCombinations(t *testing.T) {
 		flags   map[string]string
 		message string
 	}{
-		{name: "generation without summary", flags: map[string]string{"GENERATION_CACHE_ENABLED": "true"}, message: "GENERATION_CACHE_ENABLED requires SUMMARY_QUERY_ENABLED"},
+		{name: "generation without summary", flags: map[string]string{"SUMMARY_QUERY_ENABLED": "false", "GENERATION_CACHE_ENABLED": "true"}, message: "GENERATION_CACHE_ENABLED requires SUMMARY_QUERY_ENABLED"},
 		{name: "revalidation without generation", flags: map[string]string{"SUMMARY_QUERY_ENABLED": "true", "STALE_REVALIDATION_ENABLED": "true"}, message: "STALE_REVALIDATION_ENABLED requires GENERATION_CACHE_ENABLED"},
 		{name: "schedule chunk without heavy chunk", flags: map[string]string{"SCHEDULE_CHUNK_ENABLED": "true"}, message: "SCHEDULE_CHUNK_ENABLED requires HEAVY_CHUNK_ENABLED"},
 		{name: "heavy chunk without target", flags: map[string]string{"HEAVY_CHUNK_ENABLED": "true"}, message: "HEAVY_CHUNK_ENABLED requires at least one HEAVY_CHUNK_TENANT_REPORTS entry"},

@@ -166,7 +166,10 @@ func Load(lookup LookupFunc) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	summaryQueryEnabled, err := boolValue(lookup, "SUMMARY_QUERY_ENABLED", false)
+	// Bounded aggregate queries are the safe production default for every
+	// tenant. Operators can still set the flag to false as an emergency kill
+	// switch, but doing so intentionally falls back to the heavier detail plan.
+	summaryQueryEnabled, err := boolValue(lookup, "SUMMARY_QUERY_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}

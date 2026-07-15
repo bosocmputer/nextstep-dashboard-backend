@@ -111,11 +111,11 @@ func main() {
 		database.NewQuotaStore(pool), time.Now,
 	)
 
-	logger.Info("report worker started", "workerId", workerID, "concurrency", cfg.ReportWorkerConcurrency)
+	logger.Info("report worker started", "workerId", workerID, "concurrency", cfg.ReportWorkerConcurrency, "summaryQueriesEnabled", cfg.SummaryQueryEnabled)
 	var recoveryLoopAt atomic.Int64
 	go reportRecoveryLoop(ctx, logger, reportStore, &recoveryLoopAt)
 	go heartbeatLoopDynamic(ctx, logger, pool, workerID, "REPORT", hostname, func() map[string]any {
-		metadata := map[string]any{"concurrency": cfg.ReportWorkerConcurrency}
+		metadata := map[string]any{"concurrency": cfg.ReportWorkerConcurrency, "summaryQueriesEnabled": cfg.SummaryQueryEnabled}
 		if unix := recoveryLoopAt.Load(); unix > 0 {
 			metadata["recoveryLoopAt"] = time.Unix(unix, 0).UTC().Format(time.RFC3339)
 		}

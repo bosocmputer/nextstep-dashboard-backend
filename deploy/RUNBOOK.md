@@ -154,13 +154,16 @@ test delivery succeeds.
 
 ### Summary generation and heavy-query rollout
 
-All new query/cache flags default to `false`. Roll them out independently and
-never enable them for every tenant in the first release:
+`SUMMARY_QUERY_ENABLED` defaults to `true` for every tenant because Overview,
+Background, and LINE need bounded aggregate results rather than raw detail
+rows. Keep it configurable as an emergency kill switch; setting it to `false`
+intentionally falls back to the heavier detail plans. Query/cache capabilities
+remain independent:
 
-1. Deploy the additive migrations and instrumentation with all flags disabled.
-2. Enable `SUMMARY_QUERY_ENABLED=true` and validate Summary/Detail parity for
-   all ten reports off-peak. Then enable `GENERATION_CACHE_ENABLED=true` for the
-   application release.
+1. Validate Summary/Detail parity for all ten reports off-peak before deploying
+   a query-contract change. Deploy API and Worker from the same immutable image.
+2. Keep `GENERATION_CACHE_ENABLED=false` until generation publication and cache
+   invalidation have passed their separate rollout gate.
 3. Enable `STALE_REVALIDATION_ENABLED=true` only after published generations,
    cache-hit behavior, schedule queue age, and SML load are healthy.
 4. Keep `HEAVY_CHUNK_ENABLED=false` until Direct Stock or AR breaches its SLA

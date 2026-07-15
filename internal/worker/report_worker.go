@@ -525,6 +525,16 @@ func safeFailureMessage(code string) string {
 		return "ข้อมูลตัวเลขจาก SML อยู่ในรูปแบบที่ระบบไม่รองรับ"
 	case "REPORT_SET_INCOMPLETE":
 		return "สร้างรายงานในรอบนี้ไม่ครบ ระบบจึงไม่ส่ง LINE"
+	case "SML_ZIP_FORMAT_INVALID":
+		return "Server ลูกค้าส่งผลลัพธ์กลับมาในรูปแบบ ZIP ที่ไม่ถูกต้อง"
+	case "SML_ZIP_EMPTY":
+		return "Server ลูกค้าส่งผลลัพธ์ ZIP ที่ไม่มีข้อมูลกลับมา"
+	case "SML_ZIP_TOO_LARGE":
+		return "ผลลัพธ์จาก Server ลูกค้ามีขนาดใหญ่เกินขอบเขตที่ปลอดภัย"
+	case "SML_ZIP_READ_FAILED":
+		return "ระบบอ่านผลลัพธ์ ZIP จาก Server ลูกค้าไม่สำเร็จ"
+	case "SML_ZIP_INVALID":
+		return "ผลลัพธ์ ZIP จาก Server ลูกค้าไม่สมบูรณ์"
 	}
 	return fmt.Sprintf("Report run failed safely (%s).", code)
 }

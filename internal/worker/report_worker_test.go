@@ -558,8 +558,13 @@ func TestReportWorkerAcceptsScientificNotationFromDATA1DetailFallback(t *testing
 
 func TestSafeFailureMessageExplainsReportOutputAndIncompleteSet(t *testing.T) {
 	tests := map[string]string{
-		"REPORT_OUTPUT_INVALID": "ข้อมูลตัวเลขจาก SML อยู่ในรูปแบบที่ระบบไม่รองรับ",
-		"REPORT_SET_INCOMPLETE": "สร้างรายงานในรอบนี้ไม่ครบ ระบบจึงไม่ส่ง LINE",
+		"REPORT_OUTPUT_INVALID":  "ข้อมูลตัวเลขจาก SML อยู่ในรูปแบบที่ระบบไม่รองรับ",
+		"REPORT_SET_INCOMPLETE":  "สร้างรายงานในรอบนี้ไม่ครบ ระบบจึงไม่ส่ง LINE",
+		"SML_ZIP_FORMAT_INVALID": "Server ลูกค้าส่งผลลัพธ์กลับมาในรูปแบบ ZIP ที่ไม่ถูกต้อง",
+		"SML_ZIP_EMPTY":          "Server ลูกค้าส่งผลลัพธ์ ZIP ที่ไม่มีข้อมูลกลับมา",
+		"SML_ZIP_TOO_LARGE":      "ผลลัพธ์จาก Server ลูกค้ามีขนาดใหญ่เกินขอบเขตที่ปลอดภัย",
+		"SML_ZIP_READ_FAILED":    "ระบบอ่านผลลัพธ์ ZIP จาก Server ลูกค้าไม่สำเร็จ",
+		"SML_ZIP_INVALID":        "ผลลัพธ์ ZIP จาก Server ลูกค้าไม่สมบูรณ์",
 	}
 	for code, expected := range tests {
 		if got := safeFailureMessage(code); got != expected {
