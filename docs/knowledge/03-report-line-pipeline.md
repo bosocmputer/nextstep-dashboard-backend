@@ -1,0 +1,53 @@
+---
+status: current
+last_verified: 2026-07-15
+source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/notification/worker.go, internal/delivery/worker.go]
+tags: [backend, reports, queue, line]
+---
+
+# Report and LINE Pipeline
+
+## Projections
+
+- `SUMMARY` serves dashboard overview, background refresh, and scheduled LINE work. Aggregate SQL returns bounded KPI/trend/ranking data and does not write raw `report_run_rows`.
+- `DETAIL` is created for explicit report-detail work and may retain pageable rows until their per-run expiry.
+- Summary query results are capped by the query plan; totals cover the source set while only bounded presentation rows cross JavaWS.
+- `QueryPlanFingerprint` covers normalized SQL, projection, dashboard builder source, formatter source, and contract versions to invalidate incompatible cache output automatically.
+
+## Scheduled Flow
+
+```text
+Due schedule
+  -> resolve effective period per report
+  -> materialize immutable notification report positions
+  -> enqueue SUMMARY report runs at schedule priority
+  -> report worker validates JavaWS output and builds dashboards
+  -> notification worker requires the complete report set
+  -> render one bounded Flex bubble per eligible recipient
+  -> publish delivery/outbox records
+  -> delivery worker pushes to LINE with lease-safe status changes
+```
+
+`Work.Partial` causes `REPORT_SET_INCOMPLETE` before recipient selection or rendering. No LINE delivery or outbox payload is created from an incomplete report set. `ALL_REPORTS_FAILED` and `NO_ELIGIBLE_RECIPIENTS` remain distinct failure causes.
+
+## Queue and Lease Safety
+
+- Default priorities are Schedule 100, Viewer Dashboard 90, and Background FAST/STANDARD/HEAVY 30/25/20.
+- An active/recent compatible request may be joined where the store explicitly permits it; schedule occurrences retain their own materialization.
+- A lease-lost worker cannot publish a result.
+- Recovery marks abandoned work with safe codes and protects incomplete notification sets.
+- Browser cancellation only stops tracking; only queued work is safely cancellable through the report API.
+
+## JavaWS Failure Semantics
+
+- Failure before sending a request may receive one bounded retry.
+- Timeout/reset after request send has unknown remote state, is not automatically retried, and opens tenant protection before another query starts.
+- Repeated connection failures contribute to tenant/host circuit state.
+- Admin/Viewer errors expose safe codes and request IDs, not SQL or rows.
+
+## Viewer Snapshot Flow
+
+- An exact authorized snapshot is returned before revalidation decisions.
+- Fresh cache produces no JavaWS call.
+- Revalidation and generation-cache behavior is feature-flagged; inspect configuration before asserting it is active.
+- Delivery context always uses the report runs attached to that immutable occurrence and never revalidates automatically.

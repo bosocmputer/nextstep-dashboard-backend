@@ -6,6 +6,10 @@ coverage.out
 *.pem
 *.key
 .DS_Store
+
+# Local project knowledge indexes and Obsidian application state
+graphify-out/
+docs/knowledge/.obsidian/
 backups/
 deploy/backups/
 deploy/secrets/
