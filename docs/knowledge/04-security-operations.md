@@ -38,6 +38,13 @@ tags: [backend, security, operations, retention]
 - Verify current image digests, worker heartbeats, queue state, feature flags, and next schedules from the runtime before an operational change.
 - Migration changes require a backup and rollback/compatibility analysis; this knowledge-tooling change contains no migration.
 
+## Living Context Gate
+
+- `docs/knowledge/context-map.json` maps production-sensitive source paths to the notes that must be reviewed.
+- `make context-verify` validates map/schema/path/marker safety and checks the generated report catalog without writing.
+- Pull requests changing mapped source must update a mapped note or include auditable `Context-Reviewed` and `Context-Reason` lines.
+- Graphify remains local-only and is never installed or executed by CI.
+
 ## Incident Documentation
 
 Use the sanitized incident template. Record safe error codes, time windows, affected subsystem, evidence sources, containment, fix, and regression tests. Do not copy customer identifiers, payloads, tokens, SQL, KPI values, or full logs into Git.

@@ -25,18 +25,22 @@ Permission does not automatically send a report. A LINE occurrence contains only
 
 ## Approved Report Catalog
 
-| Key | Thai label | Period mode | Refresh class |
-| --- | --- | --- | --- |
-| `sales_goods_services` | รายงานขายสินค้าและบริการ | `DATE_RANGE` | FAST |
-| `purchase_goods_payables` | รายงานซื้อสินค้าและตั้งหนี้ | `DATE_RANGE` | STANDARD |
-| `gross_profit_by_product` | กำไรขั้นต้นตามสินค้า | `DATE_RANGE` | STANDARD |
-| `gross_profit_by_ar_customer` | กำไรขั้นต้นตามลูกหนี้ | `DATE_RANGE` | STANDARD |
-| `stock_balance` | รายงานสต็อกคงเหลือ | `AS_OF_DATE` | HEAVY |
-| `stock_reorder` | รายงานสินค้าถึงจุดสั่งซื้อ | `CURRENT_ONLY` | STANDARD |
-| `ar_customer_movement` | รายงานความเคลื่อนไหวลูกหนี้ | `AS_OF_DATE` | HEAVY |
-| `ar_debt_receipt` | รายงานรับชำระหนี้ | `DATE_RANGE` | FAST |
-| `cash_bank_receipts` | รายงานรับเงิน | `DATE_RANGE` | FAST |
-| `cash_bank_payments` | รายงานจ่ายเงิน | `DATE_RANGE` | FAST |
+This block is generated from `report.Definitions()`. Do not edit it manually.
+
+<!-- BEGIN GENERATED: REPORT_CATALOG -->
+| Key | Thai label | Version | Status | Period mode | Refresh class | Chunk safe |
+| --- | --- | --- | --- | --- | --- | --- |
+| `sales_goods_services` | รายงานขายสินค้าและบริการ | `1.0.0` | `ACTIVE` | `DATE_RANGE` | `FAST` | `false` |
+| `purchase_goods_payables` | รายงานซื้อสินค้าและตั้งหนี้ | `1.0.0` | `ACTIVE` | `DATE_RANGE` | `STANDARD` | `false` |
+| `gross_profit_by_product` | กำไรขั้นต้นตามสินค้า | `1.0.0` | `ACTIVE` | `DATE_RANGE` | `STANDARD` | `false` |
+| `gross_profit_by_ar_customer` | กำไรขั้นต้นตามลูกหนี้ | `1.0.0` | `ACTIVE` | `DATE_RANGE` | `STANDARD` | `false` |
+| `stock_balance` | รายงานสต็อกคงเหลือ | `1.0.0` | `ACTIVE` | `AS_OF_DATE` | `HEAVY` | `true` |
+| `stock_reorder` | รายงานสินค้าถึงจุดสั่งซื้อ | `1.0.0` | `ACTIVE` | `CURRENT_ONLY` | `STANDARD` | `false` |
+| `ar_customer_movement` | รายงานความเคลื่อนไหวลูกหนี้ | `1.0.0` | `ACTIVE` | `AS_OF_DATE` | `HEAVY` | `true` |
+| `ar_debt_receipt` | รายงานรับชำระหนี้ | `1.0.0` | `ACTIVE` | `DATE_RANGE` | `FAST` | `false` |
+| `cash_bank_receipts` | รายงานรับเงิน | `1.0.0` | `ACTIVE` | `DATE_RANGE` | `FAST` | `false` |
+| `cash_bank_payments` | รายงานจ่ายเงิน | `1.0.0` | `ACTIVE` | `DATE_RANGE` | `FAST` | `false` |
+<!-- END GENERATED: REPORT_CATALOG -->
 
 The catalog owns labels, version, status, selection policy, period mode, metrics, timeout, range, refresh, and chunk eligibility. Never derive these rules from frontend metadata.
 

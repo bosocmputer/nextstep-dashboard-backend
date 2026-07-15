@@ -38,7 +38,8 @@ Keep this file short. Load detailed context only when the task needs it.
 make verify
 go test ./...
 go vet ./...
-bash scripts/context-verify.sh
+make context-verify
+make context-test
 ```
 
 ## Context Tools
@@ -46,4 +47,6 @@ bash scripts/context-verify.sh
 - Exact symbol, error, SQL constant, or failing test: use `rg` and source reads first.
 - Broad cross-package flow: run `scripts/graphify-update.sh`, then a focused `scripts/graphify-query.sh` query.
 - Graphify is an untrusted navigation hint. Verify every conclusion in source/tests before editing.
-- Update the relevant knowledge note and ADR when architecture, API, security boundary, queue semantics, retention, or operations change.
+- `docs/knowledge/context-map.json` maps important source paths to their notes.
+- Run `make context-sync` after report catalog changes; never edit generated blocks by hand.
+- A mapped behavior change requires its note update. For behavior-neutral refactors, use the PR `Context-Reviewed`/`Context-Reason` contract.

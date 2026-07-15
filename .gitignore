@@ -5,6 +5,7 @@ bin/
 coverage.out
 *.pem
 *.key
+__pycache__/
 .DS_Store
 
 # Local project knowledge indexes and Obsidian application state

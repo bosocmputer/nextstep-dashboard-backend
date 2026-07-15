@@ -21,7 +21,17 @@ import urllib.parse
 root = pathlib.Path(sys.argv[1]).resolve()
 agents = root / "AGENTS.md"
 knowledge = root / "docs" / "knowledge"
+context_map = knowledge / "context-map.json"
 errors: list[str] = []
+
+sys.path.insert(0, str(root / "scripts"))
+try:
+    from context_impact import ImpactError, sensitive_context_labels, validate_repository
+except ImportError as error:
+    errors.append(f"context tooling import failed: {error}")
+    ImpactError = RuntimeError
+    sensitive_context_labels = lambda _text: ()
+    validate_repository = None
 
 if not agents.is_file():
     errors.append("AGENTS.md is missing")
@@ -33,23 +43,14 @@ if not notes:
     errors.append("docs/knowledge contains no Markdown notes")
 
 required = ("status:", "last_verified:", "source_of_truth:", "tags:")
-uuid_pattern = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", re.I)
-secret_patterns = {
-    "private key": re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----"),
-    "token-like value": re.compile(r"(?:sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,})"),
-    "entry reference": re.compile(r"(?:deliveryRef|(?:^|[?&])ref)=[A-Za-z0-9_-]{20,}", re.M),
-}
 
-for context_file in [agents, *notes]:
+for context_file in [agents, context_map, *notes]:
     if not context_file.is_file():
         continue
     context_text = context_file.read_text(encoding="utf-8")
     relative = context_file.relative_to(root)
-    if uuid_pattern.search(context_text):
-        errors.append(f"{relative} contains a UUID; context must be tenant-neutral")
-    for label, pattern in secret_patterns.items():
-        if pattern.search(context_text):
-            errors.append(f"{relative} contains {label}")
+    for label in sensitive_context_labels(context_text):
+        errors.append(f"{relative} contains {label}; context must remain tenant-neutral")
 
 for note in notes:
     text = note.read_text(encoding="utf-8")
@@ -88,6 +89,22 @@ for note in notes:
         resolved = (note.parent / urllib.parse.unquote(target)).resolve()
         if not resolved.is_file():
             errors.append(f"{relative} contains broken link {target}")
+
+try:
+    if validate_repository is not None:
+        validate_repository(
+            root=root,
+            map_path=context_map,
+            marker_pairs=(
+                (
+                    "docs/knowledge/02-domain-and-reports.md",
+                    "<!-- BEGIN GENERATED: REPORT_CATALOG -->",
+                    "<!-- END GENERATED: REPORT_CATALOG -->",
+                ),
+            ),
+        )
+except ImpactError as error:
+    errors.append(f"context map validation failed: {error}")
 
 if errors:
     print("context verification failed:", file=sys.stderr)
