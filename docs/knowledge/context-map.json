@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "api-domain",
+      "sourcePatterns": ["api/openapi.yaml", "api/openapi_test.go", "internal/httpapi/**", "internal/tenant/**", "internal/recipient/**"],
+      "excludePatterns": ["**/*_test.go"],
+      "contextDocuments": ["docs/knowledge/01-architecture.md", "docs/knowledge/02-domain-and-reports.md"],
+      "fallback": false
+    },
+    {
+      "id": "report-pipeline",
+      "sourcePatterns": ["internal/report/**"],
+      "excludePatterns": ["**/*_test.go"],
+      "contextDocuments": ["docs/knowledge/02-domain-and-reports.md", "docs/knowledge/03-report-line-pipeline.md"],
+      "fallback": false
+    },
+    {
+      "id": "queue-sml",
+      "sourcePatterns": ["internal/worker/**", "internal/sml/**", "internal/database/report_store.go", "internal/database/report_chunk_store.go", "internal/database/dashboard_generation.go", "internal/database/generation_snapshot_store.go"],
+      "excludePatterns": ["**/*_test.go"],
+      "contextDocuments": ["docs/knowledge/03-report-line-pipeline.md", "docs/knowledge/04-security-operations.md"],
+      "fallback": false
+    },
+    {
+      "id": "schedule-line",
+      "sourcePatterns": ["internal/schedule/**", "internal/notification/**", "internal/delivery/**", "internal/line/**", "internal/database/delivery_store.go", "internal/database/notification_store.go", "internal/database/schedule_execution_store.go", "internal/database/schedule_store.go"],
+      "excludePatterns": ["**/*_test.go"],
+      "contextDocuments": ["docs/knowledge/03-report-line-pipeline.md"],
+      "fallback": false
+    },
+    {
+      "id": "viewer-authorization",
+      "sourcePatterns": ["internal/viewer/**", "internal/auth/**", "internal/database/viewer_delivery_store.go", "internal/database/viewer_store.go"],
+      "excludePatterns": ["**/*_test.go"],
+      "contextDocuments": ["docs/knowledge/01-architecture.md", "docs/knowledge/04-security-operations.md"],
+      "fallback": false
+    },
+    {
+      "id": "schema-retention",
+      "sourcePatterns": ["internal/database/migrations/**", "internal/retention/**"],
+      "excludePatterns": ["**/*_test.go"],
+      "contextDocuments": ["docs/knowledge/01-architecture.md", "docs/knowledge/04-security-operations.md", "docs/knowledge/adr/*.md"],
+      "fallback": false
+    },
+    {
+      "id": "operations",
+      "sourcePatterns": [".github/workflows/**", "cmd/**", "deploy/**", "internal/config/**"],
+      "excludePatterns": ["**/*_test.go"],
+      "contextDocuments": ["docs/knowledge/04-security-operations.md"],
+      "fallback": false
+    },
+    {
+      "id": "backend-project-source",
+      "sourcePatterns": [".github/**", "api/**", "cmd/**", "deploy/**", "internal/**", "go.mod", "Makefile", "scripts/**"],
+      "excludePatterns": ["**/*_test.go", "scripts/context-impact-test.py", "scripts/context_sync_test.go"],
+      "contextDocuments": ["AGENTS.md", "docs/knowledge/*.md"],
+      "fallback": true
+    }
+  ]
+}

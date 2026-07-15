@@ -34,11 +34,20 @@ jobs:
       TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/nextstep_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
       - run: go mod download
+      - run: make context-verify
+      - run: make context-test
+      - name: Verify Living Context impact
+        if: github.event_name == 'pull_request'
+        env:
+          CONTEXT_PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash scripts/context-impact.sh --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"
       - run: go test -race ./...
       - run: go vet ./...
       - uses: golang/govulncheck-action@v1

@@ -1,4 +1,13 @@
+---
+status: historical
+last_verified: 2026-07-15
+source_of_truth: [api/openapi.yaml, internal/report/catalog.go]
+tags: [backend, historical, blueprint]
+---
+
 # Nextstep Dashboard Blueprint
+
+> Historical proposal: เอกสารนี้เก็บบริบทการออกแบบเริ่มต้นเท่านั้น หลาย contract และพฤติกรรมไม่ตรงกับ Production ปัจจุบัน ห้ามใช้เป็น source of truth สำหรับการ implement ให้เริ่มที่ `docs/knowledge/00-project-map.md` และตรวจ source/tests/OpenAPI จริง
 
 ## สถานะเอกสาร
 

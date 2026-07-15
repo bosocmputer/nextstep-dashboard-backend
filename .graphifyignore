@@ -1,0 +1,43 @@
+# Generated, runtime, dependency, and local-only content
+.git/
+graphify-out/
+.obsidian/
+coverage/
+tmp/
+vendor/
+backups/
+artifacts/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.log
+
+# Large/generated files that duplicate source-of-truth inputs
+go.sum
+
+# Customer or binary artifacts must never enter the local graph
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.bak
+*.csv
+*.xlsx
+*.xls
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.mp4
+*.mov
+*.mp3
+*.wav
