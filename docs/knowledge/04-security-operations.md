@@ -36,7 +36,10 @@ tags: [backend, security, operations, retention]
 - `deploy/RUNBOOK.md` is the operational source for preflight, backup, migration, health, smoke, rollback, and key rotation.
 - Never deploy from these knowledge notes or assume a branch/image is live.
 - Verify current image digests, worker heartbeats, queue state, feature flags, and next schedules from the runtime before an operational change.
-- Migration changes require a backup and rollback/compatibility analysis; this knowledge-tooling change contains no migration.
+- Migration changes require a backup and rollback/compatibility analysis.
+- Release maintenance opens the external window before application mutation,
+  records the internal window by an exact UUID, and suppresses PostgreSQL
+  command tags so successful inserts cannot be misclassified as failures.
 
 ## Nextstep Sentinel
 

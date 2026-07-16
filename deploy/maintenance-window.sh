@@ -68,7 +68,7 @@ if [ "$action" = open ]; then
   fi
 
   internal_id=$(printf "insert into operational_maintenance_windows (source, status, starts_at, ends_at, safe_reason) values ('DEPLOY','ACTIVE',now(),now() + make_interval(mins => %s),'PLANNED_PRODUCTION_DEPLOY') returning id;" "$duration" | \
-    dc exec -T postgres sh -ceu 'exec psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align' | tr -d '[:space:]')
+    dc exec -T postgres sh -ceu 'exec psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --quiet --tuples-only --no-align' | tr -d '[:space:]')
   if ! printf '%s' "$internal_id" | grep -Eq '^[0-9a-f-]{36}$'; then
     if [ -n "$external_id" ]; then external_request DELETE "/maintenance-windows/$external_id" >/dev/null 2>&1 || true; fi
     echo "Internal maintenance window could not be created." >&2
