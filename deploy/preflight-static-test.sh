@@ -9,7 +9,7 @@ env_file="$temporary/production.env"
 bad_env_file="$temporary/production-bad.env"
 raw_hash_env_file="$temporary/production-raw-hash.env"
 
-for runtime_script in backup.sh restore-drill.sh; do
+for runtime_script in backup.sh restore-drill.sh host-probe.sh; do
   if ! grep -q 'docker info' "$script_dir/$runtime_script"; then
     echo "$runtime_script must verify Docker daemon access before omitting sudo" >&2
     exit 1
@@ -70,6 +70,11 @@ HEAVY_CHUNK_TENANT_REPORTS=
 SCHEDULE_CHUNK_ENABLED=false
 SMART_SCHEDULE_PERIODS_ENABLED=false
 SMART_SCHEDULE_PERIOD_TENANT_IDS=
+OPERATIONAL_ALERTS_MODE=observe
+SENTINEL_INTERVAL_SECONDS=30
+SENTINEL_HOST_RUNTIME_DIR=/run/nextstep-dashboard
+WATCHDOG_ENABLED=true
+OFFSITE_BACKUP_CONFIGURED=false
 LINE_LOGIN_CHANNEL_ID=2010662588
 LINE_MESSAGING_CHANNEL_ACCESS_TOKEN=fake-token-value-that-is-long-enough-for-static-test
 EOF

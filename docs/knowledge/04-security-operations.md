@@ -1,7 +1,7 @@
 ---
 status: current
-last_verified: 2026-07-15
-source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/retention/worker.go, deploy/RUNBOOK.md]
+last_verified: 2026-07-16
+source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/retention/worker.go, internal/sentinel/service.go, internal/database/sentinel_store.go, deploy/RUNBOOK.md]
 tags: [backend, security, operations, retention]
 ---
 
@@ -37,6 +37,19 @@ tags: [backend, security, operations, retention]
 - Never deploy from these knowledge notes or assume a branch/image is live.
 - Verify current image digests, worker heartbeats, queue state, feature flags, and next schedules from the runtime before an operational change.
 - Migration changes require a backup and rollback/compatibility analysis; this knowledge-tooling change contains no migration.
+
+## Nextstep Sentinel
+
+- Sentinel is a separate process and database pool. Report, Notification, and Delivery transactions never call the incident writer, so monitoring failure cannot roll back business work.
+- Terminal Report, Notification, and Delivery scans use durable source state,
+  bounded batches, per-source cursors, a five-minute overlap, deduplication, and
+  backlog-aware advancement so the 500-row limit cannot skip later events.
+  Historical notification rows remain `UNKNOWN` and do not generate alerts.
+- P1 Telegram delivery is disabled in `off`/`observe` modes. `send` requires root-owned token/chat files and must follow the runbook preflight and observation window.
+- Incidents group by root cause and severity to avoid a multi-tenant message storm. Acknowledge stops reminders; only system evidence resolves an incident. Manual closure is `CLOSED_ACCEPTED` with a reason.
+- The emergency database alert lane stores only a safe reference and timestamps in a protected volume. Host probe and monitor heartbeat files are bounded, schema-checked, and contain no customer data.
+- Admin incident APIs are Admin-only, CSRF-protected for mutations, and `no-store`. Telegram carries only an alert reference and safe operational fields; tenant names are resolved only inside the authenticated Admin detail page.
+- Daily backup/host probes and isolated restore drills are host systemd jobs. Restore validation uses a temporary PostgreSQL container/volume and never targets the Production PostgreSQL instance.
 
 ## Living Context Gate
 

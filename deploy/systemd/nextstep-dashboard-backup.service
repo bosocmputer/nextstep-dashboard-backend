@@ -1,0 +1,15 @@
+[Unit]
+Description=Nextstep Dashboard verified backup
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/nextstep-dashboard
+ExecStart=/opt/nextstep-dashboard/deploy/backup.sh /opt/nextstep-dashboard/deploy/.env.production
+TimeoutStartSec=30min
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/nextstep-dashboard/backups

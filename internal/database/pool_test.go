@@ -17,3 +17,11 @@ func TestPoolConfigAppliesProductionBounds(t *testing.T) {
 		t.Fatalf("unexpected pool lifecycle: lifetime=%s idle=%s health=%s", cfg.MaxConnLifetime, cfg.MaxConnIdleTime, cfg.HealthCheckPeriod)
 	}
 }
+
+func TestSentinelPoolCanBeConstructedWithoutDatabaseConnectivity(t *testing.T) {
+	pool, err := OpenSentinelPool(t.Context(), "postgres://nextstep:secret@127.0.0.1:1/nextstep?sslmode=disable")
+	if err != nil {
+		t.Fatalf("OpenSentinelPool() error = %v", err)
+	}
+	pool.Close()
+}

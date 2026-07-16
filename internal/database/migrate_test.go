@@ -26,7 +26,7 @@ func TestEmbeddedMigrationsAreSequential(t *testing.T) {
 			t.Fatalf("migration %q has empty checksum", migration.Name)
 		}
 	}
-	if len(migrations) < 21 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction {
+	if len(migrations) < 23 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction || !migrations[22].NoTransaction {
 		t.Fatalf("snapshot indexes must use non-transactional concurrent migrations: %+v", migrations)
 	}
 }
@@ -116,6 +116,20 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'notification_run_reports' and column_name = 'position')`).Scan(&hasMaterializedPosition); err != nil || !hasMaterializedPosition {
 		t.Fatalf("notification_run_reports.position missing: exists=%v err=%v", hasMaterializedPosition, err)
+	}
+	var hasTriggerKind, hasIncidents, hasOutbox, hasCursor, hasMaintenance bool
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'notification_runs' and column_name = 'trigger_kind')`).Scan(&hasTriggerKind); err != nil || !hasTriggerKind {
+		t.Fatalf("notification_runs.trigger_kind missing: exists=%v err=%v", hasTriggerKind, err)
+	}
+	for table, destination := range map[string]*bool{
+		"operational_incidents":           &hasIncidents,
+		"operational_alert_outbox":        &hasOutbox,
+		"operational_monitor_cursors":     &hasCursor,
+		"operational_maintenance_windows": &hasMaintenance,
+	} {
+		if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.tables where table_schema = 'public' and table_name = $1)`, table).Scan(destination); err != nil || !*destination {
+			t.Fatalf("%s missing: exists=%v err=%v", table, *destination, err)
+		}
 	}
 	var hasQueryFingerprint, hasGenerationTables, hasHostCircuit, hasFairnessState, hasLeaseIndex bool
 	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'report_runs' and column_name = 'query_plan_fingerprint')`).Scan(&hasQueryFingerprint); err != nil || !hasQueryFingerprint {

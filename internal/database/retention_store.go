@@ -108,6 +108,22 @@ func (store *RetentionStore) Run(ctx context.Context, policy retention.Policy, n
 		return retention.Counts{}, err
 	}
 	historyCutoff := now.Add(-policy.HistoryRetention)
+	if counts.OperationalIncidents, err = execRetention(ctx, tx, `
+		delete from operational_incidents where id in (
+		  select id from operational_incidents
+		  where status in ('RESOLVED', 'CLOSED_ACCEPTED') and updated_at <= $1
+		  order by updated_at limit $2
+		)`, historyCutoff, policy.BatchSize); err != nil {
+		return retention.Counts{}, err
+	}
+	if counts.MaintenanceWindows, err = execRetention(ctx, tx, `
+		delete from operational_maintenance_windows where id in (
+		  select id from operational_maintenance_windows
+		  where status in ('COMPLETED', 'CANCELLED') and updated_at <= $1
+		  order by updated_at limit $2
+		)`, historyCutoff, policy.BatchSize); err != nil {
+		return retention.Counts{}, err
+	}
 	if counts.AuditLogs, err = execRetention(ctx, tx, `
 		delete from audit_logs where id in (
 		  select id from audit_logs where expires_at <= $1 order by expires_at limit $2

@@ -1,7 +1,7 @@
 ---
 status: current
-last_verified: 2026-07-15
-source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/notification/worker.go, internal/delivery/worker.go]
+last_verified: 2026-07-16
+source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/database/schedule_execution_store.go, internal/notification/worker.go, internal/delivery/worker.go]
 tags: [backend, reports, queue, line]
 ---
 
@@ -29,6 +29,11 @@ Due schedule
 ```
 
 `Work.Partial` causes `REPORT_SET_INCOMPLETE` before recipient selection or rendering. No LINE delivery or outbox payload is created from an incomplete report set. `ALL_REPORTS_FAILED` and `NO_ELIGIBLE_RECIPIENTS` remain distinct failure causes.
+
+Notification occurrences are classified at materialization time: due schedules
+write `SCHEDULED`, manual test sends write `TEST`, and historical rows remain
+`UNKNOWN`. Sentinel may alert terminal `SCHEDULED` failures but must never infer
+that an old or test occurrence was a scheduled customer delivery.
 
 ## Queue and Lease Safety
 

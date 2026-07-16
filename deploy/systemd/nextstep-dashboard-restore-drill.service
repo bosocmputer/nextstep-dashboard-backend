@@ -1,0 +1,15 @@
+[Unit]
+Description=Nextstep Dashboard isolated restore verification
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/nextstep-dashboard
+ExecStart=/bin/sh -ceu 'latest=$(find /opt/nextstep-dashboard/backups -maxdepth 1 -type f -name "nextstep-*.dump" -printf "%%T@ %%p\n" | sort -nr | head -1 | cut -d" " -f2-); test -n "$latest"; exec /opt/nextstep-dashboard/deploy/restore-drill.sh /opt/nextstep-dashboard/deploy/.env.production "$latest"'
+TimeoutStartSec=45min
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/run/nextstep-dashboard

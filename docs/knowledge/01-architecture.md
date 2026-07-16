@@ -1,7 +1,7 @@
 ---
 status: current
-last_verified: 2026-07-15
-source_of_truth: [cmd/api/main.go, cmd/worker/main.go, internal/database/pool.go, deploy/compose.production.yml]
+last_verified: 2026-07-16
+source_of_truth: [cmd/api/main.go, cmd/worker/main.go, cmd/sentinel/main.go, internal/database/pool.go, deploy/compose.production.yml]
 tags: [backend, architecture, multitenant]
 ---
 
@@ -19,10 +19,16 @@ Distributed worker
   -> scheduler -> report queue -> tenant JavaWS -> customer SML PostgreSQL (read-only)
   -> notification preparation -> LINE delivery outbox -> LINE Messaging API
   -> retention, quota, recovery, and heartbeats
+
+Sentinel monitor (independent process)
+  -> bounded durable-state scans + host probe files
+  -> operational incidents/outbox -> Telegram P1 alerts
+  -> file-backed emergency lane when application PostgreSQL is unavailable
 ```
 
 - `cmd/api` builds the stateless HTTP application and service graph.
 - `cmd/worker` starts independent loops sharing the application database.
+- `cmd/sentinel` observes terminal state and runtime probes without joining business transactions or querying SML.
 - PostgreSQL stores configuration, encrypted credentials, sessions, permissions, schedules, report/snapshot state, delivery state, audit, idempotency, leases, and circuits.
 - JavaWS and LINE are external dependencies with explicit timeout and safe failure behavior.
 
