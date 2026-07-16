@@ -57,14 +57,50 @@ daily:
 The script writes a SHA-256 sidecar under `backups/`. Copy backups to encrypted
 off-host storage; a backup on the same disk is not disaster recovery. At least
 monthly, and before the first schedule is activated, restore the newest backup
-into a temporary database and validate the catalog/migration ledger:
+into an isolated temporary PostgreSQL container, private Docker network, and
+disposable volume. The script first performs a read-only busy check against
+Production, then validates the catalog/migration ledger in isolation:
 
 ```bash
 ./deploy/restore-drill.sh ./deploy/.env.production ./backups/<backup>.dump
 ```
 
-The drill always drops its temporary database on exit and never restores over
-the production database.
+The drill has CPU/memory limits, publishes no port, destroys its container,
+network, and volume on exit, and never restores into Production PostgreSQL.
+
+Install the host probe, daily backup, and monthly restore units from
+`deploy/systemd/`. `host-probe.sh` inspects only Compose services labelled for
+this project and writes bounded sanitized JSON under
+`/run/nextstep-dashboard/host`.
+
+## Operational incident alerting
+
+Nextstep Sentinel runs independently from API/Worker and is rolled out in three
+phases:
+
+1. Apply migrations and start with `OPERATIONAL_ALERTS_MODE=observe` for at
+   least 24 hours. Inspect Admin incidents, evaluation time, false positives,
+   and host-probe freshness; no Telegram message is sent in this mode.
+2. Rotate any credential ever pasted into chat. Store the new bot token and chat
+   identifier in separate root-owned files with mode `0440`, group-readable only
+   by the Sentinel container identity. Never place either value in Git, Compose
+   environment variables, or logs. Run `sentinel-preflight`; send its one fixed
+   test message only with the explicit operator flag.
+3. Configure an external watchdog for `/api/v1/health/live`, `/ready`, and
+   `/watchdog`, then change to `send`. P1 only is sent to Telegram; P2 remains in
+   Admin. Acknowledge is not recovery, and manual closure is accepted risk.
+
+Sentinel reads at most 500 terminal events per cycle and does not call JavaWS.
+If application PostgreSQL fails twice, the file-backed emergency lane can alert
+directly; after two successful checks it records recovery evidence in PostgreSQL
+and sends one recovery message. External monitoring remains required when the
+entire host or network is unavailable.
+
+Release restarts use `deploy/release.sh`, which opens the external maintenance
+window before any mutation and records the internal window. If the external
+maintenance API fails, the release stops unless an explicit audited emergency
+override is supplied. The external account timezone must be `Asia/Bangkok` and
+its credential remains a deploy-only root secret.
 
 ## Release
 

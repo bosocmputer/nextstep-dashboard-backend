@@ -13,6 +13,7 @@ import (
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/auth"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sentinel"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/tenant"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/viewer"
 	"github.com/go-chi/chi/v5"
@@ -41,6 +42,8 @@ type Dependencies struct {
 	FlexPreviews    SchedulePreviewAPI
 	ScheduleTests   ScheduleTestSendAPI
 	Operations      OperationsAPI
+	Incidents       IncidentAPI
+	Watchdog        WatchdogAPI
 	ViewerAuth      ViewerAPI
 	ViewerReports   ViewerReportAPI
 	RefreshPolicies RefreshPolicyAPI
@@ -95,6 +98,16 @@ func NewHandler(dependencies Dependencies) http.Handler {
 		}
 		writeJSON(response, http.StatusOK, map[string]string{"status": "ready"})
 	})
+	if dependencies.Watchdog != nil {
+		router.Get("/api/v1/health/watchdog", func(response http.ResponseWriter, _ *http.Request) {
+			status := dependencies.Watchdog.Status()
+			httpStatus := http.StatusOK
+			if status.Status != "ok" {
+				httpStatus = http.StatusServiceUnavailable
+			}
+			writeJSON(response, httpStatus, status)
+		})
+	}
 	if dependencies.AdminAuth != nil {
 		registerAdminAuthRoutes(router, dependencies.AdminAuth, dependencies.SecureCookies)
 		registerAdminReportRoutes(router, dependencies.AdminAuth)
@@ -115,6 +128,9 @@ func NewHandler(dependencies Dependencies) http.Handler {
 		}
 		if dependencies.Operations != nil {
 			registerOperationsRoutes(router, dependencies.AdminAuth, dependencies.Operations)
+		}
+		if dependencies.Incidents != nil {
+			registerIncidentRoutes(router, dependencies.AdminAuth, dependencies.Incidents)
 		}
 	}
 	if dependencies.ViewerAuth != nil {
@@ -160,7 +176,7 @@ func requestLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			started := time.Now()
 			recorder := &responseRecorder{ResponseWriter: response}
 			next.ServeHTTP(recorder, request)
-			if request.URL.Path == "/api/v1/health/live" || request.URL.Path == "/api/v1/health/ready" {
+			if request.URL.Path == "/api/v1/health/live" || request.URL.Path == "/api/v1/health/ready" || request.URL.Path == "/api/v1/health/watchdog" {
 				return
 			}
 			status := recorder.status
@@ -185,6 +201,10 @@ func requestLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+type WatchdogAPI interface {
+	Status() sentinel.WatchdogStatus
 }
 
 type ViewerReportAPI interface {

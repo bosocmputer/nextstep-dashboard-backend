@@ -60,18 +60,27 @@ for key in $required_keys; do
 done
 require_key SML_ALLOWED_HOSTS
 
-feature_keys='SNAPSHOT_FIRST_ENABLED SNAPSHOT_FIRST_TENANT_IDS SUMMARY_QUERY_ENABLED GENERATION_CACHE_ENABLED STALE_REVALIDATION_ENABLED HEAVY_CHUNK_ENABLED HEAVY_CHUNK_TENANT_REPORTS SCHEDULE_CHUNK_ENABLED SMART_SCHEDULE_PERIODS_ENABLED SMART_SCHEDULE_PERIOD_TENANT_IDS REPORT_GLOBAL_QUERY_CONCURRENCY REPORT_HOST_QUERY_CONCURRENCY'
+feature_keys='SNAPSHOT_FIRST_ENABLED SNAPSHOT_FIRST_TENANT_IDS SUMMARY_QUERY_ENABLED GENERATION_CACHE_ENABLED STALE_REVALIDATION_ENABLED HEAVY_CHUNK_ENABLED HEAVY_CHUNK_TENANT_REPORTS SCHEDULE_CHUNK_ENABLED SMART_SCHEDULE_PERIODS_ENABLED SMART_SCHEDULE_PERIOD_TENANT_IDS REPORT_GLOBAL_QUERY_CONCURRENCY REPORT_HOST_QUERY_CONCURRENCY OPERATIONAL_ALERTS_MODE SENTINEL_INTERVAL_SECONDS SENTINEL_HOST_RUNTIME_DIR WATCHDOG_ENABLED OFFSITE_BACKUP_CONFIGURED'
 for key in $feature_keys; do
   require_key "$key"
 done
 
-for key in SML_ALLOW_PUBLIC_ENDPOINTS SNAPSHOT_FIRST_ENABLED SUMMARY_QUERY_ENABLED GENERATION_CACHE_ENABLED STALE_REVALIDATION_ENABLED HEAVY_CHUNK_ENABLED SCHEDULE_CHUNK_ENABLED SMART_SCHEDULE_PERIODS_ENABLED; do
+for key in SML_ALLOW_PUBLIC_ENDPOINTS SNAPSHOT_FIRST_ENABLED SUMMARY_QUERY_ENABLED GENERATION_CACHE_ENABLED STALE_REVALIDATION_ENABLED HEAVY_CHUNK_ENABLED SCHEDULE_CHUNK_ENABLED SMART_SCHEDULE_PERIODS_ENABLED WATCHDOG_ENABLED OFFSITE_BACKUP_CONFIGURED; do
   value=$(env_value "$key")
   case "$value" in
     true|false) ;;
     *) echo "$key must be true or false" >&2; exit 1 ;;
   esac
 done
+
+operational_alerts_mode=$(env_value OPERATIONAL_ALERTS_MODE)
+case "$operational_alerts_mode" in off|observe|send) ;; *) echo "OPERATIONAL_ALERTS_MODE must be off, observe, or send" >&2; exit 1 ;; esac
+sentinel_interval=$(env_value SENTINEL_INTERVAL_SECONDS)
+if ! printf '%s' "$sentinel_interval" | grep -Eq '^[0-9]+$' || [ "$sentinel_interval" -lt 15 ] || [ "$sentinel_interval" -gt 300 ]; then
+  echo "SENTINEL_INTERVAL_SECONDS must be an integer between 15 and 300" >&2
+  exit 1
+fi
+case "$(env_value SENTINEL_HOST_RUNTIME_DIR)" in /*) ;; *) echo "SENTINEL_HOST_RUNTIME_DIR must be an absolute path" >&2; exit 1 ;; esac
 
 old_ifs=$IFS
 allowed_ports=$(env_value SML_ALLOWED_PORTS)
@@ -221,6 +230,23 @@ if [ "$(file_mode "$tls_dir/server.key")" != "600" ]; then
 fi
 openssl verify -CAfile "$tls_dir/root.crt" "$tls_dir/server.crt" >/dev/null
 openssl x509 -in "$tls_dir/server.crt" -noout -checkhost postgres >/dev/null
+
+if [ "$operational_alerts_mode" = send ]; then
+  telegram_dir=${TELEGRAM_SECRET_DIR:-"$script_dir/secrets/telegram"}
+  for file in bot-token chat-id; do
+    path="$telegram_dir/$file"
+    if [ ! -r "$path" ]; then echo "Missing protected Telegram secret file: $path" >&2; exit 1; fi
+    case "$(file_mode "$path")" in 440) ;; *) echo "Telegram secret $file must be mode 440 for root:65532" >&2; exit 1 ;; esac
+    if [ "$(stat -c '%u' "$path" 2>/dev/null || stat -f '%u' "$path")" != 0 ]; then
+      echo "Telegram secret $file must be root-owned" >&2
+      exit 1
+    fi
+    if [ "$(stat -c '%g' "$path" 2>/dev/null || stat -f '%g' "$path")" != 65532 ]; then
+      echo "Telegram secret $file must use group 65532 for the non-root Sentinel process" >&2
+      exit 1
+    fi
+  done
+fi
 
 if [ "$mode" = "full" ]; then
   if docker compose version >/dev/null 2>&1; then

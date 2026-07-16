@@ -34,6 +34,8 @@ type Counts struct {
 	Sessions               int64
 	IdempotencyRequests    int64
 	AccessLinks            int64
+	OperationalIncidents   int64
+	MaintenanceWindows     int64
 }
 
 type Store interface {

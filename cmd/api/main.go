@@ -20,6 +20,7 @@ import (
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/schedule"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/secret"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sentinel"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sml"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/tenant"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/viewer"
@@ -73,6 +74,11 @@ func main() {
 	flexPreviewService := line.NewFlexPreviewService(tenantService, cfg.PublicBaseURL, time.Now).
 		ConfigureSmartPeriods(cfg.SmartSchedulePeriodsEnabled, cfg.SmartSchedulePeriodTenantIDs, periodObserver)
 
+	sentinelStore := database.NewSentinelStore(pool)
+	var watchdog httpapi.WatchdogAPI
+	if cfg.WatchdogEnabled {
+		watchdog = sentinel.NewWatchdog(cfg.SentinelRuntimeDirectory, time.Now)
+	}
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Dependencies{
@@ -89,6 +95,8 @@ func main() {
 			FlexPreviews:    flexPreviewService,
 			ScheduleTests:   scheduleTestService,
 			Operations:      operations.NewService(database.NewOperationsStore(pool), recipientService),
+			Incidents:       sentinel.NewAdminService(sentinelStore, time.Now),
+			Watchdog:        watchdog,
 			SecureCookies:   cfg.Environment == "production",
 		}),
 		ReadHeaderTimeout: 5 * time.Second,

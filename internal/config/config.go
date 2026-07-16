@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,6 +48,8 @@ type Config struct {
 	HeavyChunkEnabled            bool
 	HeavyChunkTenantReports      []string
 	ScheduleChunkEnabled         bool
+	WatchdogEnabled              bool
+	SentinelRuntimeDirectory     string
 }
 
 func Load(lookup LookupFunc) (Config, error) {
@@ -205,6 +208,14 @@ func Load(lookup LookupFunc) (Config, error) {
 	if heavyChunkEnabled && len(heavyChunkTenantReports) == 0 {
 		return Config{}, errors.New("HEAVY_CHUNK_ENABLED requires at least one HEAVY_CHUNK_TENANT_REPORTS entry")
 	}
+	watchdogEnabled, err := boolValue(lookup, "WATCHDOG_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	sentinelRuntimeDirectory := valueOrDefault(lookup, "SENTINEL_RUNTIME_DIR", "/run/nextstep-dashboard")
+	if !filepath.IsAbs(sentinelRuntimeDirectory) {
+		return Config{}, errors.New("SENTINEL_RUNTIME_DIR must be an absolute path")
+	}
 
 	sessionKey, err := decodeKey("SESSION_HMAC_KEY", values["SESSION_HMAC_KEY"], 32, false)
 	if err != nil {
@@ -245,6 +256,8 @@ func Load(lookup LookupFunc) (Config, error) {
 		HeavyChunkEnabled:            heavyChunkEnabled,
 		HeavyChunkTenantReports:      heavyChunkTenantReports,
 		ScheduleChunkEnabled:         scheduleChunkEnabled,
+		WatchdogEnabled:              watchdogEnabled,
+		SentinelRuntimeDirectory:     sentinelRuntimeDirectory,
 	}, nil
 }
 

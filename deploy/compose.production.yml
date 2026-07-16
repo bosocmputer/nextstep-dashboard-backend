@@ -30,6 +30,8 @@ x-app-environment: &app-environment
   SCHEDULE_CHUNK_ENABLED: ${SCHEDULE_CHUNK_ENABLED:-false}
   SMART_SCHEDULE_PERIODS_ENABLED: ${SMART_SCHEDULE_PERIODS_ENABLED:-false}
   SMART_SCHEDULE_PERIOD_TENANT_IDS: ${SMART_SCHEDULE_PERIOD_TENANT_IDS:-}
+  WATCHDOG_ENABLED: ${WATCHDOG_ENABLED:-false}
+  SENTINEL_RUNTIME_DIR: /run/nextstep-dashboard
   LINE_LOGIN_CHANNEL_ID: ${LINE_LOGIN_CHANNEL_ID:?LINE_LOGIN_CHANNEL_ID is required}
   LINE_MESSAGING_CHANNEL_ACCESS_TOKEN: ${LINE_MESSAGING_CHANNEL_ACCESS_TOKEN:?LINE_MESSAGING_CHANNEL_ACCESS_TOKEN is required}
 
@@ -104,6 +106,9 @@ services:
       start_period: 10s
     mem_limit: 512m
     pids_limit: 256
+    volumes:
+      - ./secrets/postgres/root.crt:/run/secrets/postgres-root.crt:ro
+      - ${SENTINEL_HOST_RUNTIME_DIR:-/run/nextstep-dashboard}:/run/nextstep-dashboard:ro
     networks: [internal]
 
   worker:
@@ -124,6 +129,50 @@ services:
       start_period: 45s
     mem_limit: 2g
     pids_limit: 512
+    networks: [internal]
+
+  sentinel-state-init:
+    image: postgres:16-alpine
+    user: "0:0"
+    command: ["sh", "-ceu", "chown 65532:65532 /var/lib/nextstep-sentinel && chmod 0700 /var/lib/nextstep-sentinel"]
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - sentinel_state:/var/lib/nextstep-sentinel
+    networks: [internal]
+
+  sentinel:
+    <<: *app-security
+    image: ghcr.io/bosocmputer/nextstep-dashboard-backend:${BACKEND_SHA:?BACKEND_SHA is required}
+    command: ["/app/sentinel"]
+    environment:
+      <<: *app-environment
+      OPERATIONAL_ALERTS_MODE: ${OPERATIONAL_ALERTS_MODE:-off}
+      SENTINEL_INTERVAL_SECONDS: ${SENTINEL_INTERVAL_SECONDS:-30}
+      SENTINEL_STATE_PATH: /var/lib/nextstep-sentinel/state.json
+      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram/bot-token
+      TELEGRAM_CHAT_ID_FILE: /run/secrets/telegram/chat-id
+    restart: unless-stopped
+    depends_on:
+      sentinel-state-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/app/sentinel-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 128
+    volumes:
+      - ./secrets/postgres/root.crt:/run/secrets/postgres-root.crt:ro
+      - ./secrets/telegram:/run/secrets/telegram:ro
+      - ${SENTINEL_HOST_RUNTIME_DIR:-/run/nextstep-dashboard}/host:/run/nextstep-dashboard/host:ro
+      - ${SENTINEL_HOST_RUNTIME_DIR:-/run/nextstep-dashboard}/monitor:/run/nextstep-dashboard/monitor
+      - sentinel_state:/var/lib/nextstep-sentinel
     networks: [internal]
 
   frontend:
@@ -156,3 +205,4 @@ networks:
 
 volumes:
   postgres_data:
+  sentinel_state:

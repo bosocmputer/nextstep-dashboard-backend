@@ -44,3 +44,19 @@ func OpenPool(ctx context.Context, databaseURL string, maxConnections, minConnec
 	}
 	return pool, nil
 }
+
+// OpenSentinelPool deliberately does not ping before returning. Sentinel must
+// stay alive long enough to use its file-backed emergency lane when PostgreSQL
+// is already unavailable during process startup. No business runtime may use
+// this helper because API/Worker startup must remain fail-fast on database loss.
+func OpenSentinelPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	cfg, err := poolConfig(databaseURL, 4, 0)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create Sentinel database pool: %w", err)
+	}
+	return pool, nil
+}

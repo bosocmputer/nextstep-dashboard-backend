@@ -37,6 +37,22 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/HealthStatus'}
         '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/health/watchdog:
+    get:
+      tags: [Health]
+      operationId: getWatchdog
+      description: Host and Sentinel health derived from bounded runtime files; does not require PostgreSQL.
+      responses:
+        '200':
+          description: Sentinel and protected host resources are healthy.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WatchdogStatus'}
+        '503':
+          description: Sentinel or a protected host resource is degraded.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WatchdogStatus'}
   /api/v1/auth/admin/login:
     post:
       tags: [Admin authentication]
@@ -1002,6 +1018,69 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ReportRun'}
         '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/admin/operational-incidents:
+    get:
+      tags: [Admin operations]
+      operationId: listOperationalIncidents
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/OperationalIncidentStatus'}}
+        - {name: severity, in: query, schema: {$ref: '#/components/schemas/OperationalIncidentSeverity'}}
+      responses:
+        '200':
+          description: Cursor-paginated sanitized operational incidents.
+          content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncidentPage'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/operational-incidents/{incidentId}:
+    get:
+      tags: [Admin operations]
+      operationId: getOperationalIncident
+      security: [{AdminSession: []}]
+      parameters:
+        - {name: incidentId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Sanitized incident evidence visible only to authenticated Admin.
+          content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncidentDetail'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/admin/operational-incidents/{incidentId}/acknowledge:
+    post:
+      tags: [Admin operations]
+      operationId: acknowledgeOperationalIncident
+      security: [{AdminSession: []}]
+      parameters:
+        - {name: incidentId, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncidentVersionInput'}}}
+      responses:
+        '200':
+          description: Reminder stopped; the incident remains unresolved.
+          content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncident'}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/operational-incidents/{incidentId}/accept-risk:
+    post:
+      tags: [Admin operations]
+      operationId: acceptOperationalIncidentRisk
+      security: [{AdminSession: []}]
+      parameters:
+        - {name: incidentId, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncidentAcceptRiskInput'}}}
+      responses:
+        '200':
+          description: Incident closed as accepted risk without claiming recovery.
+          content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncident'}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
 components:
   securitySchemes:
     AdminSession:
@@ -1830,6 +1909,82 @@ components:
         acceptedAt: {type: string, format: date-time, nullable: true}
         createdAt: {type: string, format: date-time}
         expiresAt: {type: string, format: date-time}
+    WatchdogStatus:
+      type: object
+      additionalProperties: false
+      required: [status, checkedAt, monitorFresh, hostProbeFresh, safeErrorCodes]
+      properties:
+        status: {type: string, enum: [ok, degraded]}
+        checkedAt: {type: string, format: date-time}
+        monitorFresh: {type: boolean}
+        hostProbeFresh: {type: boolean}
+        safeErrorCodes: {type: array, maxItems: 32, uniqueItems: true, items: {type: string, maxLength: 96}}
+        safeWarningCodes: {type: array, maxItems: 32, uniqueItems: true, items: {type: string, maxLength: 96}}
+    OperationalIncidentStatus:
+      type: string
+      enum: [OPEN, ACKNOWLEDGED, RESOLVED, CLOSED_ACCEPTED]
+    OperationalIncidentSeverity:
+      type: string
+      enum: [P1, P2]
+    OperationalIncident:
+      type: object
+      additionalProperties: false
+      required: [id, alertRef, incidentType, rootCause, severity, status, occurrenceCount, affectedCount, firstSeenAt, lastSeenAt, version]
+      properties:
+        id: {type: string, format: uuid}
+        alertRef: {type: string, pattern: '^NST-[A-Z0-9]{12}$'}
+        incidentType: {type: string, maxLength: 80}
+        rootCause: {type: string, enum: [SML_CONNECTIVITY, REPORT_DATA, LINE_DELIVERY, PLATFORM, CAPACITY]}
+        severity: {$ref: '#/components/schemas/OperationalIncidentSeverity'}
+        status: {$ref: '#/components/schemas/OperationalIncidentStatus'}
+        safeErrorCode: {type: string, maxLength: 96}
+        occurrenceCount: {type: integer, minimum: 1}
+        affectedCount: {type: integer, minimum: 1}
+        firstSeenAt: {type: string, format: date-time}
+        lastSeenAt: {type: string, format: date-time}
+        acknowledgedAt: {type: string, format: date-time}
+        resolvedAt: {type: string, format: date-time}
+        acceptedAt: {type: string, format: date-time}
+        acceptedReason: {type: string, minLength: 12, maxLength: 500}
+        version: {type: integer, minimum: 1}
+        events: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/OperationalIncidentEvent'}}
+    OperationalIncidentEvent:
+      type: object
+      additionalProperties: false
+      required: [id, eventKind, observedAt]
+      properties:
+        id: {type: string, format: uuid}
+        eventKind: {type: string, enum: [OBSERVED, ACKNOWLEDGED, EVIDENCE_RESOLVED, RISK_ACCEPTED, ALERT_SENT, ALERT_FAILED]}
+        sourceKind: {type: string, enum: [NOTIFICATION, DELIVERY, REPORT, WORKER, SML_CIRCUIT, HOST, BACKUP, DATABASE]}
+        safeErrorCode: {type: string, maxLength: 96}
+        tenantName: {type: string, maxLength: 160, description: Authenticated Admin detail only; never returned in Telegram.}
+        observedAt: {type: string, format: date-time}
+    OperationalIncidentDetail:
+      allOf:
+        - {$ref: '#/components/schemas/OperationalIncident'}
+        - type: object
+          required: [events]
+          properties:
+            events: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/OperationalIncidentEvent'}}
+    OperationalIncidentPage:
+      type: object
+      required: [data, page]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/OperationalIncident'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    OperationalIncidentVersionInput:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version: {type: integer, minimum: 1}
+    OperationalIncidentAcceptRiskInput:
+      type: object
+      additionalProperties: false
+      required: [version, reason]
+      properties:
+        version: {type: integer, minimum: 1}
+        reason: {type: string, minLength: 12, maxLength: 500}
     LineQuotaStatus:
       type: object
       additionalProperties: false

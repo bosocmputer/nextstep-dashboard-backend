@@ -117,7 +117,7 @@ func TestMaterializeDueScheduleIsAtomicAndSingleClaim(t *testing.T) {
 		t.Fatalf("successes=%d empty=%d execution=%+v", successes, emptyClaims, execution)
 	}
 	var notificationCount, reportCount int
-	if err := pool.QueryRow(ctx, `select count(*) from notification_runs where schedule_id = $1`, created.ID).Scan(&notificationCount); err != nil {
+	if err := pool.QueryRow(ctx, `select count(*) from notification_runs where schedule_id = $1 and trigger_kind = 'SCHEDULED'`, created.ID).Scan(&notificationCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `select count(*) from report_runs where tenant_id = $1 and source = 'SCHEDULE'`, tenantID).Scan(&reportCount); err != nil {
@@ -272,6 +272,10 @@ func TestMaterializeDueScheduleIsAtomicAndSingleClaim(t *testing.T) {
 	testExecution, err := store.MaterializeTest(ctx, []byte("admin"), "test-send-request", "schedule-test-send-001", tenantID, created.ID, now.Add(20*time.Second))
 	if err != nil || testExecution.Status != schedule.ExecutionCollecting || len(testExecution.ReportRunIDs) != 2 {
 		t.Fatalf("MaterializeTest() = %+v, %v", testExecution, err)
+	}
+	var triggerKind string
+	if err := pool.QueryRow(ctx, `select trigger_kind from notification_runs where id = $1`, testExecution.ID).Scan(&triggerKind); err != nil || triggerKind != "TEST" {
+		t.Fatalf("test notification trigger_kind = %q, err %v", triggerKind, err)
 	}
 	replayedExecution, err := store.MaterializeTest(ctx, []byte("admin"), "test-send-replay", "schedule-test-send-001", tenantID, created.ID, now.Add(21*time.Second))
 	if err != nil || replayedExecution.ID != testExecution.ID {

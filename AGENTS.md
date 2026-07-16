@@ -19,6 +19,7 @@ Keep this file short. Load detailed context only when the task needs it.
 - Notification/Flex/LINE delivery: `internal/notification/`, `internal/line/`, `internal/delivery/`
 - Viewer authorization and delivery context: `internal/viewer/`, `internal/database/viewer_delivery_store.go`
 - Schema/retention: `internal/database/migrations/`, `internal/retention/`
+- Production incidents and alert policy: `internal/sentinel/`, `internal/database/sentinel_store.go`, `cmd/sentinel/`
 - Production operations: `deploy/RUNBOOK.md`, `deploy/compose.production.yml`
 
 ## Non-Negotiable Invariants
@@ -28,6 +29,7 @@ Keep this file short. Load detailed context only when the task needs it.
 - A remote timeout after request send has unknown remote state and is not retried automatically.
 - Report leases and circuits prevent stale workers or repeated failures from publishing unsafe results.
 - LINE materialization is all-or-nothing; an incomplete report set creates no delivery/outbox payload.
+- Sentinel observes durable terminal state in separate transactions; alert failure never rolls back Report/LINE work.
 - Delivery context uses immutable notification report membership and does not trigger SML work.
 - Store UTC/ISO at boundaries; resolve business dates and display semantics in `Asia/Bangkok`.
 - Never log or document secrets, tokens, entry references, SQL, raw rows, tenant/customer identifiers, or KPI values.

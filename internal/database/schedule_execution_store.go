@@ -88,8 +88,8 @@ func (store *ScheduleStore) MaterializeTest(ctx context.Context, actorHash []byt
 	if _, err := tx.Exec(ctx, `
 		insert into notification_runs (
 		  id, tenant_id, schedule_id, scheduled_for, status, next_attempt_at, created_at, updated_at,
-		  materialization_version
-		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5, 2)`, execution.ID, tenantID, scheduleID, scheduledFor, now); err != nil {
+		  materialization_version, trigger_kind
+		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5, 2, 'TEST')`, execution.ID, tenantID, scheduleID, scheduledFor, now); err != nil {
 		return schedule.Execution{}, fmt.Errorf("insert test notification run: %w", err)
 	}
 	idempotencyDigest := sha256.Sum256([]byte(idempotencyKey))
@@ -181,8 +181,8 @@ func (store *ScheduleStore) MaterializeDue(ctx context.Context, workerID string,
 		if _, err := tx.Exec(ctx, `
 			insert into notification_runs (
 			  id, tenant_id, schedule_id, scheduled_for, status, safe_error_code,
-			  claimed_by, claimed_at, attempt, next_attempt_at, finished_at, created_at, updated_at
-			) values ($1, $2, $3, $4, 'FAILED', $5, $6, $7, 1, $7, $7, $7, $7)`,
+			  claimed_by, claimed_at, attempt, next_attempt_at, finished_at, created_at, updated_at, trigger_kind
+			) values ($1, $2, $3, $4, 'FAILED', $5, $6, $7, 1, $7, $7, $7, $7, 'SCHEDULED')`,
 			executionID, item.TenantID, item.ID, scheduledFor, safeCode, workerID, now); err != nil {
 			return schedule.Execution{}, fmt.Errorf("record blocked notification run: %w", err)
 		}
@@ -216,8 +216,8 @@ func (store *ScheduleStore) MaterializeDue(ctx context.Context, workerID string,
 	if _, err := tx.Exec(ctx, `
 		insert into notification_runs (
 		  id, tenant_id, schedule_id, scheduled_for, status, next_attempt_at, created_at, updated_at,
-		  materialization_version
-		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5, 2)`, executionID, item.TenantID, item.ID, scheduledFor, now.Add(5*time.Second)); err != nil {
+		  materialization_version, trigger_kind
+		) values ($1, $2, $3, $4, 'COLLECTING', $5, $5, $5, 2, 'SCHEDULED')`, executionID, item.TenantID, item.ID, scheduledFor, now.Add(5*time.Second)); err != nil {
 		return schedule.Execution{}, fmt.Errorf("insert notification run: %w", err)
 	}
 	reportRunIDs := make([]uuid.UUID, 0, len(item.ReportKeys))

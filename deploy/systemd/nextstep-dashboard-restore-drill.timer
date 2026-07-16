@@ -1,0 +1,9 @@
+[Unit]
+Description=Monthly isolated Nextstep Dashboard restore verification
+
+[Timer]
+OnCalendar=Sun *-*-1..7 03:30:00 Asia/Bangkok
+Persistent=true
+
+[Install]
+WantedBy=timers.target
