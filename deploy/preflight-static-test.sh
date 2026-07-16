@@ -95,4 +95,9 @@ if POSTGRES_TLS_DIR="$tls_dir" "$script_dir/preflight.sh" "$bad_env_file" static
   exit 1
 fi
 
+if ! grep -Fq -- "--quiet --tuples-only --no-align" "$script_dir/maintenance-window.sh"; then
+  echo "Maintenance window insert must suppress the PostgreSQL command tag before validating its UUID" >&2
+  exit 1
+fi
+
 echo "Static production preflight tests passed."
