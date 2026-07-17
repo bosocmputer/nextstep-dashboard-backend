@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sml"
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ type fakeRunStore struct {
 	persistRows      bool
 	retriedCode      string
 	failedCode       string
+	failureEvidence  *failure.Evidence
 	failCalls        int
 	remoteFailCalls  int
 	preflightRetries int
@@ -63,20 +65,23 @@ func (store *fakeRunStore) RetryPreRequestFailure(_ context.Context, _ uuid.UUID
 	store.retriedCode = safeCode
 	return nil
 }
-func (store *fakeRunStore) Fail(_ context.Context, _ uuid.UUID, _, safeCode, _ string, _ time.Time) error {
+func (store *fakeRunStore) Fail(_ context.Context, _ uuid.UUID, _ string, evidence failure.Evidence, _ time.Time) error {
 	store.failCalls++
-	store.failedCode = safeCode
+	store.failedCode = evidence.SafeErrorCode
+	store.failureEvidence = &evidence
 	return nil
 }
-func (store *fakeRunStore) FailRemoteUnknown(_ context.Context, _ uuid.UUID, _, safeCode, _ string, _ time.Time, until time.Time) error {
+func (store *fakeRunStore) FailRemoteUnknown(_ context.Context, _ uuid.UUID, _ string, evidence failure.Evidence, _ time.Time, until time.Time) error {
 	store.remoteFailCalls++
-	store.failedCode = safeCode
+	store.failedCode = evidence.SafeErrorCode
+	store.failureEvidence = &evidence
 	store.uncertaintyUntil = &until
 	return nil
 }
-func (store *fakeRunStore) FailPreRequestFailure(_ context.Context, _ uuid.UUID, _, safeCode, _ string, _ time.Time) error {
+func (store *fakeRunStore) FailPreRequestFailure(_ context.Context, _ uuid.UUID, _ string, evidence failure.Evidence, _ time.Time) error {
 	store.preflightFails++
-	store.failedCode = safeCode
+	store.failedCode = evidence.SafeErrorCode
+	store.failureEvidence = &evidence
 	return nil
 }
 func (store *fakeRunStore) PrepareChunks(_ context.Context, _ uuid.UUID, _ string, manifests []report.ChunkManifest, _ time.Time) error {
@@ -378,6 +383,9 @@ func TestReportWorkerStopsChunksAndOpensCircuitWhenRemoteStateIsUnknown(t *testi
 	}
 	if queries != 2 || store.uncertaintyUntil == nil || store.retriedCode != "" || store.failedCode != "SML_TIMEOUT" || store.completed != nil || store.remoteFailCalls != 1 || store.failCalls != 0 {
 		t.Fatalf("queries=%d circuit=%v retry=%q fail=%q atomicFail=%d plainFail=%d completed=%+v", queries, store.uncertaintyUntil, store.retriedCode, store.failedCode, store.remoteFailCalls, store.failCalls, store.completed)
+	}
+	if evidence := store.failureEvidence; evidence == nil || evidence.Stage != failure.StageWaitResponse || evidence.TransportPhase != failure.PhaseRequestSentResultUnknown || !evidence.RemoteStateUnknown {
+		t.Fatalf("failure evidence = %+v", evidence)
 	}
 }
 

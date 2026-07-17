@@ -212,6 +212,22 @@ func PresentationFor(evidence Evidence) Presentation {
 		presentation.SummaryTH = "ระบบตรวจพบว่าทรัพยากรสำคัญไม่เพียงพอสำหรับการทำงานตามปกติ"
 		presentation.NextActionsTH = []string{"ตรวจสอบพื้นที่จัดเก็บ หน่วยความจำ และการเชื่อมต่อฐานข้อมูล", "ลดภาระระบบหรือเพิ่มทรัพยากรก่อนเกิดงานล้มเหลวเพิ่มเติม"}
 	}
+	switch strings.ToUpper(strings.TrimSpace(evidence.SafeErrorCode)) {
+	case "REPORT_OUTPUT_INVALID":
+		presentation.SummaryTH = "ข้อมูลตัวเลขจาก SML อยู่ในรูปแบบที่ระบบไม่รองรับ"
+	case "REPORT_SET_INCOMPLETE":
+		presentation.SummaryTH = "สร้างรายงานในรอบนี้ไม่ครบ ระบบจึงไม่ส่ง LINE"
+	case "SML_ZIP_FORMAT_INVALID":
+		presentation.SummaryTH = "Server ลูกค้าส่งผลลัพธ์กลับมาในรูปแบบ ZIP ที่ไม่ถูกต้อง"
+	case "SML_ZIP_EMPTY":
+		presentation.SummaryTH = "Server ลูกค้าส่งผลลัพธ์ ZIP ที่ไม่มีข้อมูลกลับมา"
+	case "SML_ZIP_TOO_LARGE":
+		presentation.SummaryTH = "ผลลัพธ์จาก Server ลูกค้ามีขนาดใหญ่เกินขอบเขตที่ปลอดภัย"
+	case "SML_ZIP_READ_FAILED":
+		presentation.SummaryTH = "ระบบอ่านผลลัพธ์ ZIP จาก Server ลูกค้าไม่สำเร็จ"
+	case "SML_ZIP_INVALID":
+		presentation.SummaryTH = "ผลลัพธ์ ZIP จาก Server ลูกค้าไม่สมบูรณ์"
+	}
 	if evidence.Level == LevelLegacyPartial {
 		presentation.EvidenceNoteTH = "ระบบรุ่นเดิมไม่ได้บันทึกรายละเอียดขั้นตอนการเชื่อมต่อ จึงแสดงเฉพาะข้อเท็จจริงที่ตรวจสอบย้อนหลังได้"
 	}

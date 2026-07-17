@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -85,10 +86,11 @@ func TestClaimAppliesTenantFairnessHostLimitAndScheduleReservation(t *testing.T)
 	if _, err := store.Cancel(ctx, runIDs[tenantIDs[1]], now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fail(ctx, first.ID, "fairness-a", "TEST_COMPLETE", "", now.Add(time.Second)); err != nil {
+	testEvidence := failure.Complete(failure.Evidence{SafeErrorCode: "TEST_COMPLETE", OccurredAt: now.Add(time.Second)})
+	if err := store.Fail(ctx, first.ID, "fairness-a", testEvidence, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fail(ctx, second.ID, "fairness-b", "TEST_COMPLETE", "", now.Add(time.Second)); err != nil {
+	if err := store.Fail(ctx, second.ID, "fairness-b", testEvidence, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 

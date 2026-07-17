@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sml"
 	"github.com/google/uuid"
@@ -25,9 +26,9 @@ type ReportRunStore interface {
 	Complete(context.Context, uuid.UUID, string, report.SummaryResult, bool, time.Time) error
 	Retry(context.Context, uuid.UUID, string, string, time.Time, time.Time) error
 	RetryPreRequestFailure(context.Context, uuid.UUID, string, string, time.Time, time.Time) error
-	Fail(context.Context, uuid.UUID, string, string, string, time.Time) error
-	FailPreRequestFailure(context.Context, uuid.UUID, string, string, string, time.Time) error
-	FailRemoteUnknown(context.Context, uuid.UUID, string, string, string, time.Time, time.Time) error
+	Fail(context.Context, uuid.UUID, string, failure.Evidence, time.Time) error
+	FailPreRequestFailure(context.Context, uuid.UUID, string, failure.Evidence, time.Time) error
+	FailRemoteUnknown(context.Context, uuid.UUID, string, failure.Evidence, time.Time, time.Time) error
 }
 
 type HeavyChunkStore interface {
@@ -64,6 +65,8 @@ type ReportWorker struct {
 
 type executionFailure struct {
 	Code               string
+	Stage              failure.Stage
+	TransportPhase     failure.TransportPhase
 	Retryable          bool
 	RemoteStateUnknown bool
 	PreRequestFailure  bool
@@ -97,7 +100,8 @@ func (worker *ReportWorker) ProcessOne(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := worker.store.MarkRunning(ctx, run.ID, worker.workerID, reportLeaseDuration, worker.now().UTC()); err != nil {
+	startedAt := worker.now().UTC()
+	if err := worker.store.MarkRunning(ctx, run.ID, worker.workerID, reportLeaseDuration, startedAt); err != nil {
 		return err
 	}
 	totalProgressSteps := 5
@@ -125,23 +129,24 @@ func (worker *ReportWorker) ProcessOne(ctx context.Context) error {
 	}
 	if failure != nil {
 		now = worker.now().UTC()
+		evidence := buildFailureEvidence(run, *failure, startedAt, now)
 		if failure.RemoteStateUnknown {
 			// The remote PostgreSQL query may still be running after JavaWS has
 			// timed out. Failing the run and opening the tenant cooldown must be a
 			// single transaction so a crash cannot leave either invariant half-set.
-			return worker.store.FailRemoteUnknown(ctx, run.ID, worker.workerID, failure.Code, safeFailureMessage(failure.Code), now, now.Add(10*time.Minute))
+			return worker.store.FailRemoteUnknown(ctx, run.ID, worker.workerID, evidence, now, now.Add(10*time.Minute))
 		}
 		if failure.PreRequestFailure {
 			if run.Source == report.SourceDashboard && run.Attempt < 2 {
 				return worker.store.RetryPreRequestFailure(ctx, run.ID, worker.workerID, failure.Code, now.Add(30*time.Second), now)
 			}
-			return worker.store.FailPreRequestFailure(ctx, run.ID, worker.workerID, failure.Code, safeFailureMessage(failure.Code), now)
+			return worker.store.FailPreRequestFailure(ctx, run.ID, worker.workerID, evidence, now)
 		}
 		if failure.Retryable && failure.Code != "SML_TIMEOUT" && run.Source != report.SourceBackground && run.Attempt < maximumReportAttempts {
 			backoff := 30 * time.Second * time.Duration(1<<(run.Attempt-1))
 			return worker.store.Retry(ctx, run.ID, worker.workerID, failure.Code, now.Add(backoff), now)
 		}
-		return worker.store.Fail(ctx, run.ID, worker.workerID, failure.Code, safeFailureMessage(failure.Code), now)
+		return worker.store.Fail(ctx, run.ID, worker.workerID, evidence, now)
 	}
 	completedSteps := totalProgressSteps - 1
 	if err := worker.store.UpdateProgress(ctx, run.ID, worker.workerID, report.ProgressSavingResult, completedSteps, totalProgressSteps, worker.now().UTC()); err != nil {
@@ -154,7 +159,7 @@ func (worker *ReportWorker) ProcessOne(ctx context.Context) error {
 func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report.SummaryResult, *executionFailure) {
 	definition, ok := report.DefinitionFor(run.ReportKey)
 	if !ok {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 	}
 	usesSummaryBudget := run.Source == report.SourceSchedule || run.Source == report.SourceBackground || run.ResultKind == report.ResultSummary
 	totalTimeout := definition.DetailTotalTimeout
@@ -173,12 +178,12 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	if err != nil {
 		var connectionError *sml.ConnectionTestError
 		if errors.As(err, &connectionError) {
-			return report.SummaryResult{}, &executionFailure{Code: connectionError.SafeCode, Retryable: connectionError.Retryable}
+			return report.SummaryResult{}, &executionFailure{Code: connectionError.SafeCode, Stage: failure.StageLoadConnection, Retryable: connectionError.Retryable}
 		}
 		if errors.Is(err, sml.ErrConnectionNotConfigured) {
-			return report.SummaryResult{}, &executionFailure{Code: "SML_NOT_CONFIGURED"}
+			return report.SummaryResult{}, &executionFailure{Code: "SML_NOT_CONFIGURED", Stage: failure.StageLoadConnection}
 		}
-		return report.SummaryResult{}, &executionFailure{Code: "SML_CONNECTION_LOAD_FAILED", Retryable: true}
+		return report.SummaryResult{}, &executionFailure{Code: "SML_CONNECTION_LOAD_FAILED", Stage: failure.StageLoadConnection, Retryable: true}
 	}
 	projection := run.ResultKind
 	if projection == "" { // Compatibility for pre-projection runs already queued during rollout.
@@ -192,7 +197,7 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	}
 	plan, err := report.BuildQueryPlanForProjection(run.ReportKey, run.Period, projection)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 	}
 	consistency := report.ConsistencyStatement
 	if len(plan.Steps) > 1 || report.ComparisonSupported(run.ReportKey, run.Period) {
@@ -200,7 +205,7 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	}
 	if metadataStore, ok := worker.store.(SourceConsistencyStore); ok {
 		if err := metadataStore.SetSourceConsistency(executionCtx, run.ID, worker.workerID, consistency, worker.now().UTC()); err != nil {
-			return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
+			return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Stage: failure.StageQueueExecution, Retryable: true}
 		}
 	}
 	totalProgressSteps := 5
@@ -208,30 +213,30 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 		totalProgressSteps = 6
 	}
 	if err := worker.store.UpdateProgress(executionCtx, run.ID, worker.workerID, report.ProgressQueryingCurrent, 2, totalProgressSteps, worker.now().UTC()); err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Stage: failure.StageQueueExecution, Retryable: true}
 	}
-	stepRows, failure := worker.executePlan(executionCtx, run, definition, connection, plan)
-	if failure != nil {
-		return report.SummaryResult{}, failure
+	stepRows, planFailure := worker.executePlan(executionCtx, run, definition, connection, plan)
+	if planFailure != nil {
+		return report.SummaryResult{}, planFailure
 	}
 	summary, err := report.Summarize(run.ReportKey, stepRows)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID", Stage: failure.StageBuildReport}
 	}
 
 	comparisonPeriod, err := report.ResolveComparisonPeriod(run.Period)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 	}
 	comparisonRows := emptyReportSteps(run.ReportKey)
 	comparisonWarning := ""
 	if report.ComparisonSupported(run.ReportKey, run.Period) {
 		if err := worker.store.UpdateProgress(executionCtx, run.ID, worker.workerID, report.ProgressQueryingComparison, 3, totalProgressSteps, worker.now().UTC()); err != nil {
-			return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
+			return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Stage: failure.StageQueueExecution, Retryable: true}
 		}
 		comparisonPlan, planErr := report.BuildQueryPlanForProjection(run.ReportKey, comparisonPeriod, projection)
 		if planErr != nil {
-			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 		}
 		var comparisonFailure *executionFailure
 		comparisonRows, comparisonFailure = worker.executePlan(executionCtx, run, definition, connection, comparisonPlan)
@@ -248,11 +253,11 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 		buildingStep = 4
 	}
 	if err := worker.store.UpdateProgress(executionCtx, run.ID, worker.workerID, report.ProgressBuildingDashboard, buildingStep, totalProgressSteps, worker.now().UTC()); err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Stage: failure.StageQueueExecution, Retryable: true}
 	}
 	dashboard, err := report.BuildDashboard(run.ReportKey, run.Period, comparisonPeriod, stepRows, comparisonRows)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID", Stage: failure.StageBuildReport}
 	}
 	if comparisonWarning != "" {
 		report.SetComparisonUnavailable(&dashboard, comparisonWarning)
@@ -283,7 +288,7 @@ type persistedChunkResult struct {
 func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, definition report.Definition, connection sml.Connection, projection report.ResultKind) (report.SummaryResult, *executionFailure) {
 	chunkStore, ok := worker.store.(HeavyChunkStore)
 	if !ok {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_STORE_UNAVAILABLE"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_STORE_UNAVAILABLE", Stage: failure.StageQueueExecution}
 	}
 	chunkCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
@@ -292,19 +297,19 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 		totalProgressSteps = 6
 	}
 	if err := worker.store.UpdateProgress(chunkCtx, run.ID, worker.workerID, report.ProgressQueryingCurrent, 2, totalProgressSteps, worker.now().UTC()); err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Stage: failure.StageQueueExecution, Retryable: true}
 	}
 	manifestQuery, chunkSize, err := report.BuildChunkManifestQuery(run.ReportKey, run.Period)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 	}
-	manifestRows, failure := worker.query(chunkCtx, definition.SummaryTimeout, connection, manifestQuery)
-	if failure != nil {
-		return report.SummaryResult{}, failure
+	manifestRows, queryFailure := worker.query(chunkCtx, definition.SummaryTimeout, connection, manifestQuery)
+	if queryFailure != nil {
+		return report.SummaryResult{}, queryFailure
 	}
 	unitKeys, err := report.ChunkKeys(manifestRows)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID", Stage: failure.StageBuildReport}
 	}
 	if chunkSize < report.MinimumChunkSize {
 		chunkSize = report.MinimumChunkSize
@@ -322,12 +327,12 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 		})
 	}
 	if err := chunkStore.PrepareChunks(chunkCtx, run.ID, worker.workerID, manifests, worker.now().UTC()); err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_MANIFEST_PERSIST_FAILED"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_MANIFEST_PERSIST_FAILED", Stage: failure.StageSaveReport}
 	}
 
 	comparisonPeriod, err := report.ResolveComparisonPeriod(run.Period)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 	}
 	comparisonSupported := report.ComparisonSupported(run.ReportKey, run.Period)
 	currentChunks := make([]map[string][]map[string]string, 0, len(manifests))
@@ -335,12 +340,12 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 	comparisonWarning := ""
 	for _, manifest := range manifests {
 		if err := chunkStore.StartChunk(chunkCtx, run.ID, worker.workerID, manifest.Number, worker.now().UTC()); err != nil {
-			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_PROGRESS_FAILED"}
+			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_PROGRESS_FAILED", Stage: failure.StageQueueExecution}
 		}
 		plan, planErr := report.BuildChunkQueryPlan(run.ReportKey, run.Period, projection, manifest.UnitKeys)
 		if planErr != nil {
 			_ = chunkStore.FailChunk(chunkCtx, run.ID, worker.workerID, manifest.Number, "REPORT_CONTRACT_INVALID", worker.now().UTC())
-			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 		}
 		current, currentFailure := worker.executePlan(chunkCtx, run, definition, connection, plan)
 		if currentFailure != nil {
@@ -352,7 +357,7 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 			comparisonPlan, planErr := report.BuildChunkQueryPlan(run.ReportKey, comparisonPeriod, projection, manifest.UnitKeys)
 			if planErr != nil {
 				_ = chunkStore.FailChunk(chunkCtx, run.ID, worker.workerID, manifest.Number, "REPORT_CONTRACT_INVALID", worker.now().UTC())
-				return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID"}
+				return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 			}
 			comparison, currentFailure = worker.executePlan(chunkCtx, run, definition, connection, comparisonPlan)
 			if currentFailure != nil {
@@ -371,7 +376,7 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 		}
 		payload := persistedChunkResult{Current: current, Comparison: comparison}
 		if err := chunkStore.CompleteChunk(chunkCtx, run.ID, worker.workerID, manifest.Number, payload, rowCount, worker.now().UTC()); err != nil {
-			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_PROGRESS_FAILED"}
+			return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_PROGRESS_FAILED", Stage: failure.StageQueueExecution}
 		}
 		currentChunks = append(currentChunks, current)
 		if comparisonSupported {
@@ -380,10 +385,10 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 	}
 	currentRows, err := report.MergeChunkedSteps(run.ReportKey, projection, currentChunks)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID", Stage: failure.StageBuildReport}
 	}
 	if len(flattenStepRows(currentRows)) > definition.MaxRows {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_ROW_LIMIT_EXCEEDED"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_ROW_LIMIT_EXCEEDED", Stage: failure.StageBuildReport}
 	}
 	comparisonRows := emptyReportSteps(run.ReportKey)
 	if comparisonSupported {
@@ -398,15 +403,15 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 		buildingStep = 4
 	}
 	if err := worker.store.UpdateProgress(chunkCtx, run.ID, worker.workerID, report.ProgressBuildingDashboard, buildingStep, totalProgressSteps, worker.now().UTC()); err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Retryable: true}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_PROGRESS_FAILED", Stage: failure.StageQueueExecution, Retryable: true}
 	}
 	summary, err := report.Summarize(run.ReportKey, currentRows)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID", Stage: failure.StageBuildReport}
 	}
 	dashboard, err := report.BuildDashboard(run.ReportKey, run.Period, comparisonPeriod, currentRows, comparisonRows)
 	if err != nil {
-		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID"}
+		return report.SummaryResult{}, &executionFailure{Code: "REPORT_OUTPUT_INVALID", Stage: failure.StageBuildReport}
 	}
 	if comparisonWarning != "" {
 		report.SetComparisonUnavailable(&dashboard, comparisonWarning)
@@ -418,7 +423,7 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 func (worker *ReportWorker) query(ctx context.Context, timeout time.Duration, connection sml.Connection, query report.Query) ([]map[string]string, *executionFailure) {
 	rendered, err := report.RenderSQL(query)
 	if err != nil {
-		return nil, &executionFailure{Code: "REPORT_QUERY_RENDER_FAILED"}
+		return nil, &executionFailure{Code: "REPORT_QUERY_RENDER_FAILED", Stage: failure.StageBuildReport}
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -431,9 +436,9 @@ func (worker *ReportWorker) query(ctx context.Context, timeout time.Duration, co
 		return nil, failureFromSafeError(safeError)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return nil, &executionFailure{Code: "SML_TIMEOUT", Retryable: true, RemoteStateUnknown: true}
+		return nil, &executionFailure{Code: "SML_TIMEOUT", Stage: failure.StageWaitResponse, TransportPhase: failure.PhaseRequestSentResultUnknown, Retryable: true, RemoteStateUnknown: true}
 	}
-	return nil, &executionFailure{Code: "SML_QUERY_FAILED", Retryable: true, RemoteStateUnknown: true}
+	return nil, &executionFailure{Code: "SML_QUERY_FAILED", Stage: failure.StageWaitResponse, TransportPhase: failure.PhaseRequestSentResultUnknown, Retryable: true, RemoteStateUnknown: true}
 }
 
 func flattenStepRows(steps map[string][]map[string]string) []map[string]string {
@@ -450,7 +455,7 @@ func (worker *ReportWorker) executePlan(ctx context.Context, run report.Run, def
 	for _, step := range plan.Steps {
 		rendered, err := report.RenderSQL(step.Query)
 		if err != nil {
-			return nil, &executionFailure{Code: "REPORT_QUERY_RENDER_FAILED"}
+			return nil, &executionFailure{Code: "REPORT_QUERY_RENDER_FAILED", Stage: failure.StageBuildReport}
 		}
 		queryTimeout := definition.DetailTimeout
 		if run.Source == report.SourceSchedule || run.Source == report.SourceBackground || run.ResultKind == report.ResultSummary {
@@ -465,13 +470,13 @@ func (worker *ReportWorker) executePlan(ctx context.Context, run report.Run, def
 				return nil, failureFromSafeError(safeError)
 			}
 			if errors.Is(queryErr, context.DeadlineExceeded) {
-				return nil, &executionFailure{Code: "SML_TIMEOUT", Retryable: true, RemoteStateUnknown: true}
+				return nil, &executionFailure{Code: "SML_TIMEOUT", Stage: failure.StageWaitResponse, TransportPhase: failure.PhaseRequestSentResultUnknown, Retryable: true, RemoteStateUnknown: true}
 			}
-			return nil, &executionFailure{Code: "SML_QUERY_FAILED", Retryable: true, RemoteStateUnknown: true}
+			return nil, &executionFailure{Code: "SML_QUERY_FAILED", Stage: failure.StageWaitResponse, TransportPhase: failure.PhaseRequestSentResultUnknown, Retryable: true, RemoteStateUnknown: true}
 		}
 		totalRows += len(rows)
 		if totalRows > definition.MaxRows {
-			return nil, &executionFailure{Code: "REPORT_ROW_LIMIT_EXCEEDED"}
+			return nil, &executionFailure{Code: "REPORT_ROW_LIMIT_EXCEEDED", Stage: failure.StageBuildReport}
 		}
 		stepRows[step.Name] = rows
 	}
@@ -483,9 +488,32 @@ func failureFromSafeError(safeError *sml.SafeError) *executionFailure {
 		(safeError.Code == "SML_TIMEOUT" || safeError.Code == "SML_UNREACHABLE")
 	return &executionFailure{
 		Code: safeError.Code, Retryable: safeError.Retryable,
+		Stage:              failure.EvidenceForCode(safeError.Code).Stage,
+		TransportPhase:     failure.TransportPhase(safeError.Phase),
 		RemoteStateUnknown: safeError.Phase == sml.RequestSentResultUnknown || safeError.Phase == sml.ResponseStarted,
 		PreRequestFailure:  preRequest,
 	}
+}
+
+func buildFailureEvidence(run report.Run, execution executionFailure, startedAt, occurredAt time.Time) failure.Evidence {
+	duration := occurredAt.Sub(startedAt).Milliseconds()
+	if duration < 0 {
+		duration = 0
+	}
+	attempt := run.Attempt
+	connectionVersion := run.DataSourceVersion
+	evidence := failure.EvidenceForCode(execution.Code)
+	evidence.Stage = execution.Stage
+	evidence.TransportPhase = execution.TransportPhase
+	evidence.OccurredAt = occurredAt
+	evidence.StartedAt = &startedAt
+	evidence.FinishedAt = &occurredAt
+	evidence.DurationMS = &duration
+	evidence.Attempt = &attempt
+	evidence.Retryable = execution.Retryable
+	evidence.RemoteStateUnknown = execution.RemoteStateUnknown
+	evidence.ConnectionVersion = &connectionVersion
+	return failure.Complete(evidence)
 }
 
 func emptyReportSteps(key report.Key) map[string][]map[string]string {
@@ -520,21 +548,5 @@ func (worker *ReportWorker) keepLease(ctx context.Context, runID uuid.UUID, canc
 }
 
 func safeFailureMessage(code string) string {
-	switch code {
-	case "REPORT_OUTPUT_INVALID":
-		return "ข้อมูลตัวเลขจาก SML อยู่ในรูปแบบที่ระบบไม่รองรับ"
-	case "REPORT_SET_INCOMPLETE":
-		return "สร้างรายงานในรอบนี้ไม่ครบ ระบบจึงไม่ส่ง LINE"
-	case "SML_ZIP_FORMAT_INVALID":
-		return "Server ลูกค้าส่งผลลัพธ์กลับมาในรูปแบบ ZIP ที่ไม่ถูกต้อง"
-	case "SML_ZIP_EMPTY":
-		return "Server ลูกค้าส่งผลลัพธ์ ZIP ที่ไม่มีข้อมูลกลับมา"
-	case "SML_ZIP_TOO_LARGE":
-		return "ผลลัพธ์จาก Server ลูกค้ามีขนาดใหญ่เกินขอบเขตที่ปลอดภัย"
-	case "SML_ZIP_READ_FAILED":
-		return "ระบบอ่านผลลัพธ์ ZIP จาก Server ลูกค้าไม่สำเร็จ"
-	case "SML_ZIP_INVALID":
-		return "ผลลัพธ์ ZIP จาก Server ลูกค้าไม่สมบูรณ์"
-	}
-	return fmt.Sprintf("Report run failed safely (%s).", code)
+	return failure.SafeMessage(code)
 }
