@@ -450,8 +450,9 @@ type persistedSubjectMutation struct {
 	TenantID             string    `json:"tenant_id"`
 	SourceKind           string    `json:"source_kind"`
 	ObservationMode      string    `json:"observation_mode"`
+	FirstSeenAt          time.Time `json:"first_seen_at"`
 	ObservedAt           time.Time `json:"observed_at"`
-	Increment            bool      `json:"increment"`
+	OccurrenceIncrement  int       `json:"occurrence_increment"`
 	SafeErrorCode        string    `json:"safe_error_code"`
 	FailureCategory      string    `json:"failure_category"`
 	FailureStage         string    `json:"failure_stage"`
@@ -463,7 +464,7 @@ type persistedSubjectMutation struct {
 }
 
 func upsertOperationalSubjects(ctx context.Context, tx pgx.Tx, assignments []observationAssignment) error {
-	mutations := make([]persistedSubjectMutation, 0, len(assignments))
+	mutationsBySubject := make(map[string]persistedSubjectMutation)
 	heartbeats := make([]persistedSubjectMutation, 0)
 	for _, assignment := range assignments {
 		if assignment.observation.Downstream {
@@ -477,7 +478,8 @@ func upsertOperationalSubjects(ctx context.Context, tx pgx.Tx, assignments []obs
 		mutation := persistedSubjectMutation{
 			IncidentID: assignment.incidentID, SubjectKey: observation.SubjectKey, SubjectType: string(observation.SubjectType),
 			TenantID: tenantID, SourceKind: string(observation.SourceKind), ObservationMode: string(observation.ObservationMode),
-			ObservedAt: observation.ObservedAt, Increment: assignment.increment, SafeErrorCode: observation.SafeErrorCode,
+			FirstSeenAt: observation.ObservedAt, ObservedAt: observation.ObservedAt, OccurrenceIncrement: 1,
+			SafeErrorCode: observation.SafeErrorCode,
 		}
 		if observation.Evidence != nil {
 			mutation.FailureCategory = string(observation.Evidence.Category)
@@ -489,10 +491,26 @@ func upsertOperationalSubjects(ctx context.Context, tx pgx.Tx, assignments []obs
 			mutation.MeasurementKind, mutation.MeasurementValue, mutation.MeasurementThreshold, mutation.MeasurementUnit = string(observation.Measurement.Kind), &value, &threshold, string(observation.Measurement.Unit)
 		}
 		if assignment.increment {
-			mutations = append(mutations, mutation)
+			key := mutation.IncidentID.String() + "\x00" + mutation.SubjectKey
+			if previous, exists := mutationsBySubject[key]; exists {
+				firstSeenAt := previous.FirstSeenAt
+				if mutation.FirstSeenAt.Before(firstSeenAt) {
+					firstSeenAt = mutation.FirstSeenAt
+				}
+				if mutation.ObservedAt.Before(previous.ObservedAt) {
+					mutation = previous
+				}
+				mutation.FirstSeenAt = firstSeenAt
+				mutation.OccurrenceIncrement = previous.OccurrenceIncrement + 1
+			}
+			mutationsBySubject[key] = mutation
 		} else {
 			heartbeats = append(heartbeats, mutation)
 		}
+	}
+	mutations := make([]persistedSubjectMutation, 0, len(mutationsBySubject))
+	for _, mutation := range mutationsBySubject {
+		mutations = append(mutations, mutation)
 	}
 	if len(mutations) > 0 {
 		payload, err := json.Marshal(mutations)
@@ -508,13 +526,14 @@ func upsertOperationalSubjects(ctx context.Context, tx pgx.Tx, assignments []obs
 		)
 		select input.incident_id, input.subject_key, input.subject_type,
 		       nullif(input.tenant_id, '')::uuid, input.source_kind, 'ACTIVE', input.observation_mode,
-		       input.observed_at, input.observed_at, input.observed_at, input.observed_at, 1,
+		       input.first_seen_at, input.observed_at, input.observed_at, input.observed_at, input.occurrence_increment,
 		       input.safe_error_code, nullif(input.failure_category, ''), nullif(input.failure_stage, ''),
 		       nullif(input.transport_phase, ''), nullif(input.measurement_kind, ''), input.measurement_value,
 		       input.measurement_threshold, nullif(input.measurement_unit, '')
 		from jsonb_to_recordset($1::jsonb) as input(
 		  incident_id uuid, subject_key text, subject_type text, tenant_id text, source_kind text,
-		  observation_mode text, observed_at timestamptz, increment boolean, safe_error_code text,
+		  observation_mode text, first_seen_at timestamptz, observed_at timestamptz,
+		  occurrence_increment integer, safe_error_code text,
 		  failure_category text, failure_stage text, transport_phase text, measurement_kind text,
 		  measurement_value double precision, measurement_threshold double precision, measurement_unit text
 		)
@@ -523,7 +542,7 @@ func upsertOperationalSubjects(ctx context.Context, tx pgx.Tx, assignments []obs
 		    last_seen_at = greatest(operational_incident_subjects.last_seen_at, excluded.last_seen_at),
 		    last_persisted_at = greatest(operational_incident_subjects.last_persisted_at, excluded.last_persisted_at),
 		    last_failure_at = greatest(coalesce(operational_incident_subjects.last_failure_at, excluded.last_failure_at), excluded.last_failure_at),
-		    occurrence_count = operational_incident_subjects.occurrence_count + 1,
+		    occurrence_count = operational_incident_subjects.occurrence_count + excluded.occurrence_count,
 		    safe_error_code = excluded.safe_error_code,
 		    failure_category = excluded.failure_category, failure_stage = excluded.failure_stage,
 		    transport_phase = excluded.transport_phase, measurement_kind = excluded.measurement_kind,
