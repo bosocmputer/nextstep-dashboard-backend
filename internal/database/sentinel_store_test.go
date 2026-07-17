@@ -343,11 +343,15 @@ func TestSentinelStoreLinksIncompleteNotificationAsDownstreamWithoutSecondAlert(
 	if err := pool.QueryRow(ctx, `select count(*) from operational_incidents where root_cause='SML_CONNECTIVITY'`).Scan(&incidents); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `select count(*) from operational_alert_outbox`).Scan(&alerts); err != nil {
+	if err := pool.QueryRow(ctx, `select count(*) from operational_alert_outbox outbox
+		join operational_incidents incident on incident.id = outbox.incident_id
+		where incident.root_cause = 'SML_CONNECTIVITY'`).Scan(&alerts); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `select count(*) filter (where event_kind='OBSERVED'), count(*) filter (where event_kind='DOWNSTREAM_IMPACT')
-		from operational_incident_events`).Scan(&rootEvents, &downstreamEvents); err != nil {
+	if err := pool.QueryRow(ctx, `select
+		count(*) filter (where source_kind='REPORT' and source_id=$1 and event_kind='OBSERVED'),
+		count(*) filter (where source_kind='NOTIFICATION' and source_id=$2 and event_kind='DOWNSTREAM_IMPACT')
+		from operational_incident_events`, reportRunID, notificationRunID).Scan(&rootEvents, &downstreamEvents); err != nil {
 		t.Fatal(err)
 	}
 	if incidents != 1 || alerts != 1 || rootEvents != 1 || downstreamEvents != 1 {

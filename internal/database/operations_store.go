@@ -22,7 +22,7 @@ func (store *OperationsStore) GetReportRunDetail(ctx context.Context, runID uuid
 	var reportsTotal, reportsSucceeded, reportsFailed, reportsCancelled int
 	err := func() error {
 		row := store.pool.QueryRow(ctx, `
-			select `+reportRunColumns+`, tenant.name,
+			select r.*, tenant.name,
 			       coalesce(impact.reports_total, 1),
 			       coalesce(impact.reports_succeeded, case when r.status = 'SUCCEEDED' then 1 else 0 end),
 			       coalesce(impact.reports_failed, case when r.status = 'FAILED' then 1 else 0 end),
@@ -37,7 +37,9 @@ func (store *OperationsStore) GetReportRunDetail(ctx context.Context, runID uuid
 			       case when r.failure_evidence_version is null or r.data_source_version is null or r.data_source_version <= 0 then false
 			            when connection.version is null then true
 			            else connection.version <> r.data_source_version end
-			from report_runs r
+			from (
+			  select `+reportRunColumns+` from report_runs where id = $1
+			) r
 			join tenants tenant on tenant.id = r.tenant_id
 			left join lateral (
 			  select materialized.notification_run_id
