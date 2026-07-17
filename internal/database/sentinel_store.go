@@ -298,16 +298,20 @@ func (store *SentinelStore) monitorCursor(ctx context.Context, key string, now t
 func (store *SentinelStore) conditionObservations(ctx context.Context, now time.Time) ([]sentinel.Observation, error) {
 	observations := make([]sentinel.Observation, 0, 4)
 	var queueRunID, queueTenantID uuid.UUID
+	var queueStartedAt time.Time
 	err := store.pool.QueryRow(ctx, `
-		select id, tenant_id from report_runs
+		select id, tenant_id, queued_at from report_runs
 		where source = 'SCHEDULE' and status = 'QUEUED' and queued_at <= $1
-		order by queued_at, id limit 1`, now.Add(-120*time.Second)).Scan(&queueRunID, &queueTenantID)
+		order by queued_at, id limit 1`, now.Add(-120*time.Second)).Scan(&queueRunID, &queueTenantID, &queueStartedAt)
 	if err == nil {
-		observations = append(observations, sentinel.Observation{
+		observation := sentinel.Observation{
 			IncidentType: "SCHEDULE_QUEUE_AGE_EXCEEDED", RootCause: sentinel.RootPlatform, Severity: sentinel.SeverityP1,
 			SourceKind: sentinel.SourceReport, SourceID: queueRunID, TenantID: &queueTenantID,
-			SafeErrorCode: "SCHEDULE_QUEUE_AGE_EXCEEDED", ObservedAt: now,
-		})
+			SafeErrorCode: "SCHEDULE_QUEUE_AGE_EXCEEDED", ObservedAt: now, ObservationMode: sentinel.ObservationContinuous,
+			SubjectType: sentinel.SubjectTenant, SubjectKey: sentinel.TenantSubjectKey(queueTenantID),
+			Measurement: &sentinel.Measurement{Kind: sentinel.MeasurementQueueAgeSeconds, Value: now.Sub(queueStartedAt).Seconds(), Threshold: 120, Unit: sentinel.MeasurementSeconds},
+		}
+		observations = append(observations, observation)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("inspect schedule queue age: %w", err)
 	}
@@ -327,7 +331,8 @@ func (store *SentinelStore) conditionObservations(ctx context.Context, now time.
 		observations = append(observations, sentinel.Observation{
 			IncidentType: "WORKER_HEARTBEAT_MISSING", RootCause: sentinel.RootPlatform, Severity: sentinel.SeverityP1,
 			SourceKind: sentinel.SourceWorker, SourceID: stableOperationalID("worker-heartbeat"),
-			SafeErrorCode: "WORKER_HEARTBEAT_STALE", ObservedAt: now,
+			SafeErrorCode: "WORKER_HEARTBEAT_STALE", ObservedAt: now, ObservationMode: sentinel.ObservationContinuous,
+			SubjectType: sentinel.SubjectContainer, SubjectKey: sentinel.ResourceSubjectKey(sentinel.SubjectContainer, "report-worker"),
 		})
 	}
 	rows, err := store.pool.Query(ctx, `
@@ -351,7 +356,8 @@ func (store *SentinelStore) conditionObservations(ctx context.Context, now time.
 		observations = append(observations, sentinel.Observation{
 			IncidentType: "SML_CIRCUIT_SCHEDULE_AT_RISK", RootCause: sentinel.RootSMLConnectivity, Severity: sentinel.SeverityP1,
 			SourceKind: sentinel.SourceSMLCircuit, SourceID: stableOperationalID("tenant-circuit:" + tenantID.String()), TenantID: &tenantID,
-			SafeErrorCode: "SML_CIRCUIT_OPEN", ObservedAt: now,
+			SafeErrorCode: "SML_CIRCUIT_OPEN", ObservedAt: now, ObservationMode: sentinel.ObservationContinuous,
+			SubjectType: sentinel.SubjectTenant, SubjectKey: sentinel.TenantSubjectKey(tenantID),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -409,7 +415,8 @@ func (store *SentinelStore) conditionObservations(ctx context.Context, now time.
 		observations = append(observations, sentinel.Observation{
 			IncidentType: "SCHEDULED_REPORT_SLOW", RootCause: sentinel.RootPlatform, Severity: sentinel.SeverityP1,
 			SourceKind: sentinel.SourceReport, SourceID: runID, TenantID: &tenantID,
-			SafeErrorCode: "SCHEDULED_REPORT_SLOW", ObservedAt: now,
+			SafeErrorCode: "SCHEDULED_REPORT_SLOW", ObservedAt: now, ObservationMode: sentinel.ObservationContinuous,
+			SubjectType: sentinel.SubjectTenant, SubjectKey: sentinel.TenantSubjectKey(tenantID),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -439,7 +446,8 @@ func (store *SentinelStore) conditionObservations(ctx context.Context, now time.
 		observations = append(observations, sentinel.Observation{
 			IncidentType: "VIEWER_REPORT_FAILURE_REPEATED", RootCause: rootCauseForOperationalCode(safeCode), Severity: sentinel.SeverityP2,
 			SourceKind: sentinel.SourceReport, SourceID: stableOperationalID("viewer-failure:" + tenantID.String() + ":" + reportKey + ":" + safeCode), TenantID: &tenantID,
-			SafeErrorCode: safeCode, ObservedAt: now,
+			SafeErrorCode: safeCode, ObservedAt: now, ObservationMode: sentinel.ObservationContinuous,
+			SubjectType: sentinel.SubjectTenant, SubjectKey: sentinel.TenantSubjectKey(tenantID),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -461,10 +469,13 @@ func (store *SentinelStore) conditionObservations(ctx context.Context, now time.
 			store.databaseConnectionsHighAt = &startedAt
 		}
 		if now.Sub(*store.databaseConnectionsHighAt) >= 5*time.Minute {
+			measurement := connectionUsage * 100
 			observations = append(observations, sentinel.Observation{
 				IncidentType: "DATABASE_CONNECTIONS_CRITICAL", RootCause: sentinel.RootCapacity, Severity: sentinel.SeverityP1,
 				SourceKind: sentinel.SourceDatabase, SourceID: stableOperationalID("database-connections"),
-				SafeErrorCode: "DATABASE_CONNECTIONS_CRITICAL", ObservedAt: now,
+				SafeErrorCode: "DATABASE_CONNECTIONS_CRITICAL", ObservedAt: now, ObservationMode: sentinel.ObservationContinuous,
+				SubjectType: sentinel.SubjectDatabase, SubjectKey: sentinel.ResourceSubjectKey(sentinel.SubjectDatabase, "application-postgres"),
+				Measurement: &sentinel.Measurement{Kind: sentinel.MeasurementDatabaseConnectionsPercent, Value: measurement, Threshold: 95, Unit: sentinel.MeasurementPercent},
 			})
 		}
 	} else {
@@ -497,7 +508,7 @@ type incidentGroup struct {
 	last        time.Time
 }
 
-func (store *SentinelStore) RecordObservations(ctx context.Context, observations []sentinel.Observation, now time.Time, aggregationWindow time.Duration, enqueue bool) error {
+func (store *SentinelStore) recordObservationsLegacy(ctx context.Context, observations []sentinel.Observation, now time.Time, aggregationWindow time.Duration, enqueue bool) error {
 	if len(observations) == 0 {
 		return nil
 	}
@@ -820,7 +831,7 @@ func (store *SentinelStore) MaintenanceActive(ctx context.Context, now time.Time
 	return active, nil
 }
 
-func (store *SentinelStore) AdvanceLifecycle(ctx context.Context, activeFingerprints []string, now time.Time, enqueue bool) error {
+func (store *SentinelStore) advanceLifecycleLegacy(ctx context.Context, activeFingerprints []string, now time.Time, enqueue bool) error {
 	if activeFingerprints == nil {
 		activeFingerprints = []string{}
 	}
@@ -924,6 +935,8 @@ func (store *SentinelStore) ListIncidents(ctx context.Context, filter sentinel.I
 		       incident.occurrence_count, incident.affected_count, incident.first_seen_at,
 		       incident.last_seen_at, incident.acknowledged_at, incident.resolved_at,
 		       incident.accepted_at, coalesce(incident.accepted_reason, ''), incident.version,
+		       incident.observation_mode, incident.subject_type, incident.active_affected_count,
+		       incident.measurement_kind, incident.measurement_value, incident.measurement_threshold, incident.measurement_unit,
 		       coalesce((
 		         select array_agg(sample.name order by sample.name)
 		         from (
@@ -934,8 +947,9 @@ func (store *SentinelStore) ListIncidents(ctx context.Context, filter sentinel.I
 		       ), '{}'::text[])
 		from operational_incidents incident
 		where ($1::text is null or incident.status = $1) and ($2::text is null or incident.severity = $2)
+		  and (not $6::boolean or incident.status in ('OPEN', 'ACKNOWLEDGED'))
 		  and ($3::timestamptz is null or (incident.last_seen_at, incident.id) < ($3, $4))
-		order by incident.last_seen_at desc, incident.id desc limit $5`, status, severity, cursorTime, cursorID, filter.PageSize+1)
+		order by incident.last_seen_at desc, incident.id desc limit $5`, status, severity, cursorTime, cursorID, filter.PageSize+1, filter.ActiveOnly)
 	if err != nil {
 		return sentinel.IncidentPage{}, fmt.Errorf("list operational incidents: %w", err)
 	}
@@ -943,7 +957,7 @@ func (store *SentinelStore) ListIncidents(ctx context.Context, filter sentinel.I
 	items := make([]sentinel.Incident, 0, filter.PageSize+1)
 	for rows.Next() {
 		var tenantExamples []string
-		item, err := scanIncident(rows, &tenantExamples)
+		item, err := scanIncidentV2(rows, &tenantExamples)
 		if err != nil {
 			return sentinel.IncidentPage{}, fmt.Errorf("scan operational incident: %w", err)
 		}
@@ -974,11 +988,32 @@ func scanIncident(row interface{ Scan(...any) error }, extraDestinations ...any)
 	return item, err
 }
 
+func scanIncidentV2(row interface{ Scan(...any) error }, extraDestinations ...any) (sentinel.Incident, error) {
+	var item sentinel.Incident
+	var measurementKind *sentinel.MeasurementKind
+	var measurementValue, measurementThreshold *float64
+	var measurementUnit *sentinel.MeasurementUnit
+	destinations := []any{&item.ID, &item.AlertRef, &item.IncidentType, &item.RootCause, &item.Severity, &item.Status, &item.SafeErrorCode,
+		&item.OccurrenceCount, &item.AffectedCount, &item.FirstSeenAt, &item.LastSeenAt, &item.AcknowledgedAt, &item.ResolvedAt,
+		&item.AcceptedAt, &item.AcceptedReason, &item.Version, &item.ObservationMode, &item.SubjectType, &item.ActiveAffectedCount,
+		&measurementKind, &measurementValue, &measurementThreshold, &measurementUnit}
+	destinations = append(destinations, extraDestinations...)
+	if err := row.Scan(destinations...); err != nil {
+		return item, err
+	}
+	if measurementKind != nil && measurementValue != nil && measurementThreshold != nil && measurementUnit != nil {
+		item.Measurement = &sentinel.Measurement{Kind: *measurementKind, Value: *measurementValue, Threshold: *measurementThreshold, Unit: *measurementUnit}
+	}
+	return item, nil
+}
+
 func (store *SentinelStore) GetIncident(ctx context.Context, id uuid.UUID) (sentinel.IncidentDetail, error) {
-	item, err := scanIncident(store.pool.QueryRow(ctx, `
+	item, err := scanIncidentV2(store.pool.QueryRow(ctx, `
 		select id, alert_ref, incident_type, root_cause, severity, status, coalesce(safe_error_code, ''),
 		       occurrence_count, affected_count, first_seen_at, last_seen_at, acknowledged_at, resolved_at,
-		       accepted_at, coalesce(accepted_reason, ''), version
+		       accepted_at, coalesce(accepted_reason, ''), version,
+		       observation_mode, subject_type, active_affected_count,
+		       measurement_kind, measurement_value, measurement_threshold, measurement_unit
 		from operational_incidents where id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sentinel.IncidentDetail{}, sentinel.ErrNotFound
@@ -1055,7 +1090,34 @@ func (store *SentinelStore) GetIncident(ctx context.Context, id uuid.UUID) (sent
 		}
 		detail.Events = append(detail.Events, event)
 	}
-	return detail, rows.Err()
+	if err := rows.Err(); err != nil {
+		return sentinel.IncidentDetail{}, err
+	}
+	breakdownRows, err := store.pool.Query(ctx, `
+		select coalesce(subject.failure_category, ''), coalesce(subject.failure_stage, ''),
+		       coalesce(subject.transport_phase, ''), subject.subject_type,
+		       count(*)::integer, count(*) filter (where subject.status = 'ACTIVE')::integer,
+		       sum(subject.occurrence_count)::integer, min(subject.first_seen_at), max(subject.last_seen_at),
+		       max(subject.safe_error_code)
+		from operational_incident_subjects subject where subject.incident_id = $1
+		group by subject.failure_category, subject.failure_stage, subject.transport_phase, subject.subject_type
+		order by count(*) filter (where subject.status = 'ACTIVE') desc, count(*) desc limit 20`, id)
+	if err != nil {
+		return sentinel.IncidentDetail{}, fmt.Errorf("load incident cause breakdown: %w", err)
+	}
+	defer breakdownRows.Close()
+	for breakdownRows.Next() {
+		var entry sentinel.CauseBreakdown
+		var safeCode string
+		if err := breakdownRows.Scan(&entry.Category, &entry.Stage, &entry.TransportPhase, &entry.SubjectType,
+			&entry.AffectedCount, &entry.ActiveAffectedCount, &entry.OccurrenceCount,
+			&entry.FirstSeenAt, &entry.LastSeenAt, &safeCode); err != nil {
+			return sentinel.IncidentDetail{}, err
+		}
+		entry.Presentation = failure.Complete(failure.EvidenceForCode(safeCode)).Presentation
+		detail.CauseBreakdown = append(detail.CauseBreakdown, entry)
+	}
+	return detail, breakdownRows.Err()
 }
 
 func (store *SentinelStore) AcknowledgeIncident(ctx context.Context, id uuid.UUID, version int, now time.Time) (sentinel.Incident, error) {
@@ -1128,27 +1190,62 @@ func (store *SentinelStore) ClaimAlert(ctx context.Context, workerID string, lea
 		return sentinel.Alert{}, fmt.Errorf("reclaim expired operational alerts: %w", err)
 	}
 	var alert sentinel.Alert
+	var measurementKind *sentinel.MeasurementKind
+	var measurementValue, measurementThreshold *float64
+	var measurementUnit *sentinel.MeasurementUnit
 	err = tx.QueryRow(ctx, `
 		select outbox.id, outbox.alert_kind,
 		       incident.id, incident.alert_ref, incident.incident_type, incident.root_cause, incident.severity, incident.status,
 		       coalesce(incident.safe_error_code, ''), incident.occurrence_count, incident.affected_count, incident.first_seen_at,
 		       incident.last_seen_at, incident.acknowledged_at, incident.resolved_at, incident.accepted_at,
-		       coalesce(incident.accepted_reason, ''), incident.version
+		       coalesce(incident.accepted_reason, ''), incident.version,
+		       incident.observation_mode, incident.subject_type, incident.active_affected_count,
+		       incident.measurement_kind, incident.measurement_value, incident.measurement_threshold, incident.measurement_unit
 		from operational_alert_outbox outbox join operational_incidents incident on incident.id = outbox.incident_id
 		where outbox.status = 'PENDING' and outbox.available_at <= $1
-		  and ((outbox.alert_kind in ('OPEN', 'REMINDER') and incident.status = 'OPEN') or (outbox.alert_kind = 'RECOVERY' and incident.status = 'RESOLVED'))
+		  and ((outbox.alert_kind in ('OPEN', 'UPDATE', 'REMINDER') and incident.status = 'OPEN') or (outbox.alert_kind = 'RECOVERY' and incident.status = 'RESOLVED'))
 		order by outbox.available_at, outbox.id for update of outbox skip locked limit 1`, now).Scan(
 		&alert.ID, &alert.Kind, &alert.Incident.ID, &alert.Incident.AlertRef, &alert.Incident.IncidentType,
 		&alert.Incident.RootCause, &alert.Incident.Severity, &alert.Incident.Status, &alert.Incident.SafeErrorCode,
 		&alert.Incident.OccurrenceCount, &alert.Incident.AffectedCount, &alert.Incident.FirstSeenAt, &alert.Incident.LastSeenAt,
 		&alert.Incident.AcknowledgedAt, &alert.Incident.ResolvedAt, &alert.Incident.AcceptedAt, &alert.Incident.AcceptedReason,
-		&alert.Incident.Version)
+		&alert.Incident.Version, &alert.Incident.ObservationMode, &alert.Incident.SubjectType, &alert.Incident.ActiveAffectedCount,
+		&measurementKind, &measurementValue, &measurementThreshold, &measurementUnit)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sentinel.Alert{}, sentinel.ErrNoAlertReady
 	}
 	if err != nil {
 		return sentinel.Alert{}, fmt.Errorf("select operational alert: %w", err)
 	}
+	if measurementKind != nil && measurementValue != nil && measurementThreshold != nil && measurementUnit != nil {
+		alert.Incident.Measurement = &sentinel.Measurement{Kind: *measurementKind, Value: *measurementValue, Threshold: *measurementThreshold, Unit: *measurementUnit}
+	}
+	breakdownRows, err := tx.Query(ctx, `
+		select coalesce(subject.failure_category, ''), coalesce(subject.failure_stage, ''), coalesce(subject.transport_phase, ''),
+		       subject.subject_type, count(*)::integer, count(*) filter (where subject.status = 'ACTIVE')::integer,
+		       sum(subject.occurrence_count)::integer, min(subject.first_seen_at), max(subject.last_seen_at), max(subject.safe_error_code)
+		from operational_incident_subjects subject where subject.incident_id = $1
+		group by subject.failure_category, subject.failure_stage, subject.transport_phase, subject.subject_type
+		order by count(*) filter (where subject.status = 'ACTIVE') desc, count(*) desc limit 3`, alert.Incident.ID)
+	if err != nil {
+		return sentinel.Alert{}, fmt.Errorf("load alert cause breakdown: %w", err)
+	}
+	for breakdownRows.Next() {
+		var entry sentinel.CauseBreakdown
+		var safeCode string
+		if err := breakdownRows.Scan(&entry.Category, &entry.Stage, &entry.TransportPhase, &entry.SubjectType,
+			&entry.AffectedCount, &entry.ActiveAffectedCount, &entry.OccurrenceCount, &entry.FirstSeenAt, &entry.LastSeenAt, &safeCode); err != nil {
+			breakdownRows.Close()
+			return sentinel.Alert{}, err
+		}
+		entry.Presentation = failure.Complete(failure.EvidenceForCode(safeCode)).Presentation
+		alert.Incident.CauseBreakdown = append(alert.Incident.CauseBreakdown, entry)
+	}
+	if err := breakdownRows.Err(); err != nil {
+		breakdownRows.Close()
+		return sentinel.Alert{}, err
+	}
+	breakdownRows.Close()
 	if _, err := tx.Exec(ctx, `
 		update operational_alert_outbox set status = 'SENDING', claimed_by = $2, claimed_at = $3,
 		lease_expires_at = $4, attempt = attempt + 1, updated_at = $3 where id = $1`, alert.ID, workerID, now, now.Add(lease)); err != nil {
@@ -1165,7 +1262,11 @@ func (store *SentinelStore) CompleteAlert(ctx context.Context, alertID uuid.UUID
 		with completed as (
 		  update operational_alert_outbox set status = 'SENT', sent_at = $3, claimed_by = null, claimed_at = null,
 		  lease_expires_at = null, updated_at = $3 where id = $1 and claimed_by = $2 and status = 'SENDING'
-		  returning incident_id
+		  returning incident_id, alert_kind
+		), marked as (
+		  update operational_incidents incident set update_alert_sent = true, updated_at = $3
+		  from completed where incident.id = completed.incident_id and completed.alert_kind = 'UPDATE'
+		  returning incident.id
 		)
 		insert into operational_incident_events (incident_id, event_kind, observed_at)
 		select incident_id, 'ALERT_SENT', $3 from completed`, alertID, workerID, now)
@@ -1204,8 +1305,11 @@ func (store *SentinelStore) ReconcileDatabaseIncident(ctx context.Context, alert
 	observation := sentinel.Observation{
 		IncidentType: "PLATFORM_DATABASE_UNAVAILABLE", RootCause: sentinel.RootPlatform, Severity: sentinel.SeverityP1,
 		SourceKind: sentinel.SourceDatabase, SourceID: stableOperationalID("production-database"),
-		SafeErrorCode: "DATABASE_UNAVAILABLE", ObservedAt: startedAt.UTC(),
+		SafeErrorCode: "DATABASE_UNAVAILABLE", ObservedAt: startedAt.UTC(), ObservationMode: sentinel.ObservationContinuous,
+		SubjectType: sentinel.SubjectDatabase, SubjectKey: sentinel.ResourceSubjectKey(sentinel.SubjectDatabase, "production-database"),
 	}
+	family := observation.Fingerprint()
+	episodeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("nextstep-database-emergency:"+alertRef))
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return sentinel.Incident{}, fmt.Errorf("begin database incident reconciliation: %w", err)
@@ -1213,17 +1317,27 @@ func (store *SentinelStore) ReconcileDatabaseIncident(ctx context.Context, alert
 	defer func() { _ = tx.Rollback(ctx) }()
 	item, err := scanIncident(tx.QueryRow(ctx, `
 		insert into operational_incidents (
-		  alert_ref, fingerprint, incident_type, root_cause, severity, status, safe_error_code,
+		  id, alert_ref, fingerprint, family_fingerprint, incident_type, root_cause, severity, status, safe_error_code,
 		  occurrence_count, affected_count, first_seen_at, last_seen_at, aggregation_until,
-		  resolved_at, created_at, updated_at
-		) values ($1, $2, $3, $4, $5, 'RESOLVED', $6, 1, 1, $7, $8, $7, $8, $8, $8)
+		  resolved_at, observation_mode, subject_type, active_affected_count, burst_until, created_at, updated_at
+		) values ($1, $2, $3, $4, $5, $6, $7, 'RESOLVED', $8, 1, 1, $9, $10, $9, $10, 'CONTINUOUS', 'DATABASE', 0, $9 + interval '5 minutes', $10, $10)
 		on conflict (alert_ref) do update set updated_at = excluded.updated_at
 		returning id, alert_ref, incident_type, root_cause, severity, status, coalesce(safe_error_code, ''), occurrence_count,
 		affected_count, first_seen_at, last_seen_at, acknowledged_at, resolved_at, accepted_at, coalesce(accepted_reason, ''), version`,
-		alertRef, observation.Fingerprint(), observation.IncidentType, observation.RootCause, observation.Severity,
+		episodeID, alertRef, episodeFingerprint(family, episodeID), family, observation.IncidentType, observation.RootCause, observation.Severity,
 		observation.SafeErrorCode, startedAt.UTC(), recoveredAt.UTC()))
 	if err != nil {
 		return sentinel.Incident{}, fmt.Errorf("upsert database incident reconciliation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into operational_incident_subjects (
+		  incident_id, subject_key, subject_type, source_kind, status, observation_mode,
+		  first_seen_at, last_seen_at, last_persisted_at, last_failure_at, recovered_at,
+		  occurrence_count, safe_error_code, failure_category, failure_stage
+		) values ($1, $2, 'DATABASE', 'DATABASE', 'RECOVERED', 'CONTINUOUS', $3, $3, $3, $3, $4, 1, $5, 'PLATFORM', 'PLATFORM_CHECK')
+		on conflict (incident_id, subject_key) do update set status = 'RECOVERED', recovered_at = excluded.recovered_at`,
+		item.ID, observation.SubjectKey, startedAt.UTC(), recoveredAt.UTC(), observation.SafeErrorCode); err != nil {
+		return sentinel.Incident{}, fmt.Errorf("record database incident subject: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into operational_incident_events (incident_id, event_kind, source_kind, source_id, safe_error_code, observed_at)

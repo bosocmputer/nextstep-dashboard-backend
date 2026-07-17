@@ -3,6 +3,7 @@ package sentinel
 import (
 	"context"
 	"errors"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -22,10 +23,58 @@ var (
 )
 
 type IncidentFilter struct {
-	Status   *Status
-	Severity *Severity
+	Status     *Status
+	Severity   *Severity
+	ActiveOnly bool
+	Cursor     string
+	PageSize   int
+}
+
+type ConnectionReferenceStatus string
+type SchemeSecurity string
+
+const (
+	ConnectionExactVersion ConnectionReferenceStatus = "EXACT_VERSION"
+	ConnectionChanged      ConnectionReferenceStatus = "CHANGED_SINCE_FAILURE"
+	ConnectionCurrentOnly  ConnectionReferenceStatus = "CURRENT_ONLY"
+	ConnectionUnavailable  ConnectionReferenceStatus = "UNAVAILABLE"
+	SchemeHTTP             SchemeSecurity            = "HTTP"
+	SchemeHTTPS            SchemeSecurity            = "HTTPS"
+)
+
+type SMLConnectionReference struct {
+	EndpointURLAtFailure string                    `json:"endpointUrlAtFailure,omitempty"`
+	CurrentEndpointURL   string                    `json:"currentEndpointUrl,omitempty"`
+	EndpointHost         string                    `json:"endpointHost,omitempty"`
+	VersionAtFailure     *int                      `json:"versionAtFailure,omitempty"`
+	CurrentVersion       *int                      `json:"currentVersion,omitempty"`
+	Status               ConnectionReferenceStatus `json:"status"`
+	SchemeSecurity       SchemeSecurity            `json:"schemeSecurity,omitempty"`
+	TestAvailableAt      *time.Time                `json:"testAvailableAt,omitempty"`
+	TestBlockedReason    string                    `json:"testBlockedReason,omitempty"`
+}
+
+type IncidentOccurrence struct {
+	ID                  uuid.UUID               `json:"id"`
+	TenantID            uuid.UUID               `json:"tenantId,omitempty"`
+	TenantName          string                  `json:"tenantName,omitempty"`
+	ReportKey           string                  `json:"reportKey,omitempty"`
+	SourceKind          SourceKind              `json:"sourceKind"`
+	SafeErrorCode       string                  `json:"safeErrorCode"`
+	ObservedAt          time.Time               `json:"observedAt"`
+	FailureEvidence     *failure.Evidence       `json:"failureEvidence,omitempty"`
+	Impact              *failure.Impact         `json:"impact,omitempty"`
+	ConnectionReference *SMLConnectionReference `json:"smlConnectionReference,omitempty"`
+}
+
+type OccurrenceFilter struct {
 	Cursor   string
 	PageSize int
+}
+type OccurrencePage struct {
+	Data       []IncidentOccurrence `json:"data"`
+	NextCursor string               `json:"nextCursor,omitempty"`
+	HasMore    bool                 `json:"hasMore"`
 }
 
 type IncidentPage struct {
@@ -64,8 +113,84 @@ type Alert struct {
 type AdminStore interface {
 	ListIncidents(context.Context, IncidentFilter) (IncidentPage, error)
 	GetIncident(context.Context, uuid.UUID) (IncidentDetail, error)
+	ListIncidentOccurrences(context.Context, uuid.UUID, OccurrenceFilter) (OccurrencePage, error)
 	AcknowledgeIncident(context.Context, uuid.UUID, int, time.Time) (Incident, error)
 	AcceptIncidentRisk(context.Context, uuid.UUID, int, string, time.Time) (Incident, error)
+}
+
+func (service *AdminService) Occurrences(ctx context.Context, id uuid.UUID, filter OccurrenceFilter) (OccurrencePage, error) {
+	if id == uuid.Nil {
+		return OccurrencePage{}, ErrInvalidInput
+	}
+	if filter.PageSize == 0 {
+		filter.PageSize = 50
+	}
+	if filter.PageSize < 1 || filter.PageSize > 100 {
+		return OccurrencePage{}, ErrInvalidInput
+	}
+	page, err := service.store.ListIncidentOccurrences(ctx, id, filter)
+	if err != nil {
+		return OccurrencePage{}, err
+	}
+	for index := range page.Data {
+		occurrence := &page.Data[index]
+		if occurrence.FailureEvidence != nil {
+			completed := failure.Complete(*occurrence.FailureEvidence)
+			occurrence.FailureEvidence = &completed
+		}
+		if occurrence.ConnectionReference != nil {
+			occurrence.ConnectionReference = sanitizeConnectionReference(*occurrence.ConnectionReference)
+		}
+	}
+	return page, nil
+}
+
+func sanitizeConnectionReference(reference SMLConnectionReference) *SMLConnectionReference {
+	reference.EndpointURLAtFailure = sanitizeEndpointURL(reference.EndpointURLAtFailure)
+	reference.CurrentEndpointURL = sanitizeEndpointURL(reference.CurrentEndpointURL)
+	if reference.EndpointURLAtFailure == "" && reference.CurrentEndpointURL != "" {
+		reference.Status = ConnectionCurrentOnly
+	}
+	if reference.EndpointURLAtFailure == "" && reference.CurrentEndpointURL == "" {
+		reference.Status = ConnectionUnavailable
+	}
+	visible := reference.EndpointURLAtFailure
+	if visible == "" {
+		visible = reference.CurrentEndpointURL
+	}
+	parsed, err := url.Parse(visible)
+	if err != nil || parsed.Hostname() == "" {
+		reference.Status = ConnectionUnavailable
+		reference.EndpointURLAtFailure = ""
+		reference.CurrentEndpointURL = ""
+		return &reference
+	}
+	reference.EndpointHost = parsed.Hostname()
+	if parsed.Scheme == "https" {
+		reference.SchemeSecurity = SchemeHTTPS
+	} else {
+		reference.SchemeSecurity = SchemeHTTP
+	}
+	return &reference
+}
+
+func sanitizeEndpointURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 2048 {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	clean := parsed.String()
+	if len(clean) > 2048 {
+		return ""
+	}
+	return clean
 }
 
 type AdminService struct {
@@ -103,6 +228,11 @@ func (service *AdminService) Get(ctx context.Context, id uuid.UUID) (IncidentDet
 		return IncidentDetail{}, err
 	}
 	detail.Presentation = incidentPresentation(detail.Incident)
+	for index := range detail.CauseBreakdown {
+		entry := &detail.CauseBreakdown[index]
+		entry.InvestigationScope = investigationScope(entry.Category)
+		entry.AffectedLabelTH = affectedLabel(entry.SubjectType)
+	}
 	for index := range detail.Events {
 		if detail.Events[index].FailureEvidence != nil {
 			evidence := failure.Complete(*detail.Events[index].FailureEvidence)
@@ -117,6 +247,36 @@ func (service *AdminService) Get(ctx context.Context, id uuid.UUID) (IncidentDet
 		}
 	}
 	return detail, nil
+}
+
+func investigationScope(category failure.Category) InvestigationScope {
+	switch category {
+	case failure.CategoryJavaWSConnectivity, failure.CategoryJavaWSResponse:
+		return ScopeCustomerSystem
+	case failure.CategorySMLConfiguration:
+		return ScopeConfiguration
+	case failure.CategoryLineDelivery:
+		return ScopeLineProvider
+	case failure.CategoryPlatform, failure.CategoryCapacity, failure.CategoryQueueWorker:
+		return ScopeNextstepPlatform
+	default:
+		return ScopeUnknown
+	}
+}
+
+func affectedLabel(subject SubjectType) string {
+	switch subject {
+	case SubjectTenant:
+		return "ร้านที่ได้รับผล"
+	case SubjectDatabase:
+		return "ฐานข้อมูลที่ได้รับผล"
+	case SubjectContainer:
+		return "บริการระบบที่ได้รับผล"
+	case SubjectLineProvider:
+		return "ผู้ให้บริการ LINE ที่ได้รับผล"
+	default:
+		return "ทรัพยากร Server ที่ต้องตรวจสอบ"
+	}
 }
 
 func (service *AdminService) Acknowledge(ctx context.Context, id uuid.UUID, version int) (Incident, error) {
@@ -151,7 +311,7 @@ type MonitorStore interface {
 	ScanObservations(context.Context, time.Time, int, time.Duration) ([]Observation, error)
 	RecordObservations(context.Context, []Observation, time.Time, time.Duration, bool) error
 	AdvanceObservationCursors(context.Context, time.Time) error
-	AdvanceLifecycle(context.Context, []string, time.Time, bool) error
+	AdvanceLifecycle(context.Context, []Observation, bool, time.Time, bool) error
 	MaintenanceActive(context.Context, time.Time) (bool, error)
 	ClaimAlert(context.Context, string, time.Duration, time.Time) (Alert, error)
 	CompleteAlert(context.Context, uuid.UUID, string, time.Time) error
@@ -225,11 +385,8 @@ func (monitor *Monitor) Process(ctx context.Context) error {
 	if err := monitor.store.AdvanceObservationCursors(ctx, now); err != nil {
 		return err
 	}
-	activeFingerprints := make([]string, 0, len(observations))
-	for _, observation := range observations {
-		activeFingerprints = append(activeFingerprints, observation.Fingerprint())
-	}
-	if err := monitor.store.AdvanceLifecycle(ctx, activeFingerprints, now, enqueue); err != nil {
+	continuousSnapshotComplete := len(observations) < 500
+	if err := monitor.store.AdvanceLifecycle(ctx, observations, continuousSnapshotComplete, now, enqueue); err != nil {
 		return err
 	}
 	if !allowSend || monitor.sender == nil {

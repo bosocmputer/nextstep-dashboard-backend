@@ -51,10 +51,16 @@ type WatchdogStatus struct {
 type Watchdog struct {
 	runtimeDirectory string
 	now              func() time.Time
+	backupPolicy     BackupPolicy
 }
 
 func NewWatchdog(runtimeDirectory string, now func() time.Time) *Watchdog {
-	return &Watchdog{runtimeDirectory: runtimeDirectory, now: now}
+	return &Watchdog{runtimeDirectory: runtimeDirectory, now: now, backupPolicy: BackupPolicyPreMigrationOnly}
+}
+
+func (watchdog *Watchdog) ConfigureBackupPolicy(policy BackupPolicy) *Watchdog {
+	watchdog.backupPolicy = policy
+	return watchdog
 }
 
 func (watchdog *Watchdog) Status() WatchdogStatus {
@@ -111,20 +117,20 @@ func (watchdog *Watchdog) Status() WatchdogStatus {
 		if !probe.NTPSynchronized {
 			status.SafeErrorCodes = append(status.SafeErrorCodes, "HOST_TIME_UNSYNCHRONIZED")
 		}
-		if probe.Backup.LastSuccessAt == nil || probe.Backup.LastSuccessAt.Before(now.Add(-48*time.Hour)) {
+		if watchdog.backupPolicy != BackupPolicyPreMigrationOnly && (probe.Backup.LastSuccessAt == nil || probe.Backup.LastSuccessAt.Before(now.Add(-48*time.Hour))) {
 			status.SafeErrorCodes = append(status.SafeErrorCodes, "BACKUP_OVERDUE")
-		} else if probe.Backup.LastSuccessAt.Before(now.Add(-26 * time.Hour)) {
+		} else if watchdog.backupPolicy != BackupPolicyPreMigrationOnly && probe.Backup.LastSuccessAt != nil && probe.Backup.LastSuccessAt.Before(now.Add(-26*time.Hour)) {
 			status.SafeWarningCodes = append(status.SafeWarningCodes, "BACKUP_STALE")
 		}
-		if !probe.Backup.ChecksumValid {
+		if watchdog.backupPolicy != BackupPolicyPreMigrationOnly && !probe.Backup.ChecksumValid {
 			status.SafeErrorCodes = append(status.SafeErrorCodes, "BACKUP_CHECKSUM_INVALID")
 		}
-		if probe.Backup.RestoreVerifiedAt == nil || probe.Backup.RestoreVerifiedAt.Before(now.Add(-45*24*time.Hour)) {
+		if watchdog.backupPolicy != BackupPolicyPreMigrationOnly && (probe.Backup.RestoreVerifiedAt == nil || probe.Backup.RestoreVerifiedAt.Before(now.Add(-45*24*time.Hour))) {
 			status.SafeErrorCodes = append(status.SafeErrorCodes, "RESTORE_VERIFICATION_OVERDUE")
-		} else if probe.Backup.RestoreVerifiedAt.Before(now.Add(-35 * 24 * time.Hour)) {
+		} else if watchdog.backupPolicy != BackupPolicyPreMigrationOnly && probe.Backup.RestoreVerifiedAt != nil && probe.Backup.RestoreVerifiedAt.Before(now.Add(-35*24*time.Hour)) {
 			status.SafeWarningCodes = append(status.SafeWarningCodes, "RESTORE_VERIFICATION_STALE")
 		}
-		if !probe.Backup.OffsiteConfigured {
+		if watchdog.backupPolicy == BackupPolicyLocalAndOffsite && !probe.Backup.OffsiteConfigured {
 			status.SafeWarningCodes = append(status.SafeWarningCodes, "BACKUP_OFFSITE_NOT_CONFIGURED")
 		}
 	}

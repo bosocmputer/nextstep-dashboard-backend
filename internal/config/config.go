@@ -50,6 +50,7 @@ type Config struct {
 	ScheduleChunkEnabled         bool
 	WatchdogEnabled              bool
 	SentinelRuntimeDirectory     string
+	BackupPolicy                 string
 }
 
 func Load(lookup LookupFunc) (Config, error) {
@@ -216,6 +217,10 @@ func Load(lookup LookupFunc) (Config, error) {
 	if !filepath.IsAbs(sentinelRuntimeDirectory) {
 		return Config{}, errors.New("SENTINEL_RUNTIME_DIR must be an absolute path")
 	}
+	backupPolicy := valueOrDefault(lookup, "BACKUP_POLICY", "PRE_MIGRATION_ONLY")
+	if backupPolicy != "PRE_MIGRATION_ONLY" && backupPolicy != "LOCAL_DAILY" && backupPolicy != "LOCAL_AND_OFFSITE" {
+		return Config{}, errors.New("BACKUP_POLICY must be PRE_MIGRATION_ONLY, LOCAL_DAILY, or LOCAL_AND_OFFSITE")
+	}
 
 	sessionKey, err := decodeKey("SESSION_HMAC_KEY", values["SESSION_HMAC_KEY"], 32, false)
 	if err != nil {
@@ -258,6 +263,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		ScheduleChunkEnabled:         scheduleChunkEnabled,
 		WatchdogEnabled:              watchdogEnabled,
 		SentinelRuntimeDirectory:     sentinelRuntimeDirectory,
+		BackupPolicy:                 backupPolicy,
 	}, nil
 }
 

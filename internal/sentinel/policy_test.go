@@ -44,6 +44,38 @@ func TestObservationFingerprintAggregatesSameRootCauseAcrossTenants(t *testing.T
 	}
 }
 
+func TestContinuousObservationFingerprintSeparatesConditionAndResource(t *testing.T) {
+	first := Observation{
+		RootCause: RootCapacity, Severity: SeverityP2, SafeErrorCode: "HOST_DISK_WARNING",
+		SourceKind: SourceHost, SourceID: stableSentinelID("disk:/"), ObservationMode: ObservationContinuous,
+		SubjectType: SubjectHostResource, SubjectKey: "disk:/",
+	}
+	otherCondition := first
+	otherCondition.SafeErrorCode = "HOST_MEMORY_WARNING"
+	otherResource := first
+	otherResource.SubjectKey = "disk:/data"
+	if first.Fingerprint() == otherCondition.Fingerprint() {
+		t.Fatal("continuous disk and memory conditions shared a family fingerprint")
+	}
+	if first.Fingerprint() == otherResource.Fingerprint() {
+		t.Fatal("continuous conditions on different resources shared a family fingerprint")
+	}
+}
+
+func TestTenantSubjectKeyDoesNotExposeTenantIdentifier(t *testing.T) {
+	tenantID := uuid.MustParse("4a06e1c2-29cd-4b5a-81d4-b2a26c2e11ec")
+	observation := ReportObservation(uuid.New(), tenantID, "FAILED", "SML_UNREACHABLE", time.Now())
+	if observation == nil {
+		t.Fatal("expected report observation")
+	}
+	if observation.SubjectType != SubjectTenant || observation.ObservationMode != ObservationDiscrete {
+		t.Fatalf("subject metadata = %+v", observation)
+	}
+	if strings.Contains(observation.SubjectKey, tenantID.String()) || len(observation.SubjectKey) != 64 {
+		t.Fatalf("subject key is not a safe hash: %q", observation.SubjectKey)
+	}
+}
+
 func TestDownstreamNotificationUsesProvenReportRootFingerprint(t *testing.T) {
 	reportFailure := ReportObservation(uuid.New(), uuid.New(), "FAILED", "SML_UNREACHABLE", time.Now())
 	notification := NotificationObservation(uuid.New(), uuid.New(), TriggerScheduled, "FAILED", "REPORT_SET_INCOMPLETE", time.Now())
@@ -97,6 +129,27 @@ func TestAggregatedSMLIncidentKeepsThaiJavaWSCause(t *testing.T) {
 	message := TelegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://example.test/incidents")
 	if !strings.Contains(message, "ติดต่อ Java Web Service") || strings.Contains(message, "ระบบไม่สามารถดำเนินงานนี้ได้") {
 		t.Fatalf("aggregated SML message lost its root cause: %q", message)
+	}
+}
+
+func TestTelegramMixedSMLCauseUsesThaiBreakdownWithoutRawMultipleCode(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "MULTIPLE_SAFE_ERRORS", FirstSeenAt: time.Date(2026, 7, 16, 1, 0, 0, 0, time.UTC),
+		AffectedCount: 2, ActiveAffectedCount: 2,
+		CauseBreakdown: []CauseBreakdown{
+			{TransportPhase: "BEFORE_REQUEST_SENT", AffectedCount: 1},
+			{TransportPhase: "REQUEST_SENT_RESULT_UNKNOWN", AffectedCount: 1},
+		},
+	}
+	message := TelegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://example.test/incidents")
+	for _, required := range []string{"พบปัญหา Java Web Service 2 รูปแบบ", "ก่อนส่งคำขอ: 1 ร้าน", "ไม่ได้รับคำตอบภายในเวลา: 1 ร้าน"} {
+		if !strings.Contains(message, required) {
+			t.Fatalf("message %q does not contain %q", message, required)
+		}
+	}
+	if strings.Contains(message, "MULTIPLE_SAFE_ERRORS") || len(message) >= 3500 {
+		t.Fatalf("mixed message exposed implementation code or exceeded budget: %q", message)
 	}
 }
 

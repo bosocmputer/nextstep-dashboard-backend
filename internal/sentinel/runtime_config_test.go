@@ -1,0 +1,21 @@
+package sentinel
+
+import "testing"
+
+func TestRuntimeConfigDefaultsToPreMigrationBackupPolicy(t *testing.T) {
+	values := map[string]string{"DATABASE_URL": "postgres://example.test/nextstep", "PUBLIC_BASE_URL": "https://dashboard.example.test", "OPERATIONAL_ALERTS_MODE": "off"}
+	config, err := LoadRuntimeConfig(func(name string) (string, bool) { value, ok := values[name]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.BackupPolicy != BackupPolicyPreMigrationOnly {
+		t.Fatalf("BackupPolicy = %q", config.BackupPolicy)
+	}
+}
+
+func TestRuntimeConfigRejectsUnknownBackupPolicy(t *testing.T) {
+	values := map[string]string{"DATABASE_URL": "postgres://example.test/nextstep", "PUBLIC_BASE_URL": "https://dashboard.example.test", "OPERATIONAL_ALERTS_MODE": "off", "BACKUP_POLICY": "DISABLED"}
+	if _, err := LoadRuntimeConfig(func(name string) (string, bool) { value, ok := values[name]; return value, ok }); err == nil {
+		t.Fatal("unknown backup policy was accepted")
+	}
+}

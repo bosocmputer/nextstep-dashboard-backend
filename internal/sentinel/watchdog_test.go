@@ -51,9 +51,10 @@ func TestWatchdogRejectsMalformedOversizedAndCriticalProbe(t *testing.T) {
 	backupAt, restoreAt := now.Add(-49*time.Hour), now.Add(-46*24*time.Hour)
 	writeProbeFixture(t, directory, HostProbe{Version: 1, CheckedAt: now, Containers: HostContainers{API: true, Worker: false, Frontend: true, Postgres: true, Sentinel: true}, DiskUsedPercent: 93, InodeUsedPercent: 96, MemoryAvailablePercent: 4, NTPSynchronized: false, Backup: HostBackup{LastSuccessAt: &backupAt, ChecksumValid: false, RestoreVerifiedAt: &restoreAt}})
 	status := NewWatchdog(directory, func() time.Time { return now }).Status()
-	if status.Status != "degraded" || len(status.SafeErrorCodes) < 5 {
+	if status.Status != "degraded" || len(status.SafeErrorCodes) < 4 {
 		t.Fatalf("critical = %+v", status)
 	}
+	for _, code := range status.SafeErrorCodes { if code == "BACKUP_OVERDUE" || code == "BACKUP_CHECKSUM_INVALID" || code == "RESTORE_VERIFICATION_OVERDUE" { t.Fatalf("pre-migration policy emitted backup health code: %+v", status) } }
 }
 
 func writeProbeFixture(t *testing.T, directory string, probe HostProbe) {

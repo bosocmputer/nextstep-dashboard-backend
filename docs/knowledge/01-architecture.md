@@ -1,7 +1,7 @@
 ---
 status: current
 last_verified: 2026-07-17
-source_of_truth: [cmd/api/main.go, cmd/worker/main.go, cmd/sentinel/main.go, internal/database/pool.go, internal/httpapi/operations_handler.go, internal/httpapi/incident_handler.go, internal/failure/catalog.go, deploy/compose.production.yml]
+source_of_truth: [cmd/api/main.go, cmd/worker/main.go, cmd/sentinel/main.go, internal/database/pool.go, internal/httpapi/operations_handler.go, internal/httpapi/incident_handler.go, internal/database/sentinel_subject_store.go, internal/failure/catalog.go, deploy/compose.production.yml]
 tags: [backend, architecture, multitenant]
 ---
 
@@ -62,10 +62,17 @@ Sentinel monitor (independent process)
 - Admin Incident list/detail reads bounded incident evidence retained separately
   from Report Run rows. Thai presentation comes from the shared failure catalog,
   while technical codes remain additive contract fields.
+- Sentinel separates an incident family, a five-minute episode, and per-subject
+  state. Discrete failures can aggregate a burst without merging later episodes;
+  continuous conditions persist bounded updates and recover each subject before
+  resolving the incident.
 - Incident correlation records an incomplete LINE report set as downstream of
   its proven Report failure, avoiding a duplicate P1 without hiding the timeline.
+- Incident occurrences are a separately paginated Admin-only endpoint. It may
+  return a sanitized JavaWS URL reference for investigation, but Incident list,
+  Telegram, metrics, logs, and Codex clipboard never contain that URL.
 - These endpoints are Admin-only, `no-store`, and never return SQL, raw response,
-  credentials, endpoints, KPI values, or delivery/invitation references.
+  credentials, KPI values, or delivery/invitation references.
 
 ## Deployment Boundary
 

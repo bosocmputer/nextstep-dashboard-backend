@@ -26,7 +26,7 @@ func TestEmbeddedMigrationsAreSequential(t *testing.T) {
 			t.Fatalf("migration %q has empty checksum", migration.Name)
 		}
 	}
-	if len(migrations) < 25 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction || !migrations[22].NoTransaction || !migrations[24].NoTransaction {
+	if len(migrations) < 27 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction || !migrations[22].NoTransaction || !migrations[24].NoTransaction || !migrations[26].NoTransaction {
 		t.Fatalf("snapshot indexes must use non-transactional concurrent migrations: %+v", migrations)
 	}
 }
@@ -161,6 +161,13 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'operational_incident_events' and column_name = 'failure_stage')`).Scan(&hasIncidentEvidence); err != nil || !hasIncidentEvidence {
 		t.Fatalf("operational incident failure evidence missing: exists=%v err=%v", hasIncidentEvidence, err)
+	}
+	var hasIncidentSubjects, hasActiveAffected bool
+	if err := pool.QueryRow(ctx, `select to_regclass('operational_incident_subjects') is not null`).Scan(&hasIncidentSubjects); err != nil || !hasIncidentSubjects {
+		t.Fatalf("operational incident subjects missing: exists=%v err=%v", hasIncidentSubjects, err)
+	}
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'operational_incidents' and column_name = 'active_affected_count')`).Scan(&hasActiveAffected); err != nil || !hasActiveAffected {
+		t.Fatalf("operational incident active affected count missing: exists=%v err=%v", hasActiveAffected, err)
 	}
 
 	for _, table := range []string{

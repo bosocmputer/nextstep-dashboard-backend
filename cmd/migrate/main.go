@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -24,6 +25,15 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	if len(os.Args) == 2 && os.Args[1] == "--pending" {
+		pending, pendingErr := database.PendingMigrationCount(ctx, pool)
+		if pendingErr != nil {
+			logger.Error("inspect pending migrations", "error", "migration status unavailable")
+			os.Exit(1)
+		}
+		fmt.Println(pending)
+		return
+	}
 
 	if err := database.Migrate(ctx, pool); err != nil {
 		logger.Error("database migration failed", "error", err)

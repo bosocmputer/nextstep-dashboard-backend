@@ -85,30 +85,96 @@ const (
 	SourceDatabase     SourceKind = "DATABASE"
 )
 
+type ObservationMode string
+
+const (
+	ObservationDiscrete   ObservationMode = "DISCRETE"
+	ObservationContinuous ObservationMode = "CONTINUOUS"
+)
+
+type SubjectType string
+
+const (
+	SubjectTenant       SubjectType = "TENANT"
+	SubjectHostResource SubjectType = "HOST_RESOURCE"
+	SubjectBackupPolicy SubjectType = "BACKUP_POLICY"
+	SubjectDatabase     SubjectType = "DATABASE"
+	SubjectContainer    SubjectType = "CONTAINER"
+	SubjectLineProvider SubjectType = "LINE_PROVIDER"
+)
+
+type InvestigationScope string
+
+const (
+	ScopeCustomerSystem   InvestigationScope = "CUSTOMER_SYSTEM"
+	ScopeNextstepPlatform InvestigationScope = "NEXTSTEP_PLATFORM"
+	ScopeLineProvider     InvestigationScope = "LINE_PROVIDER"
+	ScopeConfiguration    InvestigationScope = "CONFIGURATION"
+	ScopeUnknown          InvestigationScope = "UNKNOWN"
+)
+
+type MeasurementKind string
+type MeasurementUnit string
+
+const (
+	MeasurementDiskUsedPercent            MeasurementKind = "DISK_USED_PERCENT"
+	MeasurementMemoryAvailablePercent     MeasurementKind = "MEMORY_AVAILABLE_PERCENT"
+	MeasurementDatabaseConnectionsPercent MeasurementKind = "DATABASE_CONNECTIONS_PERCENT"
+	MeasurementQueueAgeSeconds            MeasurementKind = "QUEUE_AGE_SECONDS"
+	MeasurementPercent                    MeasurementUnit = "PERCENT"
+	MeasurementSeconds                    MeasurementUnit = "SECONDS"
+	MeasurementCount                      MeasurementUnit = "COUNT"
+)
+
+type Measurement struct {
+	Kind      MeasurementKind `json:"kind"`
+	Value     float64         `json:"value"`
+	Threshold float64         `json:"threshold"`
+	Unit      MeasurementUnit `json:"unit"`
+}
+
 type Observation struct {
-	CursorKey      string
-	IncidentType   string
-	RootCause      RootCause
-	Severity       Severity
-	SourceKind     SourceKind
-	SourceID       uuid.UUID
-	TenantID       *uuid.UUID
-	SafeErrorCode  string
-	ObservedAt     time.Time
-	CorrelationKey string
-	Downstream     bool
-	Evidence       *failure.Evidence
-	ReportKey      string
-	TriggerKind    TriggerKind
-	Impact         *failure.Impact
+	CursorKey       string
+	IncidentType    string
+	RootCause       RootCause
+	Severity        Severity
+	SourceKind      SourceKind
+	SourceID        uuid.UUID
+	TenantID        *uuid.UUID
+	SafeErrorCode   string
+	ObservedAt      time.Time
+	CorrelationKey  string
+	Downstream      bool
+	Evidence        *failure.Evidence
+	ReportKey       string
+	TriggerKind     TriggerKind
+	Impact          *failure.Impact
+	ObservationMode ObservationMode
+	SubjectType     SubjectType
+	SubjectKey      string
+	Measurement     *Measurement
 }
 
 func (observation Observation) Fingerprint() string {
 	// The fingerprint deliberately groups by root cause and severity. A single
 	// JavaWS or platform outage can surface through several safe error codes;
 	// splitting those codes would create a Telegram storm during a broad outage.
-	canonical := strings.Join([]string{string(observation.RootCause), string(observation.Severity)}, "|")
+	parts := []string{string(observation.RootCause), string(observation.Severity)}
+	if observation.ObservationMode == ObservationContinuous {
+		parts = append(parts, observation.SafeErrorCode, string(observation.SubjectType), observation.SubjectKey)
+	}
+	canonical := strings.Join(parts, "|")
 	digest := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(digest[:])
+}
+
+func TenantSubjectKey(tenantID uuid.UUID) string {
+	digest := sha256.Sum256([]byte("nextstep-incident-tenant:" + tenantID.String()))
+	return hex.EncodeToString(digest[:])
+}
+
+func ResourceSubjectKey(subjectType SubjectType, resource string) string {
+	digest := sha256.Sum256([]byte("nextstep-incident-resource:" + string(subjectType) + ":" + resource))
 	return hex.EncodeToString(digest[:])
 }
 
@@ -118,26 +184,46 @@ func OccurrenceCorrelationKey(occurrenceID uuid.UUID) string {
 }
 
 type Incident struct {
-	ID               uuid.UUID            `json:"id"`
-	AlertRef         string               `json:"alertRef"`
-	IncidentType     string               `json:"incidentType"`
-	RootCause        RootCause            `json:"rootCause"`
-	Severity         Severity             `json:"severity"`
-	Status           Status               `json:"status"`
-	SafeErrorCode    string               `json:"safeErrorCode,omitempty"`
-	OccurrenceCount  int                  `json:"occurrenceCount"`
-	AffectedCount    int                  `json:"affectedCount"`
-	TenantExamples   []string             `json:"tenantExamples,omitempty"`
-	FirstSeenAt      time.Time            `json:"firstSeenAt"`
-	LastSeenAt       time.Time            `json:"lastSeenAt"`
-	AcknowledgedAt   *time.Time           `json:"acknowledgedAt,omitempty"`
-	ResolvedAt       *time.Time           `json:"resolvedAt,omitempty"`
-	AcceptedAt       *time.Time           `json:"acceptedAt,omitempty"`
-	AcceptedReason   string               `json:"acceptedReason,omitempty"`
-	Version          int                  `json:"version"`
-	Presentation     failure.Presentation `json:"presentation"`
-	IsDownstream     bool                 `json:"isDownstream"`
-	CausedByAlertRef string               `json:"causedByAlertRef,omitempty"`
+	ID                  uuid.UUID            `json:"id"`
+	AlertRef            string               `json:"alertRef"`
+	IncidentType        string               `json:"incidentType"`
+	RootCause           RootCause            `json:"rootCause"`
+	Severity            Severity             `json:"severity"`
+	Status              Status               `json:"status"`
+	SafeErrorCode       string               `json:"safeErrorCode,omitempty"`
+	OccurrenceCount     int                  `json:"occurrenceCount"`
+	AffectedCount       int                  `json:"affectedCount"`
+	TenantExamples      []string             `json:"tenantExamples,omitempty"`
+	FirstSeenAt         time.Time            `json:"firstSeenAt"`
+	LastSeenAt          time.Time            `json:"lastSeenAt"`
+	AcknowledgedAt      *time.Time           `json:"acknowledgedAt,omitempty"`
+	ResolvedAt          *time.Time           `json:"resolvedAt,omitempty"`
+	AcceptedAt          *time.Time           `json:"acceptedAt,omitempty"`
+	AcceptedReason      string               `json:"acceptedReason,omitempty"`
+	Version             int                  `json:"version"`
+	Presentation        failure.Presentation `json:"presentation"`
+	IsDownstream        bool                 `json:"isDownstream"`
+	CausedByAlertRef    string               `json:"causedByAlertRef,omitempty"`
+	ObservationMode     ObservationMode      `json:"observationMode"`
+	SubjectType         SubjectType          `json:"subjectType"`
+	ActiveAffectedCount int                  `json:"activeAffectedCount"`
+	CauseBreakdown      []CauseBreakdown     `json:"causeBreakdown,omitempty"`
+	Measurement         *Measurement         `json:"measurement,omitempty"`
+}
+
+type CauseBreakdown struct {
+	Presentation        failure.Presentation   `json:"presentation"`
+	Category            failure.Category       `json:"category,omitempty"`
+	Stage               failure.Stage          `json:"stage,omitempty"`
+	TransportPhase      failure.TransportPhase `json:"transportPhase,omitempty"`
+	InvestigationScope  InvestigationScope     `json:"investigationScope"`
+	SubjectType         SubjectType            `json:"subjectType"`
+	OccurrenceCount     int                    `json:"occurrenceCount"`
+	AffectedCount       int                    `json:"affectedCount"`
+	ActiveAffectedCount int                    `json:"activeAffectedCount"`
+	AffectedLabelTH     string                 `json:"affectedLabelTh"`
+	FirstSeenAt         time.Time              `json:"firstSeenAt"`
+	LastSeenAt          time.Time              `json:"lastSeenAt"`
 }
 
 func NewAlertReference() (string, error) {
@@ -164,6 +250,7 @@ func NotificationObservation(sourceID, tenantID uuid.UUID, trigger TriggerKind, 
 		IncidentType: "SCHEDULED_NOTIFICATION_" + status,
 		RootCause:    root, Severity: SeverityP1, SourceKind: SourceNotification,
 		SourceID: sourceID, TenantID: &tenantID, SafeErrorCode: safeErrorCode, ObservedAt: observedAt.UTC(),
+		ObservationMode: ObservationDiscrete, SubjectType: SubjectTenant, SubjectKey: TenantSubjectKey(tenantID),
 	}
 }
 
@@ -175,6 +262,8 @@ func DeliveryObservation(sourceID, tenantID uuid.UUID, status, safeErrorCode str
 		IncidentType: "LINE_DELIVERY_FAILED_PERMANENT", RootCause: RootLineDelivery,
 		Severity: SeverityP1, SourceKind: SourceDelivery, SourceID: sourceID, TenantID: &tenantID,
 		SafeErrorCode: safeErrorCode, ObservedAt: observedAt.UTC(),
+		ObservationMode: ObservationDiscrete, SubjectType: SubjectLineProvider,
+		SubjectKey: ResourceSubjectKey(SubjectLineProvider, tenantID.String()),
 	}
 }
 
@@ -186,6 +275,7 @@ func ReportObservation(sourceID, tenantID uuid.UUID, status, safeErrorCode strin
 		IncidentType: "SCHEDULED_REPORT_FAILED", RootCause: rootCauseFor(safeErrorCode),
 		Severity: SeverityP1, SourceKind: SourceReport, SourceID: sourceID, TenantID: &tenantID,
 		SafeErrorCode: safeErrorCode, ObservedAt: observedAt.UTC(),
+		ObservationMode: ObservationDiscrete, SubjectType: SubjectTenant, SubjectKey: TenantSubjectKey(tenantID),
 	}
 }
 
@@ -211,6 +301,8 @@ func TelegramMessage(alert Alert, adminBaseURL string) string {
 	}
 	heading := "Nextstep Sentinel " + string(incident.Severity)
 	switch alert.Kind {
+	case "UPDATE":
+		heading = "อัปเดตเหตุสำคัญ · ผลกระทบเพิ่มขึ้น"
 	case "REMINDER":
 		heading = "แจ้งเตือนซ้ำ · ปัญหายังไม่หาย"
 	case "RECOVERY":
@@ -222,10 +314,42 @@ func TelegramMessage(alert Alert, adminBaseURL string) string {
 	}
 	impact := telegramImpact(incident.SafeErrorCode, presentation)
 	thaiTime := incident.FirstSeenAt.In(time.FixedZone("Asia/Bangkok", 7*60*60)).Format("02/01/2006 15:04:05")
+	affectedCount := incident.ActiveAffectedCount
+	if affectedCount == 0 {
+		affectedCount = incident.AffectedCount
+	}
+	if incident.RootCause == RootSMLConnectivity && len(incident.CauseBreakdown) > 1 {
+		causeLines := make([]string, 0, min(3, len(incident.CauseBreakdown)))
+		for _, cause := range incident.CauseBreakdown {
+			if len(causeLines) == 3 {
+				break
+			}
+			label := cause.Presentation.TitleTH
+			switch cause.TransportPhase {
+			case failure.PhaseBeforeRequestSent:
+				label = "เชื่อมต่อไม่สำเร็จก่อนส่งคำขอ"
+			case failure.PhaseRequestSentResultUnknown:
+				label = "ส่งคำขอแล้วแต่ไม่ได้รับคำตอบภายในเวลา"
+			case failure.PhaseResponseStarted:
+				label = "เริ่มรับคำตอบแล้วแต่ข้อมูลไม่ครบ"
+			}
+			count := cause.ActiveAffectedCount
+			if count == 0 { count = cause.AffectedCount }
+			causeLines = append(causeLines, fmt.Sprintf("• %s: %d ร้าน", label, count))
+		}
+		message := fmt.Sprintf(
+			"%s\nอ้างอิง: %s\nสาเหตุ: พบปัญหา Java Web Service %d รูปแบบ\n%s\nผลกระทบ: %s\nร้านที่ได้รับผล: %d ร้าน\nพบครั้งแรก: %s น. เวลาไทย\nตรวจสอบ: %s",
+			heading, incident.AlertRef, len(incident.CauseBreakdown), strings.Join(causeLines, "\n"), impact, affectedCount, thaiTime, adminURL,
+		)
+		if len(message) > 3499 {
+			return message[:3499]
+		}
+		return message
+	}
 	return fmt.Sprintf(
-		"%s\nอ้างอิง: %s\nสาเหตุ: %s\nผลกระทบ: %s\nจำนวนเหตุการณ์: %d · ทรัพยากรที่ได้รับผล: %d\nพบครั้งแรก: %s น. เวลาไทย\nข้อมูลเทคนิค: %s\nตรวจสอบ: %s",
+		"%s\nอ้างอิง: %s\nสาเหตุ: %s\nผลกระทบ: %s\nส่วนที่ได้รับผล: %d\nพบครั้งแรก: %s น. เวลาไทย\nข้อมูลเทคนิค: %s\nตรวจสอบ: %s",
 		heading, incident.AlertRef, presentation.TitleTH, impact,
-		incident.OccurrenceCount, incident.AffectedCount, thaiTime, safeText(incident.SafeErrorCode), adminURL,
+		affectedCount, thaiTime, safeText(incident.SafeErrorCode), adminURL,
 	)
 }
 

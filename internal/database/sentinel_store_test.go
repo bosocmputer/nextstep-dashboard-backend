@@ -117,6 +117,12 @@ func TestSentinelStoreClassifiesScheduledEventsAndGroupsLargeBatches(t *testing.
 	if err := store.RecordObservations(ctx, []sentinel.Observation{firstFailure}, firstFailureAt, 30*time.Second, true); err != nil {
 		t.Fatal(err)
 	}
+	// The five-minute scanner overlap intentionally returns the same durable
+	// source event again. Reprocessing it must not inflate the subject or
+	// incident occurrence counters before the event unique constraint fires.
+	if err := store.RecordObservations(ctx, []sentinel.Observation{firstFailure}, firstFailureAt.Add(time.Second), 30*time.Second, true); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.RecordObservations(ctx, []sentinel.Observation{secondFailure}, secondFailure.ObservedAt, 30*time.Second, true); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +152,7 @@ func TestSentinelStoreClassifiesScheduledEventsAndGroupsLargeBatches(t *testing.
 	if _, err := store.AcknowledgeIncident(ctx, smlIncidentID, smlVersion, now.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvanceLifecycle(ctx, nil, now.Add(4*time.Minute), true); err != nil {
+	if err := store.AdvanceLifecycle(ctx, nil, true, now.Add(4*time.Minute), true); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `select status from operational_incidents where id=$1`, smlIncidentID).Scan(&smlStatus); err != nil || smlStatus != "ACKNOWLEDGED" {
@@ -158,7 +164,7 @@ func TestSentinelStoreClassifiesScheduledEventsAndGroupsLargeBatches(t *testing.
 		values ($1,$2,$3,$4,'COMPLETED','SCHEDULED',$4)`, uuid.New(), tenantID, scheduleID, completedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvanceLifecycle(ctx, nil, now.Add(6*time.Minute), true); err != nil {
+	if err := store.AdvanceLifecycle(ctx, nil, true, now.Add(6*time.Minute), true); err != nil {
 		t.Fatal(err)
 	}
 	var recoveryEvidence int

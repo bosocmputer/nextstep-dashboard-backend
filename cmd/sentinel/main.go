@@ -45,7 +45,7 @@ func main() {
 		emergency = sentinel.NewEmergencyLane(sentinel.NewEmergencyStateStore(config.StatePath), telegram, adminURL)
 	}
 	monitor := sentinel.NewMonitor(store, sender, config.Mode, workerID, adminURL, time.Now).
-		ConfigureObservationSource(sentinel.NewRuntimeProbeSource(config.RuntimeDirectory))
+		ConfigureObservationSource(sentinel.NewRuntimeProbeSource(config.RuntimeDirectory).ConfigureBackupPolicy(config.BackupPolicy))
 	ticker := time.NewTicker(config.Interval)
 	defer ticker.Stop()
 	databaseFailures, databaseSuccesses := 0, 0
