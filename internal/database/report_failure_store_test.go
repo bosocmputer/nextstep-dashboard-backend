@@ -130,4 +130,11 @@ func TestPreRequestFailuresOpenSharedHostCircuitAndRemoteUnknownIsAtomic(t *test
 	if err != nil || !detail.ConnectionChangedSinceFailure {
 		t.Fatalf("connection change detail = %+v, %v", detail, err)
 	}
+	if _, err := pool.Exec(ctx, `delete from tenant_sml_connections where tenant_id = $1`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = NewOperationsStore(pool).GetReportRunDetail(ctx, remoteRunID, failedAt)
+	if err != nil || !detail.ConnectionChangedSinceFailure {
+		t.Fatalf("removed connection detail = %+v, %v", detail, err)
+	}
 }

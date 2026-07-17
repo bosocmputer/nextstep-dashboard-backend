@@ -34,7 +34,8 @@ func (store *OperationsStore) GetReportRunDetail(ctx context.Context, runID uuid
 			         when notification.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED') then 'NOT_CREATED_INCOMPLETE_REPORT_SET'
 			         else 'UNKNOWN'
 			       end,
-			       case when r.failure_evidence_version is null or r.data_source_version is null or connection.version is null then false
+			       case when r.failure_evidence_version is null or r.data_source_version is null or r.data_source_version <= 0 then false
+			            when connection.version is null then true
 			            else connection.version <> r.data_source_version end
 			from report_runs r
 			join tenants tenant on tenant.id = r.tenant_id

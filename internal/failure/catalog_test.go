@@ -30,7 +30,7 @@ func TestLegacyPresentationDoesNotInventTransportEvidence(t *testing.T) {
 		Level: LevelLegacyPartial, Category: CategoryJavaWSConnectivity,
 		SafeErrorCode: CodeSMLUnreachable,
 	})
-	if !strings.Contains(presentation.EvidenceNoteTH, "ระบบรุ่นเดิมไม่ได้บันทึก") || strings.Contains(presentation.SummaryTH, "ก่อนส่ง") {
+	if !strings.Contains(presentation.EvidenceNoteTH, "ระบบรุ่นเดิมไม่ได้บันทึก") || presentation.StageTH != "ระบบรุ่นเดิมไม่ได้บันทึกขั้นตอนที่ล้ม" || strings.Contains(presentation.SummaryTH, "ก่อนส่ง") {
 		t.Fatalf("legacy presentation invented evidence: %+v", presentation)
 	}
 }
@@ -51,7 +51,7 @@ func TestEveryOperationalCodeHasThaiPresentation(t *testing.T) {
 }
 
 func TestUnknownCodeUsesSafeThaiFallback(t *testing.T) {
-	presentation := PresentationFor(Evidence{SafeErrorCode: "SOME_NEW_FAILURE"})
+	presentation := PresentationFor(EvidenceForCode("SOME_NEW_FAILURE"))
 	if presentation.TitleTH != "ระบบไม่สามารถดำเนินงานนี้ได้" || strings.Contains(presentation.SummaryTH, "SOME_NEW_FAILURE") {
 		t.Fatalf("unknown presentation=%+v", presentation)
 	}

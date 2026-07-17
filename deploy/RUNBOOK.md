@@ -96,6 +96,14 @@ directly; after two successful checks it records recovery evidence in PostgreSQL
 and sends one recovery message. External monitoring remains required when the
 entire host or network is unavailable.
 
+When investigating a scheduled failure, start from the authenticated Incident
+detail or Report Run detail. Use the persisted stage, transport phase, occurrence
+time, impact, and connection-version comparison as evidence. Do not conclude
+that a customer Server is down or a Firewall is blocking traffic unless an
+independent check proves it. A linked incomplete notification is downstream of
+the report failure and should not produce a second Telegram P1; verify the
+incident timeline still records the all-or-nothing LINE impact.
+
 Release restarts use `deploy/release.sh`, which opens the external maintenance
 window before any mutation and records the internal window. If the external
 maintenance API fails, the release stops unless an explicit audited emergency

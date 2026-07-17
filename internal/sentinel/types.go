@@ -127,6 +127,7 @@ type Incident struct {
 	SafeErrorCode    string               `json:"safeErrorCode,omitempty"`
 	OccurrenceCount  int                  `json:"occurrenceCount"`
 	AffectedCount    int                  `json:"affectedCount"`
+	TenantExamples   []string             `json:"tenantExamples,omitempty"`
 	FirstSeenAt      time.Time            `json:"firstSeenAt"`
 	LastSeenAt       time.Time            `json:"lastSeenAt"`
 	AcknowledgedAt   *time.Time           `json:"acknowledgedAt,omitempty"`
@@ -217,7 +218,7 @@ func TelegramMessage(alert Alert, adminBaseURL string) string {
 	}
 	presentation := incident.Presentation
 	if presentation.TitleTH == "" {
-		presentation = failure.PresentationFor(failure.EvidenceForCode(incident.SafeErrorCode))
+		presentation = incidentPresentation(incident)
 	}
 	impact := telegramImpact(incident.SafeErrorCode, presentation)
 	thaiTime := incident.FirstSeenAt.In(time.FixedZone("Asia/Bangkok", 7*60*60)).Format("02/01/2006 15:04:05")
@@ -226,6 +227,26 @@ func TelegramMessage(alert Alert, adminBaseURL string) string {
 		heading, incident.AlertRef, presentation.TitleTH, impact,
 		incident.OccurrenceCount, incident.AffectedCount, thaiTime, safeText(incident.SafeErrorCode), adminURL,
 	)
+}
+
+func incidentPresentation(incident Incident) failure.Presentation {
+	if strings.TrimSpace(incident.SafeErrorCode) != "MULTIPLE_SAFE_ERRORS" {
+		return failure.PresentationFor(failure.EvidenceForCode(incident.SafeErrorCode))
+	}
+	evidence := failure.Evidence{Level: failure.LevelConfirmed}
+	switch incident.RootCause {
+	case RootSMLConnectivity:
+		evidence.Category, evidence.Stage = failure.CategoryJavaWSConnectivity, failure.StageConnectJavaWS
+	case RootReportData:
+		evidence.Category, evidence.Stage = failure.CategoryReportProcessing, failure.StageBuildReport
+	case RootLineDelivery:
+		evidence.Category, evidence.Stage = failure.CategoryLineDelivery, failure.StageSendLINE
+	case RootCapacity:
+		evidence.Category, evidence.Stage = failure.CategoryCapacity, failure.StagePlatformCheck
+	default:
+		evidence.Category, evidence.Stage = failure.CategoryPlatform, failure.StagePlatformCheck
+	}
+	return failure.PresentationFor(evidence)
 }
 
 func telegramImpact(code string, presentation failure.Presentation) string {

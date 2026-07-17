@@ -1797,8 +1797,10 @@ func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ..
 		if run.FinishedAt != nil {
 			evidence.FinishedAt = run.FinishedAt
 		}
-		connectionVersion := run.DataSourceVersion
-		evidence.ConnectionVersion = &connectionVersion
+		if run.DataSourceVersion > 0 {
+			connectionVersion := run.DataSourceVersion
+			evidence.ConnectionVersion = &connectionVersion
+		}
 		evidence = failure.Complete(evidence)
 		run.FailureEvidence = &evidence
 	}

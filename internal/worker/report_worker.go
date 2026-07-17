@@ -490,7 +490,7 @@ func failureFromSafeError(safeError *sml.SafeError) *executionFailure {
 		Code: safeError.Code, Retryable: safeError.Retryable,
 		Stage:              failure.EvidenceForCode(safeError.Code).Stage,
 		TransportPhase:     failure.TransportPhase(safeError.Phase),
-		RemoteStateUnknown: safeError.Phase == sml.RequestSentResultUnknown || safeError.Phase == sml.ResponseStarted,
+		RemoteStateUnknown: safeError.Phase == sml.RequestSentResultUnknown,
 		PreRequestFailure:  preRequest,
 	}
 }
@@ -501,7 +501,6 @@ func buildFailureEvidence(run report.Run, execution executionFailure, startedAt,
 		duration = 0
 	}
 	attempt := run.Attempt
-	connectionVersion := run.DataSourceVersion
 	evidence := failure.EvidenceForCode(execution.Code)
 	evidence.Stage = execution.Stage
 	evidence.TransportPhase = execution.TransportPhase
@@ -512,7 +511,10 @@ func buildFailureEvidence(run report.Run, execution executionFailure, startedAt,
 	evidence.Attempt = &attempt
 	evidence.Retryable = execution.Retryable
 	evidence.RemoteStateUnknown = execution.RemoteStateUnknown
-	evidence.ConnectionVersion = &connectionVersion
+	if run.DataSourceVersion > 0 {
+		connectionVersion := run.DataSourceVersion
+		evidence.ConnectionVersion = &connectionVersion
+	}
 	return failure.Complete(evidence)
 }
 
@@ -545,8 +547,4 @@ func (worker *ReportWorker) keepLease(ctx context.Context, runID uuid.UUID, canc
 			}
 		}
 	}
-}
-
-func safeFailureMessage(code string) string {
-	return failure.SafeMessage(code)
 }

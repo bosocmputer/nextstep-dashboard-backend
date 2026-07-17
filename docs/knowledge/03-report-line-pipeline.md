@@ -1,7 +1,7 @@
 ---
 status: current
-last_verified: 2026-07-16
-source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/database/schedule_execution_store.go, internal/notification/worker.go, internal/delivery/worker.go]
+last_verified: 2026-07-17
+source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/database/schedule_execution_store.go, internal/notification/worker.go, internal/delivery/worker.go, internal/failure/catalog.go]
 tags: [backend, reports, queue, line]
 ---
 
@@ -49,6 +49,15 @@ that an old or test occurrence was a scheduled customer delivery.
 - Timeout/reset after request send has unknown remote state, is not automatically retried, and opens tenant protection before another query starts.
 - Repeated connection failures contribute to tenant/host circuit state.
 - Admin/Viewer errors expose safe codes and request IDs, not SQL or rows.
+- A terminal Report failure persists sanitized `FailureEvidence` atomically with
+  the run state. It records the stage and transport phase known by the Worker at
+  failure time; no later reader infers those facts from an error code.
+- `BEFORE_REQUEST_SENT`, `REQUEST_SENT_RESULT_UNKNOWN`, and `RESPONSE_STARTED`
+  remain distinct. Unknown remote state must not be presented as a stopped
+  customer query or as safe to retry immediately.
+- The shared failure catalog is the source for Thai Admin/Telegram wording and
+  next checks. Unknown codes use a generic Thai fallback and never raw error
+  text.
 
 ## Viewer Snapshot Flow
 

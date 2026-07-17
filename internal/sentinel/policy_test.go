@@ -44,6 +44,19 @@ func TestObservationFingerprintAggregatesSameRootCauseAcrossTenants(t *testing.T
 	}
 }
 
+func TestDownstreamNotificationUsesProvenReportRootFingerprint(t *testing.T) {
+	reportFailure := ReportObservation(uuid.New(), uuid.New(), "FAILED", "SML_UNREACHABLE", time.Now())
+	notification := NotificationObservation(uuid.New(), uuid.New(), TriggerScheduled, "FAILED", "REPORT_SET_INCOMPLETE", time.Now())
+	if reportFailure == nil || notification == nil {
+		t.Fatal("expected report and notification observations")
+	}
+	notification.Downstream = true
+	notification.RootCause = reportFailure.RootCause
+	if notification.Fingerprint() != reportFailure.Fingerprint() {
+		t.Fatalf("downstream fingerprint %s does not match root %s", notification.Fingerprint(), reportFailure.Fingerprint())
+	}
+}
+
 func TestTelegramMessageContainsOnlySafeOperationalContext(t *testing.T) {
 	incident := Incident{
 		AlertRef: "NST-ABC123DEF456", IncidentType: "SCHEDULED_NOTIFICATION_FAILED", RootCause: RootSMLConnectivity,
@@ -72,6 +85,18 @@ func TestTelegramMessageRejectsUnsafeErrorCode(t *testing.T) {
 	message := TelegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://dashboard.nextstep-soft.com/admin/operational-incidents")
 	if strings.Contains(message, "customer-data") || !strings.Contains(message, "UNKNOWN") {
 		t.Fatalf("unsafe error code reached Telegram message: %q", message)
+	}
+}
+
+func TestAggregatedSMLIncidentKeepsThaiJavaWSCause(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "MULTIPLE_SAFE_ERRORS", FirstSeenAt: time.Date(2026, 7, 16, 1, 0, 0, 0, time.UTC),
+		OccurrenceCount: 2, AffectedCount: 2,
+	}
+	message := TelegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://example.test/incidents")
+	if !strings.Contains(message, "ติดต่อ Java Web Service") || strings.Contains(message, "ระบบไม่สามารถดำเนินงานนี้ได้") {
+		t.Fatalf("aggregated SML message lost its root cause: %q", message)
 	}
 }
 

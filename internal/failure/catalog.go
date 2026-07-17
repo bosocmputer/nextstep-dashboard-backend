@@ -161,10 +161,14 @@ func SafeMessage(code string) string {
 }
 
 func PresentationFor(evidence Evidence) Presentation {
-	if !isRecognizedCode(evidence.SafeErrorCode) && evidence.Category == "" && evidence.Stage == "" {
+	if strings.TrimSpace(evidence.SafeErrorCode) != "" && !isRecognizedCode(evidence.SafeErrorCode) {
+		stageTH := "ตรวจสอบระบบส่วนกลาง"
+		if evidence.Stage != "" {
+			stageTH = stageLabel(evidence.Stage)
+		}
 		return Presentation{
 			TitleTH: "ระบบไม่สามารถดำเนินงานนี้ได้", SummaryTH: "ระบบหยุดงานนี้อย่างปลอดภัย กรุณาตรวจสอบหลักฐานและลองดำเนินการอีกครั้งเมื่อพร้อม",
-			StageTH: "ตรวจสอบระบบส่วนกลาง", NextActionsTH: []string{"แจ้งทีมดูแลระบบพร้อมรหัสอ้างอิงเหตุสำคัญ"},
+			StageTH: stageTH, NextActionsTH: []string{"แจ้งทีมดูแลระบบพร้อมรหัสอ้างอิงเหตุสำคัญ"},
 		}
 	}
 	if evidence.Category == "" || evidence.Stage == "" {
@@ -235,6 +239,7 @@ func PresentationFor(evidence Evidence) Presentation {
 		presentation.SummaryTH = "ผลลัพธ์ ZIP จาก Server ลูกค้าไม่สมบูรณ์"
 	}
 	if evidence.Level == LevelLegacyPartial {
+		presentation.StageTH = "ระบบรุ่นเดิมไม่ได้บันทึกขั้นตอนที่ล้ม"
 		presentation.EvidenceNoteTH = "ระบบรุ่นเดิมไม่ได้บันทึกรายละเอียดขั้นตอนการเชื่อมต่อ จึงแสดงเฉพาะข้อเท็จจริงที่ตรวจสอบย้อนหลังได้"
 	}
 	return presentation

@@ -40,7 +40,8 @@ func (store *SentinelStore) ScanObservations(ctx context.Context, now time.Time,
 		{key: "notification_terminal", query: `
 			select n.id, n.tenant_id, n.trigger_kind, n.status, coalesce(n.safe_error_code, ''), n.updated_at,
 			       coalesce(impact.reports_total, 0), coalesce(impact.reports_succeeded, 0),
-			       coalesce(impact.reports_failed, 0), coalesce(impact.reports_cancelled, 0)
+			       coalesce(impact.reports_failed, 0), coalesce(impact.reports_cancelled, 0),
+			       coalesce(root_failure.safe_error_code, ''), coalesce(root_failure.incident_open, false)
 			from notification_runs n
 			left join lateral (
 			  select count(*)::integer reports_total,
@@ -50,15 +51,30 @@ func (store *SentinelStore) ScanObservations(ctx context.Context, now time.Time,
 			  from notification_run_reports linked join report_runs run on run.id = linked.report_run_id
 			  where linked.notification_run_id = n.id
 			) impact on true
+			left join lateral (
+			  select coalesce(failed_run.safe_error_code, '') safe_error_code,
+			         failed_run.updated_at,
+			         exists (
+			           select 1 from operational_incident_events root_event
+			           join operational_incidents root_incident on root_incident.id = root_event.incident_id
+			           where root_event.source_kind = 'REPORT' and root_event.source_id = failed_run.id
+			             and root_event.observed_at = failed_run.updated_at
+			             and root_incident.status in ('OPEN', 'ACKNOWLEDGED')
+			         ) incident_open
+			  from notification_run_reports linked
+			  join report_runs failed_run on failed_run.id = linked.report_run_id
+			  where linked.notification_run_id = n.id and failed_run.source = 'SCHEDULE'
+			    and failed_run.status = 'FAILED'
+			    and n.updated_at between failed_run.updated_at and failed_run.updated_at + interval '30 seconds'
+			  order by failed_run.updated_at, failed_run.id limit 1
+			) root_failure on n.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED')
 			where n.trigger_kind = 'SCHEDULED'
 			  and n.status in ('FAILED', 'PARTIAL_FAILED', 'BLOCKED_QUOTA')
 			  and not (
 			    n.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED')
-			    and exists (
-			      select 1 from notification_run_reports linked
-			      join report_runs failed_run on failed_run.id = linked.report_run_id
-			      where linked.notification_run_id = n.id and failed_run.status = 'FAILED'
-			    )
+			    and root_failure.safe_error_code is not null
+			    and root_failure.updated_at between $1 and $2
+			    and not root_failure.incident_open
 			  )
 			  and n.updated_at between $1 and $2
 			  and not exists (
@@ -164,7 +180,9 @@ func scanNotificationObservation(rows pgx.Rows) (*sentinel.Observation, error) {
 	var status, safeCode string
 	var observedAt time.Time
 	var total, succeeded, failed, cancelled int
-	if err := rows.Scan(&sourceID, &tenantID, &trigger, &status, &safeCode, &observedAt, &total, &succeeded, &failed, &cancelled); err != nil {
+	var rootSafeCode string
+	var rootIncidentOpen bool
+	if err := rows.Scan(&sourceID, &tenantID, &trigger, &status, &safeCode, &observedAt, &total, &succeeded, &failed, &cancelled, &rootSafeCode, &rootIncidentOpen); err != nil {
 		return nil, err
 	}
 	observation := sentinel.NotificationObservation(sourceID, tenantID, trigger, status, safeCode, observedAt)
@@ -176,6 +194,12 @@ func scanNotificationObservation(rows pgx.Rows) (*sentinel.Observation, error) {
 		observation.TriggerKind = trigger
 		observation.CorrelationKey = sentinel.OccurrenceCorrelationKey(sourceID)
 		observation.Impact = &failure.Impact{ReportsTotal: total, ReportsSucceeded: succeeded, ReportsFailed: failed, ReportsCancelled: cancelled, Notification: failure.NotificationOutcomeUnknown}
+		if rootIncidentOpen {
+			observation.Downstream = true
+			observation.RootCause = rootCauseForOperationalCode(rootSafeCode)
+			observation.IncidentType = "SCHEDULED_NOTIFICATION_DOWNSTREAM"
+			observation.Impact.Notification = failure.NotificationNotCreatedIncompleteSet
+		}
 	}
 	return observation, nil
 }
@@ -479,6 +503,12 @@ func (store *SentinelStore) RecordObservations(ctx context.Context, observations
 	}
 	groups := make(map[string]*incidentGroup)
 	for _, observation := range observations {
+		// Downstream observations enrich the root incident timeline but must not
+		// create an incident or an alert by themselves. The SQL scanner only marks
+		// them downstream after proving that the root incident remains open.
+		if observation.Downstream {
+			continue
+		}
 		fingerprint := observation.Fingerprint()
 		group := groups[fingerprint]
 		if group == nil {
@@ -733,15 +763,29 @@ func (store *SentinelStore) AdvanceObservationCursors(ctx context.Context, scann
 		where
 		  (cursor.monitor_key = 'notification_terminal' and not exists (
 		    select 1 from notification_runs run
+		    left join lateral (
+		      select failed_run.updated_at,
+		             exists (
+		               select 1 from operational_incident_events root_event
+		               join operational_incidents root_incident on root_incident.id = root_event.incident_id
+		               where root_event.source_kind = 'REPORT' and root_event.source_id = failed_run.id
+		                 and root_event.observed_at = failed_run.updated_at
+		                 and root_incident.status in ('OPEN', 'ACKNOWLEDGED')
+		             ) incident_open
+		      from notification_run_reports linked
+		      join report_runs failed_run on failed_run.id = linked.report_run_id
+		      where linked.notification_run_id = run.id and failed_run.source = 'SCHEDULE'
+		        and failed_run.status = 'FAILED'
+		        and run.updated_at between failed_run.updated_at and failed_run.updated_at + interval '30 seconds'
+		      order by failed_run.updated_at, failed_run.id limit 1
+		    ) root_failure on run.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED')
 		    where run.trigger_kind = 'SCHEDULED' and run.status in ('FAILED', 'PARTIAL_FAILED', 'BLOCKED_QUOTA')
 		      and run.updated_at between cursor.cursor_updated_at - interval '5 minutes' and $1
 		      and not (
 		        run.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED')
-		        and exists (
-		          select 1 from notification_run_reports linked
-		          join report_runs failed_run on failed_run.id = linked.report_run_id
-		          where linked.notification_run_id = run.id and failed_run.status = 'FAILED'
-		        )
+		        and root_failure.updated_at is not null
+		        and root_failure.updated_at between cursor.cursor_updated_at - interval '5 minutes' and $1
+		        and not coalesce(root_failure.incident_open, false)
 		      )
 		      and not exists (select 1 from operational_incident_events event
 		        where event.source_kind = 'NOTIFICATION' and event.source_id = run.id and event.observed_at = run.updated_at)
@@ -875,23 +919,35 @@ func (store *SentinelStore) ListIncidents(ctx context.Context, filter sentinel.I
 		severity = &value
 	}
 	rows, err := store.pool.Query(ctx, `
-		select id, alert_ref, incident_type, root_cause, severity, status, coalesce(safe_error_code, ''),
-		       occurrence_count, affected_count, first_seen_at, last_seen_at, acknowledged_at, resolved_at,
-		       accepted_at, coalesce(accepted_reason, ''), version
-		from operational_incidents
-		where ($1::text is null or status = $1) and ($2::text is null or severity = $2)
-		  and ($3::timestamptz is null or (last_seen_at, id) < ($3, $4))
-		order by last_seen_at desc, id desc limit $5`, status, severity, cursorTime, cursorID, filter.PageSize+1)
+		select incident.id, incident.alert_ref, incident.incident_type, incident.root_cause,
+		       incident.severity, incident.status, coalesce(incident.safe_error_code, ''),
+		       incident.occurrence_count, incident.affected_count, incident.first_seen_at,
+		       incident.last_seen_at, incident.acknowledged_at, incident.resolved_at,
+		       incident.accepted_at, coalesce(incident.accepted_reason, ''), incident.version,
+		       coalesce((
+		         select array_agg(sample.name order by sample.name)
+		         from (
+		           select distinct tenant.name
+		           from operational_incident_events event join tenants tenant on tenant.id = event.tenant_id
+		           where event.incident_id = incident.id order by tenant.name limit 2
+		         ) sample
+		       ), '{}'::text[])
+		from operational_incidents incident
+		where ($1::text is null or incident.status = $1) and ($2::text is null or incident.severity = $2)
+		  and ($3::timestamptz is null or (incident.last_seen_at, incident.id) < ($3, $4))
+		order by incident.last_seen_at desc, incident.id desc limit $5`, status, severity, cursorTime, cursorID, filter.PageSize+1)
 	if err != nil {
 		return sentinel.IncidentPage{}, fmt.Errorf("list operational incidents: %w", err)
 	}
 	defer rows.Close()
 	items := make([]sentinel.Incident, 0, filter.PageSize+1)
 	for rows.Next() {
-		item, err := scanIncident(rows)
+		var tenantExamples []string
+		item, err := scanIncident(rows, &tenantExamples)
 		if err != nil {
 			return sentinel.IncidentPage{}, fmt.Errorf("scan operational incident: %w", err)
 		}
+		item.TenantExamples = tenantExamples
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -908,11 +964,13 @@ func (store *SentinelStore) ListIncidents(ctx context.Context, filter sentinel.I
 	return sentinel.IncidentPage{Data: items, NextCursor: next, HasMore: hasMore}, nil
 }
 
-func scanIncident(row interface{ Scan(...any) error }) (sentinel.Incident, error) {
+func scanIncident(row interface{ Scan(...any) error }, extraDestinations ...any) (sentinel.Incident, error) {
 	var item sentinel.Incident
-	err := row.Scan(&item.ID, &item.AlertRef, &item.IncidentType, &item.RootCause, &item.Severity, &item.Status, &item.SafeErrorCode,
+	destinations := []any{&item.ID, &item.AlertRef, &item.IncidentType, &item.RootCause, &item.Severity, &item.Status, &item.SafeErrorCode,
 		&item.OccurrenceCount, &item.AffectedCount, &item.FirstSeenAt, &item.LastSeenAt, &item.AcknowledgedAt, &item.ResolvedAt,
-		&item.AcceptedAt, &item.AcceptedReason, &item.Version)
+		&item.AcceptedAt, &item.AcceptedReason, &item.Version}
+	destinations = append(destinations, extraDestinations...)
+	err := row.Scan(destinations...)
 	return item, err
 }
 
@@ -937,13 +995,14 @@ func (store *SentinelStore) GetIncident(ctx context.Context, id uuid.UUID) (sent
 		       event.connection_version, coalesce(event.report_key, ''), coalesce(event.trigger_kind, ''),
 		       event.reports_total, event.reports_succeeded, event.reports_failed, event.reports_cancelled,
 		       event.notification_outcome, event.downstream, coalesce(cause.alert_ref, ''),
-		       case when event.connection_version is null or connection.version is null then false
+		       case when event.connection_version is null then false
+		            when connection.version is null then true
 		            else event.connection_version <> connection.version end
 		from operational_incident_events event
 		left join tenants tenant on tenant.id = event.tenant_id
 		left join tenant_sml_connections connection on connection.tenant_id = event.tenant_id
 		left join operational_incidents cause on cause.id = event.caused_by_incident_id
-		where event.incident_id = $1 order by event.observed_at desc, event.id desc limit 500`, id)
+		where event.incident_id = $1 order by event.observed_at desc, event.id desc limit 200`, id)
 	if err != nil {
 		return sentinel.IncidentDetail{}, fmt.Errorf("list operational incident events: %w", err)
 	}

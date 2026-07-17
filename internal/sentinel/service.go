@@ -89,7 +89,7 @@ func (service *AdminService) List(ctx context.Context, filter IncidentFilter) (I
 		return IncidentPage{}, err
 	}
 	for index := range page.Data {
-		page.Data[index].Presentation = failure.PresentationFor(failure.EvidenceForCode(page.Data[index].SafeErrorCode))
+		page.Data[index].Presentation = incidentPresentation(page.Data[index])
 	}
 	return page, nil
 }
@@ -102,7 +102,7 @@ func (service *AdminService) Get(ctx context.Context, id uuid.UUID) (IncidentDet
 	if err != nil {
 		return IncidentDetail{}, err
 	}
-	detail.Presentation = failure.PresentationFor(failure.EvidenceForCode(detail.SafeErrorCode))
+	detail.Presentation = incidentPresentation(detail.Incident)
 	for index := range detail.Events {
 		if detail.Events[index].FailureEvidence != nil {
 			evidence := failure.Complete(*detail.Events[index].FailureEvidence)
@@ -125,7 +125,7 @@ func (service *AdminService) Acknowledge(ctx context.Context, id uuid.UUID, vers
 	}
 	incident, err := service.store.AcknowledgeIncident(ctx, id, version, service.now().UTC())
 	if err == nil {
-		incident.Presentation = failure.PresentationFor(failure.EvidenceForCode(incident.SafeErrorCode))
+		incident.Presentation = incidentPresentation(incident)
 	}
 	return incident, err
 }
@@ -137,7 +137,7 @@ func (service *AdminService) AcceptRisk(ctx context.Context, id uuid.UUID, versi
 	}
 	incident, err := service.store.AcceptIncidentRisk(ctx, id, version, reason, service.now().UTC())
 	if err == nil {
-		incident.Presentation = failure.PresentationFor(failure.EvidenceForCode(incident.SafeErrorCode))
+		incident.Presentation = incidentPresentation(incident)
 	}
 	return incident, err
 }
