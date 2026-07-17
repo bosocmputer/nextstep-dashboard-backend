@@ -1,7 +1,7 @@
 ---
 status: current
-last_verified: 2026-07-16
-source_of_truth: [cmd/api/main.go, cmd/worker/main.go, cmd/sentinel/main.go, internal/database/pool.go, deploy/compose.production.yml]
+last_verified: 2026-07-17
+source_of_truth: [cmd/api/main.go, cmd/worker/main.go, cmd/sentinel/main.go, internal/database/pool.go, internal/httpapi/operations_handler.go, internal/httpapi/incident_handler.go, internal/failure/catalog.go, deploy/compose.production.yml]
 tags: [backend, architecture, multitenant]
 ---
 
@@ -54,6 +54,18 @@ Sentinel monitor (independent process)
 - Summary generations publish only after their required report set satisfies the generation rules.
 - Chunked work, when enabled, records a collection window and never claims a single instant snapshot.
 - Cache keys/fingerprints include report/query/builder/data-source identity so incompatible output is not reused.
+
+## Operational Evidence API
+
+- Admin Report Run detail returns persisted, sanitized failure evidence and the
+  verified impact on its materialized LINE occurrence; it never queries SML.
+- Admin Incident list/detail reads bounded incident evidence retained separately
+  from Report Run rows. Thai presentation comes from the shared failure catalog,
+  while technical codes remain additive contract fields.
+- Incident correlation records an incomplete LINE report set as downstream of
+  its proven Report failure, avoiding a duplicate P1 without hiding the timeline.
+- These endpoints are Admin-only, `no-store`, and never return SQL, raw response,
+  credentials, endpoints, KPI values, or delivery/invitation references.
 
 ## Deployment Boundary
 
