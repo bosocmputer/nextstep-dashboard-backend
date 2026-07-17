@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/google/uuid"
 )
 
@@ -85,15 +86,21 @@ const (
 )
 
 type Observation struct {
-	CursorKey     string
-	IncidentType  string
-	RootCause     RootCause
-	Severity      Severity
-	SourceKind    SourceKind
-	SourceID      uuid.UUID
-	TenantID      *uuid.UUID
-	SafeErrorCode string
-	ObservedAt    time.Time
+	CursorKey      string
+	IncidentType   string
+	RootCause      RootCause
+	Severity       Severity
+	SourceKind     SourceKind
+	SourceID       uuid.UUID
+	TenantID       *uuid.UUID
+	SafeErrorCode  string
+	ObservedAt     time.Time
+	CorrelationKey string
+	Downstream     bool
+	Evidence       *failure.Evidence
+	ReportKey      string
+	TriggerKind    TriggerKind
+	Impact         *failure.Impact
 }
 
 func (observation Observation) Fingerprint() string {
@@ -105,23 +112,32 @@ func (observation Observation) Fingerprint() string {
 	return hex.EncodeToString(digest[:])
 }
 
+func OccurrenceCorrelationKey(occurrenceID uuid.UUID) string {
+	digest := sha256.Sum256([]byte("nextstep-notification-occurrence:" + occurrenceID.String()))
+	return hex.EncodeToString(digest[:])
+}
+
 type Incident struct {
-	ID              uuid.UUID  `json:"id"`
-	AlertRef        string     `json:"alertRef"`
-	IncidentType    string     `json:"incidentType"`
-	RootCause       RootCause  `json:"rootCause"`
-	Severity        Severity   `json:"severity"`
-	Status          Status     `json:"status"`
-	SafeErrorCode   string     `json:"safeErrorCode,omitempty"`
-	OccurrenceCount int        `json:"occurrenceCount"`
-	AffectedCount   int        `json:"affectedCount"`
-	FirstSeenAt     time.Time  `json:"firstSeenAt"`
-	LastSeenAt      time.Time  `json:"lastSeenAt"`
-	AcknowledgedAt  *time.Time `json:"acknowledgedAt,omitempty"`
-	ResolvedAt      *time.Time `json:"resolvedAt,omitempty"`
-	AcceptedAt      *time.Time `json:"acceptedAt,omitempty"`
-	AcceptedReason  string     `json:"acceptedReason,omitempty"`
-	Version         int        `json:"version"`
+	ID               uuid.UUID            `json:"id"`
+	AlertRef         string               `json:"alertRef"`
+	IncidentType     string               `json:"incidentType"`
+	RootCause        RootCause            `json:"rootCause"`
+	Severity         Severity             `json:"severity"`
+	Status           Status               `json:"status"`
+	SafeErrorCode    string               `json:"safeErrorCode,omitempty"`
+	OccurrenceCount  int                  `json:"occurrenceCount"`
+	AffectedCount    int                  `json:"affectedCount"`
+	TenantExamples   []string             `json:"tenantExamples,omitempty"`
+	FirstSeenAt      time.Time            `json:"firstSeenAt"`
+	LastSeenAt       time.Time            `json:"lastSeenAt"`
+	AcknowledgedAt   *time.Time           `json:"acknowledgedAt,omitempty"`
+	ResolvedAt       *time.Time           `json:"resolvedAt,omitempty"`
+	AcceptedAt       *time.Time           `json:"acceptedAt,omitempty"`
+	AcceptedReason   string               `json:"acceptedReason,omitempty"`
+	Version          int                  `json:"version"`
+	Presentation     failure.Presentation `json:"presentation"`
+	IsDownstream     bool                 `json:"isDownstream"`
+	CausedByAlertRef string               `json:"causedByAlertRef,omitempty"`
 }
 
 func NewAlertReference() (string, error) {
@@ -187,20 +203,63 @@ func rootCauseFor(safeErrorCode string) RootCause {
 	}
 }
 
-func TelegramMessage(incident Incident, adminBaseURL string) string {
+func TelegramMessage(alert Alert, adminBaseURL string) string {
+	incident := alert.Incident
 	adminURL := strings.TrimRight(adminBaseURL, "/")
 	if incident.ID != uuid.Nil {
 		adminURL += "/" + incident.ID.String()
 	}
 	heading := "Nextstep Sentinel " + string(incident.Severity)
-	if incident.Status == StatusResolved {
-		heading = "Nextstep Sentinel · RECOVERY VERIFIED"
+	switch alert.Kind {
+	case "REMINDER":
+		heading = "แจ้งเตือนซ้ำ · ปัญหายังไม่หาย"
+	case "RECOVERY":
+		heading = "Nextstep Sentinel · ยืนยันว่าระบบฟื้นตัวแล้ว"
 	}
+	presentation := incident.Presentation
+	if presentation.TitleTH == "" {
+		presentation = incidentPresentation(incident)
+	}
+	impact := telegramImpact(incident.SafeErrorCode, presentation)
+	thaiTime := incident.FirstSeenAt.In(time.FixedZone("Asia/Bangkok", 7*60*60)).Format("02/01/2006 15:04:05")
 	return fmt.Sprintf(
-		"%s\nอ้างอิง: %s\nประเภท: %s\nสาเหตุหลัก: %s\nรหัสปลอดภัย: %s\nจำนวนเหตุการณ์: %d · ทรัพยากรที่ได้รับผล: %d\nพบครั้งแรก: %s UTC\nตรวจสอบ: %s",
-		heading, incident.AlertRef, incident.IncidentType, incident.RootCause, safeText(incident.SafeErrorCode),
-		incident.OccurrenceCount, incident.AffectedCount, incident.FirstSeenAt.UTC().Format("2006-01-02 15:04:05"), adminURL,
+		"%s\nอ้างอิง: %s\nสาเหตุ: %s\nผลกระทบ: %s\nจำนวนเหตุการณ์: %d · ทรัพยากรที่ได้รับผล: %d\nพบครั้งแรก: %s น. เวลาไทย\nข้อมูลเทคนิค: %s\nตรวจสอบ: %s",
+		heading, incident.AlertRef, presentation.TitleTH, impact,
+		incident.OccurrenceCount, incident.AffectedCount, thaiTime, safeText(incident.SafeErrorCode), adminURL,
 	)
+}
+
+func incidentPresentation(incident Incident) failure.Presentation {
+	if strings.TrimSpace(incident.SafeErrorCode) != "MULTIPLE_SAFE_ERRORS" {
+		return failure.PresentationFor(failure.EvidenceForCode(incident.SafeErrorCode))
+	}
+	evidence := failure.Evidence{Level: failure.LevelConfirmed}
+	switch incident.RootCause {
+	case RootSMLConnectivity:
+		evidence.Category, evidence.Stage = failure.CategoryJavaWSConnectivity, failure.StageConnectJavaWS
+	case RootReportData:
+		evidence.Category, evidence.Stage = failure.CategoryReportProcessing, failure.StageBuildReport
+	case RootLineDelivery:
+		evidence.Category, evidence.Stage = failure.CategoryLineDelivery, failure.StageSendLINE
+	case RootCapacity:
+		evidence.Category, evidence.Stage = failure.CategoryCapacity, failure.StagePlatformCheck
+	default:
+		evidence.Category, evidence.Stage = failure.CategoryPlatform, failure.StagePlatformCheck
+	}
+	return failure.PresentationFor(evidence)
+}
+
+func telegramImpact(code string, presentation failure.Presentation) string {
+	switch strings.ToUpper(strings.TrimSpace(code)) {
+	case "REPORT_SET_INCOMPLETE", "ALL_REPORTS_FAILED":
+		return "สร้างรายงานไม่ครบ ระบบไม่ส่ง LINE"
+	case "LINE_DELIVERY_FAILED_PERMANENT", "LINE_PUSH_RETRY_EXHAUSTED":
+		return "สร้างรายงานแล้ว แต่ส่งข้อความ LINE ไม่สำเร็จ"
+	}
+	if strings.Contains(presentation.TitleTH, "Java Web Service") {
+		return "รายงานที่เกี่ยวข้องสร้างไม่สำเร็จ และรอบส่ง LINE จะหยุดหากชุดรายงานไม่ครบ"
+	}
+	return "งานที่เกี่ยวข้องหยุดอย่างปลอดภัย กรุณาเปิดรายละเอียดเพื่อตรวจสอบ"
 }
 
 func safeText(value string) string {

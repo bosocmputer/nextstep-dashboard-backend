@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -65,7 +66,12 @@ func TestPreRequestFailuresOpenSharedHostCircuitAndRemoteUnknownIsAtomic(t *test
 		lease_expires_at = $3, attempt = 2 where id = $1`, runID, now.Add(30*time.Second), now.Add(90*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FailPreRequestFailure(ctx, runID, "worker-a", "SML_UNREACHABLE", "", now.Add(31*time.Second)); err != nil {
+	preRequestEvidence := failure.Complete(failure.Evidence{
+		Version: 1, Level: failure.LevelConfirmed, Category: failure.CategoryJavaWSConnectivity,
+		Stage: failure.StageConnectJavaWS, TransportPhase: failure.PhaseBeforeRequestSent,
+		OccurredAt: now.Add(31 * time.Second), Retryable: true, SafeErrorCode: "SML_UNREACHABLE",
+	})
+	if err := store.FailPreRequestFailure(ctx, runID, "worker-a", preRequestEvidence, now.Add(31*time.Second)); err != nil {
 		t.Fatalf("FailPreRequestFailure() error = %v", err)
 	}
 	var failures int
@@ -86,25 +92,49 @@ func TestPreRequestFailuresOpenSharedHostCircuitAndRemoteUnknownIsAtomic(t *test
 		insert into report_runs (
 		  id, tenant_id, report_key, source, idempotency_key, status,
 		  period_preset, period_from, period_to, claimed_by, claimed_at,
-		  lease_expires_at, queued_at, expires_at, result_kind, priority
+		  lease_expires_at, queued_at, expires_at, result_kind, priority, data_source_version
 		) values ($1, $2, 'stock_balance', 'BACKGROUND', $3, 'RUNNING',
 		          'AS_OF_RUN', '2026-07-15', '2026-07-15', 'worker-a', $4,
-		          $5, $4, $6, 'SUMMARY', 20)`, remoteRunID, tenantID, "remote-unknown-"+remoteRunID.String(), now.Add(time.Minute), now.Add(2*time.Minute), now.Add(24*time.Hour)); err != nil {
+		          $5, $4, $6, 'SUMMARY', 20, 1)`, remoteRunID, tenantID, "remote-unknown-"+remoteRunID.String(), now.Add(time.Minute), now.Add(2*time.Minute), now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	failedAt := now.Add(61 * time.Second)
-	if err := store.FailRemoteUnknown(ctx, remoteRunID, "worker-a", "SML_TIMEOUT", "", failedAt, failedAt.Add(10*time.Minute)); err != nil {
+	remoteEvidence := failure.Complete(failure.Evidence{
+		Version: 1, Level: failure.LevelConfirmed, Category: failure.CategoryJavaWSConnectivity,
+		Stage: failure.StageWaitResponse, TransportPhase: failure.PhaseRequestSentResultUnknown,
+		OccurredAt: failedAt, Retryable: false, RemoteStateUnknown: true, SafeErrorCode: "SML_TIMEOUT",
+	})
+	if err := store.FailRemoteUnknown(ctx, remoteRunID, "worker-a", remoteEvidence, failedAt, failedAt.Add(10*time.Minute)); err != nil {
 		t.Fatalf("FailRemoteUnknown() error = %v", err)
 	}
-	var status, code string
+	var status, code, stage, phase string
 	var tenantOpen bool
 	if err := pool.QueryRow(ctx, `
-		select run.status, run.safe_error_code, circuit.open_until > $3
+		select run.status, run.safe_error_code, run.failure_stage, run.failure_transport_phase,
+		       circuit.open_until > $3
 		from report_runs run join tenant_sml_circuits circuit on circuit.tenant_id = run.tenant_id
-		where run.id = $1 and run.tenant_id = $2`, remoteRunID, tenantID, failedAt).Scan(&status, &code, &tenantOpen); err != nil {
+		where run.id = $1 and run.tenant_id = $2`, remoteRunID, tenantID, failedAt).Scan(&status, &code, &stage, &phase, &tenantOpen); err != nil {
 		t.Fatal(err)
 	}
-	if status != string(report.StatusFailed) || code != "SML_TIMEOUT" || !tenantOpen {
-		t.Fatalf("remote run=%s/%s tenantOpen=%v", status, code, tenantOpen)
+	if status != string(report.StatusFailed) || code != "SML_TIMEOUT" || stage != string(failure.StageWaitResponse) || phase != string(failure.PhaseRequestSentResultUnknown) || !tenantOpen {
+		t.Fatalf("remote run=%s/%s stage=%s phase=%s tenantOpen=%v", status, code, stage, phase, tenantOpen)
+	}
+	detail, err := NewOperationsStore(pool).GetReportRunDetail(ctx, remoteRunID, failedAt)
+	if err != nil || detail.Run.FailureEvidence == nil || detail.Run.FailureEvidence.TransportPhase != failure.PhaseRequestSentResultUnknown || detail.Impact.ReportsTotal != 1 || detail.Impact.ReportsFailed != 1 || detail.Impact.Notification != failure.NotificationNotApplicable {
+		t.Fatalf("GetReportRunDetail() = %+v, %v", detail, err)
+	}
+	if _, err := pool.Exec(ctx, `update tenant_sml_connections set version = version + 1 where tenant_id = $1`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = NewOperationsStore(pool).GetReportRunDetail(ctx, remoteRunID, failedAt)
+	if err != nil || !detail.ConnectionChangedSinceFailure {
+		t.Fatalf("connection change detail = %+v, %v", detail, err)
+	}
+	if _, err := pool.Exec(ctx, `delete from tenant_sml_connections where tenant_id = $1`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = NewOperationsStore(pool).GetReportRunDetail(ctx, remoteRunID, failedAt)
+	if err != nil || !detail.ConnectionChangedSinceFailure {
+		t.Fatalf("removed connection detail = %+v, %v", detail, err)
 	}
 }

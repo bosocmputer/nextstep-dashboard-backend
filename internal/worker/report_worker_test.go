@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sml"
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ type fakeRunStore struct {
 	persistRows      bool
 	retriedCode      string
 	failedCode       string
+	failureEvidence  *failure.Evidence
 	failCalls        int
 	remoteFailCalls  int
 	preflightRetries int
@@ -63,20 +65,23 @@ func (store *fakeRunStore) RetryPreRequestFailure(_ context.Context, _ uuid.UUID
 	store.retriedCode = safeCode
 	return nil
 }
-func (store *fakeRunStore) Fail(_ context.Context, _ uuid.UUID, _, safeCode, _ string, _ time.Time) error {
+func (store *fakeRunStore) Fail(_ context.Context, _ uuid.UUID, _ string, evidence failure.Evidence, _ time.Time) error {
 	store.failCalls++
-	store.failedCode = safeCode
+	store.failedCode = evidence.SafeErrorCode
+	store.failureEvidence = &evidence
 	return nil
 }
-func (store *fakeRunStore) FailRemoteUnknown(_ context.Context, _ uuid.UUID, _, safeCode, _ string, _ time.Time, until time.Time) error {
+func (store *fakeRunStore) FailRemoteUnknown(_ context.Context, _ uuid.UUID, _ string, evidence failure.Evidence, _ time.Time, until time.Time) error {
 	store.remoteFailCalls++
-	store.failedCode = safeCode
+	store.failedCode = evidence.SafeErrorCode
+	store.failureEvidence = &evidence
 	store.uncertaintyUntil = &until
 	return nil
 }
-func (store *fakeRunStore) FailPreRequestFailure(_ context.Context, _ uuid.UUID, _, safeCode, _ string, _ time.Time) error {
+func (store *fakeRunStore) FailPreRequestFailure(_ context.Context, _ uuid.UUID, _ string, evidence failure.Evidence, _ time.Time) error {
 	store.preflightFails++
-	store.failedCode = safeCode
+	store.failedCode = evidence.SafeErrorCode
+	store.failureEvidence = &evidence
 	return nil
 }
 func (store *fakeRunStore) PrepareChunks(_ context.Context, _ uuid.UUID, _ string, manifests []report.ChunkManifest, _ time.Time) error {
@@ -379,6 +384,23 @@ func TestReportWorkerStopsChunksAndOpensCircuitWhenRemoteStateIsUnknown(t *testi
 	if queries != 2 || store.uncertaintyUntil == nil || store.retriedCode != "" || store.failedCode != "SML_TIMEOUT" || store.completed != nil || store.remoteFailCalls != 1 || store.failCalls != 0 {
 		t.Fatalf("queries=%d circuit=%v retry=%q fail=%q atomicFail=%d plainFail=%d completed=%+v", queries, store.uncertaintyUntil, store.retriedCode, store.failedCode, store.remoteFailCalls, store.failCalls, store.completed)
 	}
+	if evidence := store.failureEvidence; evidence == nil || evidence.Stage != failure.StageWaitResponse || evidence.TransportPhase != failure.PhaseRequestSentResultUnknown || !evidence.RemoteStateUnknown {
+		t.Fatalf("failure evidence = %+v", evidence)
+	}
+}
+
+func TestFailureEvidenceDistinguishesIncompleteResponseFromUnknownRemoteState(t *testing.T) {
+	result := failureFromSafeError(&sml.SafeError{
+		Code: "SML_RESPONSE_READ_FAILED", Phase: sml.ResponseStarted, Retryable: false,
+	})
+	if result.TransportPhase != failure.PhaseResponseStarted || result.RemoteStateUnknown {
+		t.Fatalf("response-started failure = %+v", result)
+	}
+	now := time.Date(2026, 7, 17, 8, 0, 0, 0, time.UTC)
+	evidence := buildFailureEvidence(report.Run{Attempt: 1}, *result, now.Add(-time.Second), now)
+	if evidence.ConnectionVersion != nil {
+		t.Fatalf("unconfigured connection version = %+v", evidence.ConnectionVersion)
+	}
 }
 
 func TestReportWorkerKeepsCurrentDashboardWhenComparisonQueryFails(t *testing.T) {
@@ -553,22 +575,5 @@ func TestReportWorkerAcceptsScientificNotationFromDATA1DetailFallback(t *testing
 				t.Fatalf("failed=%q completed=%+v", store.failedCode, store.completed)
 			}
 		})
-	}
-}
-
-func TestSafeFailureMessageExplainsReportOutputAndIncompleteSet(t *testing.T) {
-	tests := map[string]string{
-		"REPORT_OUTPUT_INVALID":  "ข้อมูลตัวเลขจาก SML อยู่ในรูปแบบที่ระบบไม่รองรับ",
-		"REPORT_SET_INCOMPLETE":  "สร้างรายงานในรอบนี้ไม่ครบ ระบบจึงไม่ส่ง LINE",
-		"SML_ZIP_FORMAT_INVALID": "Server ลูกค้าส่งผลลัพธ์กลับมาในรูปแบบ ZIP ที่ไม่ถูกต้อง",
-		"SML_ZIP_EMPTY":          "Server ลูกค้าส่งผลลัพธ์ ZIP ที่ไม่มีข้อมูลกลับมา",
-		"SML_ZIP_TOO_LARGE":      "ผลลัพธ์จาก Server ลูกค้ามีขนาดใหญ่เกินขอบเขตที่ปลอดภัย",
-		"SML_ZIP_READ_FAILED":    "ระบบอ่านผลลัพธ์ ZIP จาก Server ลูกค้าไม่สำเร็จ",
-		"SML_ZIP_INVALID":        "ผลลัพธ์ ZIP จาก Server ลูกค้าไม่สมบูรณ์",
-	}
-	for code, expected := range tests {
-		if got := safeFailureMessage(code); got != expected {
-			t.Fatalf("safeFailureMessage(%q) = %q, want %q", code, got, expected)
-		}
 	}
 }

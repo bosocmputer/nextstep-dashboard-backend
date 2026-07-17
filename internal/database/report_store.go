@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/viewer"
 	"github.com/google/uuid"
@@ -633,7 +634,8 @@ func (store *ReportStore) RetryPreRequestFailure(ctx context.Context, runID uuid
 	return nil
 }
 
-func (store *ReportStore) FailPreRequestFailure(ctx context.Context, runID uuid.UUID, workerID, safeCode, safeMessage string, now time.Time) error {
+func (store *ReportStore) FailPreRequestFailure(ctx context.Context, runID uuid.UUID, workerID string, evidence failure.Evidence, now time.Time) error {
+	evidence = normalizeFailureEvidence(evidence, now)
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin fail pre-request report failure: %w", err)
@@ -645,10 +647,16 @@ func (store *ReportStore) FailPreRequestFailure(ctx context.Context, runID uuid.
 		update report_runs
 		set status = 'FAILED', safe_error_code = $3, safe_error_message = $4,
 		    finished_at = $5, source_finished_at = $5, lease_expires_at = null,
-		    progress_updated_at = $5, updated_at = $5
+		    progress_updated_at = $5, updated_at = $5,
+		    failure_evidence_version = $6, failure_category = $7, failure_stage = $8,
+		    failure_transport_phase = nullif($9, ''), failure_occurred_at = $10,
+		    failure_duration_ms = $11, failure_attempt = $12, failure_retryable = $13,
+		    failure_remote_state_unknown = $14
 		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
 		  and lease_expires_at >= $5
-		returning tenant_id, source`, runID, workerID, safeCode, safeMessage, now).Scan(&tenantID, &source)
+		returning tenant_id, source`, runID, workerID, evidence.SafeErrorCode, failure.SafeMessage(evidence.SafeErrorCode), now,
+		evidence.Version, evidence.Category, evidence.Stage, evidence.TransportPhase, evidence.OccurredAt,
+		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown).Scan(&tenantID, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return report.ErrRunLeaseLost
 	}
@@ -670,6 +678,17 @@ func (store *ReportStore) FailPreRequestFailure(ctx context.Context, runID uuid.
 		return fmt.Errorf("commit fail pre-request report failure: %w", err)
 	}
 	return nil
+}
+
+func normalizeFailureEvidence(evidence failure.Evidence, now time.Time) failure.Evidence {
+	if evidence.OccurredAt.IsZero() {
+		evidence.OccurredAt = now
+	}
+	if evidence.FinishedAt == nil {
+		finishedAt := now
+		evidence.FinishedAt = &finishedAt
+	}
+	return failure.Complete(evidence)
 }
 
 func recordHostPreRequestFailureTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, now time.Time) error {
@@ -1420,7 +1439,8 @@ func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, 
 	return refresh, nil
 }
 
-func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID, safeCode, safeMessage string, now time.Time) error {
+func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID string, evidence failure.Evidence, now time.Time) error {
+	evidence = normalizeFailureEvidence(evidence, now)
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin fail report run: %w", err)
@@ -1431,17 +1451,23 @@ func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID, s
 	err = tx.QueryRow(ctx, `
 		update report_runs
 		set status = 'FAILED', safe_error_code = $3, safe_error_message = $4,
-		    finished_at = $5, lease_expires_at = null, progress_updated_at = $5, updated_at = $5
+		    finished_at = $5, lease_expires_at = null, progress_updated_at = $5, updated_at = $5,
+		    failure_evidence_version = $6, failure_category = $7, failure_stage = $8,
+		    failure_transport_phase = nullif($9, ''), failure_occurred_at = $10,
+		    failure_duration_ms = $11, failure_attempt = $12, failure_retryable = $13,
+		    failure_remote_state_unknown = $14
 		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
 		  and lease_expires_at >= $5
-		returning tenant_id, source`, runID, workerID, safeCode, safeMessage, now).Scan(&tenantID, &source)
+		returning tenant_id, source`, runID, workerID, evidence.SafeErrorCode, failure.SafeMessage(evidence.SafeErrorCode), now,
+		evidence.Version, evidence.Category, evidence.Stage, evidence.TransportPhase, evidence.OccurredAt,
+		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown).Scan(&tenantID, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return report.ErrRunLeaseLost
 	}
 	if err != nil {
 		return fmt.Errorf("fail report run: %w", err)
 	}
-	if isSMLCircuitFailure(safeCode) {
+	if isSMLCircuitFailure(evidence.SafeErrorCode) {
 		if _, err := tx.Exec(ctx, `
 			insert into tenant_sml_circuits (tenant_id, consecutive_failures, window_started_at, open_until, updated_at)
 			values ($1, 1, $2, null, $2)
@@ -1476,10 +1502,11 @@ func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID, s
 // FailRemoteUnknown atomically fails a dispatched JavaWS request and opens the
 // tenant uncertainty circuit. A timeout after bytes were sent is not safe to
 // retry because PostgreSQL may still be executing behind JavaWS.
-func (store *ReportStore) FailRemoteUnknown(ctx context.Context, runID uuid.UUID, workerID, safeCode, safeMessage string, now, openUntil time.Time) error {
+func (store *ReportStore) FailRemoteUnknown(ctx context.Context, runID uuid.UUID, workerID string, evidence failure.Evidence, now, openUntil time.Time) error {
 	if !openUntil.After(now) {
 		return fmt.Errorf("uncertainty circuit expiry must be in the future")
 	}
+	evidence = normalizeFailureEvidence(evidence, now)
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin fail uncertain report run: %w", err)
@@ -1491,10 +1518,16 @@ func (store *ReportStore) FailRemoteUnknown(ctx context.Context, runID uuid.UUID
 		update report_runs
 		set status = 'FAILED', safe_error_code = $3, safe_error_message = $4,
 		    finished_at = $5, source_finished_at = $5, lease_expires_at = null,
-		    progress_updated_at = $5, updated_at = $5
+		    progress_updated_at = $5, updated_at = $5,
+		    failure_evidence_version = $6, failure_category = $7, failure_stage = $8,
+		    failure_transport_phase = nullif($9, ''), failure_occurred_at = $10,
+		    failure_duration_ms = $11, failure_attempt = $12, failure_retryable = $13,
+		    failure_remote_state_unknown = $14
 		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
 		  and lease_expires_at >= $5
-		returning tenant_id, source`, runID, workerID, safeCode, safeMessage, now).Scan(&tenantID, &source)
+		returning tenant_id, source`, runID, workerID, evidence.SafeErrorCode, failure.SafeMessage(evidence.SafeErrorCode), now,
+		evidence.Version, evidence.Category, evidence.Stage, evidence.TransportPhase, evidence.OccurredAt,
+		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown).Scan(&tenantID, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return report.ErrRunLeaseLost
 	}
@@ -1698,11 +1731,14 @@ coalesce(claimed_by, ''), lease_expires_at, attempt, row_count, is_truncated,
 summary_json, reconciliation_json, coalesce(safe_error_code, ''),
 coalesce(safe_error_message, ''), queued_at, started_at, finished_at,
 expires_at, created_at, updated_at, coalesce(report_definition_version, ''),
-coalesce(data_source_version, 0), progress_phase, progress_sequence,
+coalesce(data_source_version, 0) as data_source_version, progress_phase, progress_sequence,
 progress_completed_steps, progress_total_steps, progress_updated_at,
 coalesce(expected_p50_ms, 0), coalesce(expected_p90_ms, 0), expected_sample_count,
 coalesce(query_plan_fingerprint, ''), execution_strategy, source_consistency,
-source_started_at, source_finished_at, progress_completed_chunks, progress_total_chunks`
+source_started_at, source_finished_at, progress_completed_chunks, progress_total_chunks,
+failure_evidence_version, failure_category, failure_stage, failure_transport_phase,
+failure_occurred_at, failure_duration_ms, failure_attempt, failure_retryable,
+failure_remote_state_unknown`
 
 func scanReportRun(row rowScanner, now time.Time) (report.Run, error) {
 	return scanReportRunWithExtras(row, now)
@@ -1711,6 +1747,12 @@ func scanReportRun(row rowScanner, now time.Time) (report.Run, error) {
 func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ...any) (report.Run, error) {
 	var run report.Run
 	var summaryJSON, reconciliationJSON []byte
+	var evidenceVersion *int
+	var evidenceCategory, evidenceStage, evidenceTransportPhase *string
+	var evidenceOccurredAt *time.Time
+	var evidenceDurationMS *int64
+	var evidenceAttempt *int
+	var evidenceRetryable, evidenceRemoteStateUnknown *bool
 	destinations := []any{
 		&run.ID, &run.TenantID, &run.ReportKey, &run.Source, &run.ResultKind, &run.Priority, &run.ExecutionKey, &run.IdempotencyKey,
 		&run.Status, &run.Period.Preset, &run.Period.DateFrom, &run.Period.DateTo,
@@ -1723,6 +1765,9 @@ func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ..
 		&run.ExpectedP50MS, &run.ExpectedP90MS, &run.ExpectedSampleCount,
 		&run.QueryPlanFingerprint, &run.ExecutionStrategy, &run.SourceConsistency,
 		&run.SourceStartedAt, &run.SourceFinishedAt, &run.ProgressCompletedChunks, &run.ProgressTotalChunks,
+		&evidenceVersion, &evidenceCategory, &evidenceStage, &evidenceTransportPhase,
+		&evidenceOccurredAt, &evidenceDurationMS, &evidenceAttempt, &evidenceRetryable,
+		&evidenceRemoteStateUnknown,
 	}
 	destinations = append(destinations, extraDestinations...)
 	err := row.Scan(destinations...)
@@ -1734,6 +1779,30 @@ func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ..
 	}
 	if len(reconciliationJSON) > 0 {
 		_ = json.Unmarshal(reconciliationJSON, &run.Reconciliation)
+	}
+	if evidenceVersion != nil && evidenceCategory != nil && evidenceStage != nil && evidenceOccurredAt != nil && evidenceRetryable != nil && evidenceRemoteStateUnknown != nil {
+		evidence := failure.Evidence{
+			Version: *evidenceVersion, Level: failure.LevelConfirmed,
+			Category: failure.Category(*evidenceCategory), Stage: failure.Stage(*evidenceStage),
+			OccurredAt: *evidenceOccurredAt, DurationMS: evidenceDurationMS, Attempt: evidenceAttempt,
+			Retryable: *evidenceRetryable, RemoteStateUnknown: *evidenceRemoteStateUnknown,
+			SafeErrorCode: run.SafeErrorCode,
+		}
+		if evidenceTransportPhase != nil {
+			evidence.TransportPhase = failure.TransportPhase(*evidenceTransportPhase)
+		}
+		if run.StartedAt != nil {
+			evidence.StartedAt = run.StartedAt
+		}
+		if run.FinishedAt != nil {
+			evidence.FinishedAt = run.FinishedAt
+		}
+		if run.DataSourceVersion > 0 {
+			connectionVersion := run.DataSourceVersion
+			evidence.ConnectionVersion = &connectionVersion
+		}
+		evidence = failure.Complete(evidence)
+		run.FailureEvidence = &evidence
 	}
 	if run.Status == report.StatusSucceeded && !run.ExpiresAt.After(now) {
 		run.Status = report.StatusExpired

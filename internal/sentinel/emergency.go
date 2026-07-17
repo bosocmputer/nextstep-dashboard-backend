@@ -155,11 +155,11 @@ func (lane *EmergencyLane) DatabaseUnavailable(ctx context.Context, now time.Tim
 	if err := lane.state.Save(state); err != nil {
 		return err
 	}
-	_, err = lane.sender.Send(ctx, Incident{
+	_, err = lane.sender.Send(ctx, Alert{Kind: "OPEN", Incident: Incident{
 		AlertRef: state.AlertRef, IncidentType: "PLATFORM_DATABASE_UNAVAILABLE", RootCause: RootPlatform,
 		Severity: SeverityP1, Status: StatusOpen, SafeErrorCode: "DATABASE_UNAVAILABLE",
 		OccurrenceCount: 1, AffectedCount: 1, FirstSeenAt: startedAt, LastSeenAt: now.UTC(), Version: 1,
-	}, lane.adminIncidentURL)
+	}}, lane.adminIncidentURL)
 	if err == nil {
 		return nil
 	}
@@ -186,7 +186,7 @@ func (lane *EmergencyLane) DatabaseRecovered(ctx context.Context, reconciler Dat
 	if err != nil {
 		return err
 	}
-	if _, err := lane.sender.Send(ctx, incident, lane.adminIncidentURL); err != nil {
+	if _, err := lane.sender.Send(ctx, Alert{Kind: "RECOVERY", Incident: incident}, lane.adminIncidentURL); err != nil {
 		return err
 	}
 	return lane.state.Save(EmergencyState{})

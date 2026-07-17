@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/google/uuid"
 )
 
@@ -107,6 +108,7 @@ type Run struct {
 	Reconciliation          map[string]any
 	SafeErrorCode           string
 	SafeErrorMessage        string
+	FailureEvidence         *failure.Evidence
 	QueuedAt                time.Time
 	StartedAt               *time.Time
 	FinishedAt              *time.Time

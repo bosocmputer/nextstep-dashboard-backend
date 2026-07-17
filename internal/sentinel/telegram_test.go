@@ -25,7 +25,7 @@ func TestTelegramClientUsesPlainTextAndSafeFailureClassification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	remoteID, err := client.Send(context.Background(), Incident{AlertRef: "NST-ABC123DEF456", Severity: SeverityP1, Status: StatusOpen, RootCause: RootPlatform, IncidentType: "TEST", FirstSeenAt: time.Now(), OccurrenceCount: 1, AffectedCount: 1}, "https://example.test/admin/operational-incidents")
+	remoteID, err := client.Send(context.Background(), Alert{Kind: "OPEN", Incident: Incident{AlertRef: "NST-ABC123DEF456", Severity: SeverityP1, Status: StatusOpen, RootCause: RootPlatform, IncidentType: "TEST", FirstSeenAt: time.Now(), OccurrenceCount: 1, AffectedCount: 1}}, "https://example.test/admin/operational-incidents")
 	if err != nil || remoteID != "42" || requests != 1 {
 		t.Fatalf("Send() = %q, %v; requests=%d", remoteID, err, requests)
 	}
@@ -38,7 +38,7 @@ func TestTelegramClientTreats429And5xxAsRetryable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = client.Send(context.Background(), Incident{AlertRef: "NST-ABC123DEF456", Severity: SeverityP1, Status: StatusOpen, RootCause: RootPlatform, IncidentType: "TEST", FirstSeenAt: time.Now(), OccurrenceCount: 1, AffectedCount: 1}, "https://example.test/admin/operational-incidents")
+		_, err = client.Send(context.Background(), Alert{Kind: "OPEN", Incident: Incident{AlertRef: "NST-ABC123DEF456", Severity: SeverityP1, Status: StatusOpen, RootCause: RootPlatform, IncidentType: "TEST", FirstSeenAt: time.Now(), OccurrenceCount: 1, AffectedCount: 1}}, "https://example.test/admin/operational-incidents")
 		server.Close()
 		if err == nil || IsPermanentSendError(err) != permanent {
 			t.Fatalf("status %d error=%v permanent=%v", status, err, IsPermanentSendError(err))
@@ -62,7 +62,7 @@ func TestTelegramClientRetriesTransientFailureWithinBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	remoteID, err := client.Send(context.Background(), Incident{AlertRef: "NST-ABC123DEF456", Severity: SeverityP1, Status: StatusOpen, RootCause: RootPlatform, IncidentType: "TEST", FirstSeenAt: time.Now(), OccurrenceCount: 1, AffectedCount: 1}, "https://example.test/admin/operational-incidents")
+	remoteID, err := client.Send(context.Background(), Alert{Kind: "OPEN", Incident: Incident{AlertRef: "NST-ABC123DEF456", Severity: SeverityP1, Status: StatusOpen, RootCause: RootPlatform, IncidentType: "TEST", FirstSeenAt: time.Now(), OccurrenceCount: 1, AffectedCount: 1}}, "https://example.test/admin/operational-incidents")
 	if err != nil || remoteID != "99" || attempts != 3 {
 		t.Fatalf("id=%s err=%v attempts=%d", remoteID, err, attempts)
 	}

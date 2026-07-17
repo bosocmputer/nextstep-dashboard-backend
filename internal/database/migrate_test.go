@@ -26,7 +26,7 @@ func TestEmbeddedMigrationsAreSequential(t *testing.T) {
 			t.Fatalf("migration %q has empty checksum", migration.Name)
 		}
 	}
-	if len(migrations) < 23 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction || !migrations[22].NoTransaction {
+	if len(migrations) < 25 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction || !migrations[22].NoTransaction || !migrations[24].NoTransaction {
 		t.Fatalf("snapshot indexes must use non-transactional concurrent migrations: %+v", migrations)
 	}
 }
@@ -154,6 +154,13 @@ func TestMigrateCreatesFoundationAndIsIdempotent(t *testing.T) {
 		where conrelid = 'notification_schedule_reports'::regclass
 		  and conname = 'notification_schedule_reports_position_check'`).Scan(&acceptsPositionTen); err != nil || !acceptsPositionTen {
 		t.Fatalf("notification schedule position constraint is not 1..10: accepts=%v err=%v", acceptsPositionTen, err)
+	}
+	var hasReportEvidence, hasIncidentEvidence bool
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'report_runs' and column_name = 'failure_stage')`).Scan(&hasReportEvidence); err != nil || !hasReportEvidence {
+		t.Fatalf("report_runs failure evidence missing: exists=%v err=%v", hasReportEvidence, err)
+	}
+	if err := pool.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_name = 'operational_incident_events' and column_name = 'failure_stage')`).Scan(&hasIncidentEvidence); err != nil || !hasIncidentEvidence {
+		t.Fatalf("operational incident failure evidence missing: exists=%v err=%v", hasIncidentEvidence, err)
 	}
 
 	for _, table := range []string{

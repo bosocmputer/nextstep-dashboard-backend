@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/google/uuid"
 )
 
@@ -34,12 +35,19 @@ type IncidentPage struct {
 }
 
 type IncidentEvent struct {
-	ID            uuid.UUID  `json:"id"`
-	EventKind     string     `json:"eventKind"`
-	SourceKind    SourceKind `json:"sourceKind,omitempty"`
-	SafeErrorCode string     `json:"safeErrorCode,omitempty"`
-	TenantName    string     `json:"tenantName,omitempty"`
-	ObservedAt    time.Time  `json:"observedAt"`
+	ID                            uuid.UUID         `json:"id"`
+	EventKind                     string            `json:"eventKind"`
+	SourceKind                    SourceKind        `json:"sourceKind,omitempty"`
+	SafeErrorCode                 string            `json:"safeErrorCode,omitempty"`
+	TenantName                    string            `json:"tenantName,omitempty"`
+	ObservedAt                    time.Time         `json:"observedAt"`
+	FailureEvidence               *failure.Evidence `json:"failureEvidence,omitempty"`
+	ReportKey                     string            `json:"reportKey,omitempty"`
+	TriggerKind                   TriggerKind       `json:"triggerKind,omitempty"`
+	Impact                        *failure.Impact   `json:"impact,omitempty"`
+	IsDownstream                  bool              `json:"isDownstream"`
+	CausedByAlertRef              string            `json:"causedByAlertRef,omitempty"`
+	ConnectionChangedSinceFailure bool              `json:"connectionChangedSinceFailure"`
 }
 
 type IncidentDetail struct {
@@ -76,21 +84,50 @@ func (service *AdminService) List(ctx context.Context, filter IncidentFilter) (I
 	if filter.PageSize < 1 || filter.PageSize > 100 {
 		return IncidentPage{}, ErrInvalidInput
 	}
-	return service.store.ListIncidents(ctx, filter)
+	page, err := service.store.ListIncidents(ctx, filter)
+	if err != nil {
+		return IncidentPage{}, err
+	}
+	for index := range page.Data {
+		page.Data[index].Presentation = incidentPresentation(page.Data[index])
+	}
+	return page, nil
 }
 
 func (service *AdminService) Get(ctx context.Context, id uuid.UUID) (IncidentDetail, error) {
 	if id == uuid.Nil {
 		return IncidentDetail{}, ErrInvalidInput
 	}
-	return service.store.GetIncident(ctx, id)
+	detail, err := service.store.GetIncident(ctx, id)
+	if err != nil {
+		return IncidentDetail{}, err
+	}
+	detail.Presentation = incidentPresentation(detail.Incident)
+	for index := range detail.Events {
+		if detail.Events[index].FailureEvidence != nil {
+			evidence := failure.Complete(*detail.Events[index].FailureEvidence)
+			detail.Events[index].FailureEvidence = &evidence
+		} else if detail.Events[index].SafeErrorCode != "" {
+			evidence := failure.EvidenceForCode(detail.Events[index].SafeErrorCode)
+			evidence.Version = 0
+			evidence.Level = failure.LevelLegacyPartial
+			evidence.OccurredAt = detail.Events[index].ObservedAt
+			evidence = failure.Complete(evidence)
+			detail.Events[index].FailureEvidence = &evidence
+		}
+	}
+	return detail, nil
 }
 
 func (service *AdminService) Acknowledge(ctx context.Context, id uuid.UUID, version int) (Incident, error) {
 	if id == uuid.Nil || version < 1 {
 		return Incident{}, ErrInvalidInput
 	}
-	return service.store.AcknowledgeIncident(ctx, id, version, service.now().UTC())
+	incident, err := service.store.AcknowledgeIncident(ctx, id, version, service.now().UTC())
+	if err == nil {
+		incident.Presentation = incidentPresentation(incident)
+	}
+	return incident, err
 }
 
 func (service *AdminService) AcceptRisk(ctx context.Context, id uuid.UUID, version int, reason string) (Incident, error) {
@@ -98,7 +135,11 @@ func (service *AdminService) AcceptRisk(ctx context.Context, id uuid.UUID, versi
 	if id == uuid.Nil || version < 1 || !validOperatorReason(reason) {
 		return Incident{}, ErrInvalidInput
 	}
-	return service.store.AcceptIncidentRisk(ctx, id, version, reason, service.now().UTC())
+	incident, err := service.store.AcceptIncidentRisk(ctx, id, version, reason, service.now().UTC())
+	if err == nil {
+		incident.Presentation = incidentPresentation(incident)
+	}
+	return incident, err
 }
 
 func validOperatorReason(reason string) bool {
@@ -118,7 +159,7 @@ type MonitorStore interface {
 }
 
 type Sender interface {
-	Send(context.Context, Incident, string) (string, error)
+	Send(context.Context, Alert, string) (string, error)
 }
 
 type Monitor struct {
@@ -202,7 +243,7 @@ func (monitor *Monitor) Process(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		remoteID, sendErr := monitor.sender.Send(ctx, alert.Incident, monitor.adminIncidentURL)
+		remoteID, sendErr := monitor.sender.Send(ctx, alert, monitor.adminIncidentURL)
 		if sendErr == nil {
 			if err := monitor.store.CompleteAlert(ctx, alert.ID, monitor.workerID, now); err != nil {
 				return err

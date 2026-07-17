@@ -1,7 +1,7 @@
 ---
 status: current
-last_verified: 2026-07-16
-source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/retention/worker.go, internal/sentinel/service.go, internal/database/sentinel_store.go, deploy/RUNBOOK.md]
+last_verified: 2026-07-17
+source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/retention/worker.go, internal/sentinel/service.go, internal/database/sentinel_store.go, internal/failure/catalog.go, deploy/RUNBOOK.md]
 tags: [backend, security, operations, retention]
 ---
 
@@ -52,6 +52,21 @@ tags: [backend, security, operations, retention]
 - Incidents group by root cause and severity to avoid a multi-tenant message storm. Acknowledge stops reminders; only system evidence resolves an incident. Manual closure is `CLOSED_ACCEPTED` with a reason.
 - The emergency database alert lane stores only a safe reference and timestamps in a protected volume. Host probe and monitor heartbeat files are bounded, schema-checked, and contain no customer data.
 - Admin incident APIs are Admin-only, CSRF-protected for mutations, and `no-store`. Telegram carries only an alert reference and safe operational fields; tenant names are resolved only inside the authenticated Admin detail page.
+- Incident events copy sanitized failure evidence and LINE/report impact at
+  observation time, so the 365-day incident record remains useful after source
+  Report or Notification retention. A connection version may be compared with
+  the current version, but the incident never stores the endpoint or credential.
+- The authenticated Incident list includes at most two tenant-name examples per
+  incident from the same bounded SQL query; Telegram and Codex clipboard output
+  never include those names. Incident detail returns at most 200 newest events
+  to keep the response bounded below its payload budget.
+- A linked `REPORT_SET_INCOMPLETE` is downstream impact of its failed report and
+  is suppressed as a second P1 alert. If no root report is provable inside the
+  aggregation window, the notification failure remains eligible as a standalone
+  incident rather than being hidden.
+- Telegram uses Thai local time and different OPEN, REMINDER, and RECOVERY
+  wording. Acknowledge only stops reminders; recovery still requires system
+  evidence.
 - Daily backup/host probes and isolated restore drills are host systemd jobs. Restore validation uses a temporary PostgreSQL container/volume and never targets the Production PostgreSQL instance.
 
 ## Living Context Gate

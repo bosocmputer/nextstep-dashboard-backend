@@ -23,7 +23,7 @@ type monitorStoreStub struct {
 
 type monitorSenderStub struct{}
 
-func (*monitorSenderStub) Send(context.Context, Incident, string) (string, error) { return "test", nil }
+func (*monitorSenderStub) Send(context.Context, Alert, string) (string, error) { return "test", nil }
 
 func (store *monitorStoreStub) ScanObservations(context.Context, time.Time, int, time.Duration) ([]Observation, error) {
 	return store.observations, nil
