@@ -2,17 +2,81 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/operations"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type OperationsStore struct {
 	pool *pgxpool.Pool
+}
+
+func (store *OperationsStore) GetReportRunDetail(ctx context.Context, runID uuid.UUID, now time.Time) (operations.ReportRunDetail, error) {
+	var detail operations.ReportRunDetail
+	var reportsTotal, reportsSucceeded, reportsFailed, reportsCancelled int
+	err := func() error {
+		row := store.pool.QueryRow(ctx, `
+			select `+reportRunColumns+`, tenant.name,
+			       coalesce(impact.reports_total, 1),
+			       coalesce(impact.reports_succeeded, case when r.status = 'SUCCEEDED' then 1 else 0 end),
+			       coalesce(impact.reports_failed, case when r.status = 'FAILED' then 1 else 0 end),
+			       coalesce(impact.reports_cancelled, case when r.status = 'CANCELLED' then 1 else 0 end),
+			       coalesce(notification.trigger_kind, case when r.source = 'SCHEDULE' then 'UNKNOWN' else r.source end),
+			       case
+			         when linked.notification_run_id is null then 'NOT_APPLICABLE'
+			         when exists (select 1 from line_deliveries delivery where delivery.notification_run_id = linked.notification_run_id) then 'CREATED'
+			         when notification.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED') then 'NOT_CREATED_INCOMPLETE_REPORT_SET'
+			         else 'UNKNOWN'
+			       end,
+			       case when r.failure_evidence_version is null or r.data_source_version is null or connection.version is null then false
+			            else connection.version <> r.data_source_version end
+			from report_runs r
+			join tenants tenant on tenant.id = r.tenant_id
+			left join lateral (
+			  select materialized.notification_run_id
+			  from notification_run_reports materialized
+			  where materialized.report_run_id = r.id
+			  order by materialized.notification_run_id
+			  limit 1
+			) linked on true
+			left join notification_runs notification on notification.id = linked.notification_run_id
+			left join lateral (
+			  select count(*)::integer as reports_total,
+			         count(*) filter (where sibling.status = 'SUCCEEDED')::integer as reports_succeeded,
+			         count(*) filter (where sibling.status = 'FAILED')::integer as reports_failed,
+			         count(*) filter (where sibling.status = 'CANCELLED')::integer as reports_cancelled
+			  from notification_run_reports occurrence_report
+			  join report_runs sibling on sibling.id = occurrence_report.report_run_id
+			  where occurrence_report.notification_run_id = linked.notification_run_id
+			) impact on linked.notification_run_id is not null
+			left join tenant_sml_connections connection on connection.tenant_id = r.tenant_id
+			where r.id = $1`, runID)
+		run, err := scanReportRunWithExtras(row, now, &detail.TenantName,
+			&reportsTotal, &reportsSucceeded, &reportsFailed, &reportsCancelled,
+			&detail.TriggerKind, &detail.Impact.Notification, &detail.ConnectionChangedSinceFailure)
+		if err != nil {
+			return err
+		}
+		detail.Run = run
+		return nil
+	}()
+	if errors.Is(err, pgx.ErrNoRows) {
+		return operations.ReportRunDetail{}, report.ErrRunNotFound
+	}
+	if err != nil {
+		return operations.ReportRunDetail{}, fmt.Errorf("get admin report run detail: %w", err)
+	}
+	detail.Impact.ReportsTotal = reportsTotal
+	detail.Impact.ReportsSucceeded = reportsSucceeded
+	detail.Impact.ReportsFailed = reportsFailed
+	detail.Impact.ReportsCancelled = reportsCancelled
+	return detail, nil
 }
 
 func NewOperationsStore(pool *pgxpool.Pool) *OperationsStore {

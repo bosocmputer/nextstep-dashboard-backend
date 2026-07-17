@@ -102,6 +102,8 @@ alter table operational_incident_events
     )) not valid,
   add constraint operational_incident_events_failure_duration_check
     check (failure_duration_ms is null or failure_duration_ms >= 0) not valid,
+  add constraint operational_incident_events_failure_attempt_check
+    check (failure_attempt is null or failure_attempt >= 0) not valid,
   add constraint operational_incident_events_connection_version_check
     check (connection_version is null or connection_version >= 0) not valid,
   add constraint operational_incident_events_trigger_kind_check
@@ -125,6 +127,7 @@ alter table operational_incident_events validate constraint operational_incident
 alter table operational_incident_events validate constraint operational_incident_events_failure_stage_check;
 alter table operational_incident_events validate constraint operational_incident_events_failure_transport_phase_check;
 alter table operational_incident_events validate constraint operational_incident_events_failure_duration_check;
+alter table operational_incident_events validate constraint operational_incident_events_failure_attempt_check;
 alter table operational_incident_events validate constraint operational_incident_events_connection_version_check;
 alter table operational_incident_events validate constraint operational_incident_events_trigger_kind_check;
 alter table operational_incident_events validate constraint operational_incident_events_impact_check;

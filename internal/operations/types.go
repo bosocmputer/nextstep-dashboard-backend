@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/quota"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/recipient"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
@@ -35,6 +36,14 @@ type ReportRun struct {
 	RuntimeStatus    string
 	RetryAvailableAt *time.Time
 	WaitReason       *string
+	FailureSummary   *failure.Evidence
+}
+
+type ReportRunDetail struct {
+	ReportRun
+	Impact                        failure.Impact
+	TriggerKind                   string
+	ConnectionChangedSinceFailure bool
 }
 
 type DeliveryStatus string
@@ -96,6 +105,7 @@ type AuditPage struct {
 type Store interface {
 	GetLineQuota(context.Context, time.Time) (LineQuotaStatus, error)
 	ListReportRuns(context.Context, ReportRunFilter) (ReportRunPage, error)
+	GetReportRunDetail(context.Context, uuid.UUID, time.Time) (ReportRunDetail, error)
 	ListDeliveries(context.Context, DeliveryFilter) (DeliveryPage, error)
 	ListAudit(context.Context, AuditFilter) (AuditPage, error)
 }

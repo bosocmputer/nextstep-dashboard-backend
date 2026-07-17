@@ -47,10 +47,10 @@ func NewTelegramClient(token, chatID, baseURL string, client *http.Client) (*Tel
 	return &TelegramClient{token: token, chatID: chatID, baseURL: baseURL, http: client}, nil
 }
 
-func (client *TelegramClient) Send(ctx context.Context, incident Incident, adminIncidentURL string) (string, error) {
+func (client *TelegramClient) Send(ctx context.Context, alert Alert, adminIncidentURL string) (string, error) {
 	requestBody := map[string]any{
 		"chat_id":                  client.chatID,
-		"text":                     TelegramMessage(incident, adminIncidentURL),
+		"text":                     TelegramMessage(alert, adminIncidentURL),
 		"disable_web_page_preview": true,
 	}
 	var response struct {

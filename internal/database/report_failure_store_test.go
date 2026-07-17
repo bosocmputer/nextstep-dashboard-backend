@@ -92,10 +92,10 @@ func TestPreRequestFailuresOpenSharedHostCircuitAndRemoteUnknownIsAtomic(t *test
 		insert into report_runs (
 		  id, tenant_id, report_key, source, idempotency_key, status,
 		  period_preset, period_from, period_to, claimed_by, claimed_at,
-		  lease_expires_at, queued_at, expires_at, result_kind, priority
+		  lease_expires_at, queued_at, expires_at, result_kind, priority, data_source_version
 		) values ($1, $2, 'stock_balance', 'BACKGROUND', $3, 'RUNNING',
 		          'AS_OF_RUN', '2026-07-15', '2026-07-15', 'worker-a', $4,
-		          $5, $4, $6, 'SUMMARY', 20)`, remoteRunID, tenantID, "remote-unknown-"+remoteRunID.String(), now.Add(time.Minute), now.Add(2*time.Minute), now.Add(24*time.Hour)); err != nil {
+		          $5, $4, $6, 'SUMMARY', 20, 1)`, remoteRunID, tenantID, "remote-unknown-"+remoteRunID.String(), now.Add(time.Minute), now.Add(2*time.Minute), now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	failedAt := now.Add(61 * time.Second)
@@ -118,5 +118,16 @@ func TestPreRequestFailuresOpenSharedHostCircuitAndRemoteUnknownIsAtomic(t *test
 	}
 	if status != string(report.StatusFailed) || code != "SML_TIMEOUT" || stage != string(failure.StageWaitResponse) || phase != string(failure.PhaseRequestSentResultUnknown) || !tenantOpen {
 		t.Fatalf("remote run=%s/%s stage=%s phase=%s tenantOpen=%v", status, code, stage, phase, tenantOpen)
+	}
+	detail, err := NewOperationsStore(pool).GetReportRunDetail(ctx, remoteRunID, failedAt)
+	if err != nil || detail.Run.FailureEvidence == nil || detail.Run.FailureEvidence.TransportPhase != failure.PhaseRequestSentResultUnknown || detail.Impact.ReportsTotal != 1 || detail.Impact.ReportsFailed != 1 || detail.Impact.Notification != failure.NotificationNotApplicable {
+		t.Fatalf("GetReportRunDetail() = %+v, %v", detail, err)
+	}
+	if _, err := pool.Exec(ctx, `update tenant_sml_connections set version = version + 1 where tenant_id = $1`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = NewOperationsStore(pool).GetReportRunDetail(ctx, remoteRunID, failedAt)
+	if err != nil || !detail.ConnectionChangedSinceFailure {
+		t.Fatalf("connection change detail = %+v, %v", detail, err)
 	}
 }

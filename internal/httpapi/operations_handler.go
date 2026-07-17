@@ -15,6 +15,7 @@ import (
 type OperationsAPI interface {
 	GetLineQuota(context.Context, time.Time) (operations.LineQuotaStatus, error)
 	ListReportRuns(context.Context, operations.ReportRunFilter) (operations.ReportRunPage, error)
+	GetReportRunDetail(context.Context, uuid.UUID, time.Time) (operations.ReportRunDetail, error)
 	ListDeliveries(context.Context, operations.DeliveryFilter) (operations.DeliveryPage, error)
 	ListAudit(context.Context, operations.AuditFilter) (operations.AuditPage, error)
 }
@@ -67,9 +68,36 @@ func registerOperationsRoutes(router interface {
 			if item.WaitReason != nil {
 				responseItem["waitReason"] = *item.WaitReason
 			}
+			if item.FailureSummary != nil {
+				responseItem["failureSummary"] = item.FailureSummary
+			}
 			data = append(data, responseItem)
 		}
 		writeJSON(response, http.StatusOK, map[string]any{"data": data, "page": operationsPage(page.NextCursor, page.HasMore)})
+	})
+
+	router.Get("/api/v1/admin/report-runs/{runId}", func(response http.ResponseWriter, request *http.Request) {
+		if _, ok := operationalAdmin(response, request, adminAuth, false); !ok {
+			return
+		}
+		runID, err := uuid.Parse(request.PathValue("runId"))
+		if err != nil {
+			writeProblem(response, request, http.StatusNotFound, "REPORT_RUN_NOT_FOUND", "Report run was not found.", false)
+			return
+		}
+		detail, err := operationsAPI.GetReportRunDetail(request.Context(), runID, time.Now().UTC())
+		if handleOperationsError(response, request, err) {
+			return
+		}
+		responseItem := reportRunResponse(detail.Run)
+		responseItem["tenantName"] = detail.TenantName
+		if detail.FailureSummary != nil {
+			responseItem["failureSummary"] = detail.FailureSummary
+		}
+		responseItem["impact"] = detail.Impact
+		responseItem["triggerKind"] = detail.TriggerKind
+		responseItem["connectionChangedSinceFailure"] = detail.ConnectionChangedSinceFailure
+		writeJSON(response, http.StatusOK, responseItem)
 	})
 
 	router.Get("/api/v1/admin/line-deliveries", func(response http.ResponseWriter, request *http.Request) {
@@ -143,6 +171,8 @@ func handleOperationsError(response http.ResponseWriter, request *http.Request, 
 	}
 	if errors.Is(err, operations.ErrInvalidCursor) {
 		writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Cursor is invalid.", false)
+	} else if errors.Is(err, report.ErrRunNotFound) {
+		writeProblem(response, request, http.StatusNotFound, "REPORT_RUN_NOT_FOUND", "Report run was not found.", false)
 	} else {
 		writeProblem(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to load operations history.", false)
 	}

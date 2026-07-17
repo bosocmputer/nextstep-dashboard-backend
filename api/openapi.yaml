@@ -609,6 +609,21 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ReportRunPage'}
+  /api/v1/admin/report-runs/{runId}:
+    get:
+      tags: [Admin operations]
+      operationId: getAdminReportRunDetail
+      description: Loads sanitized failure evidence and LINE impact for one report run without contacting SML.
+      security: [{AdminSession: []}]
+      parameters:
+        - {name: runId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Report run evidence and impact.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportRunDetail'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/admin/line-quota:
     get:
       tags: [Admin operations]
@@ -1522,6 +1537,46 @@ components:
         safeErrorCode: {type: string}
         reportRunIds: {type: array, minItems: 1, maxItems: 10, items: {type: string, format: uuid}}
     ReportRunStatus: {type: string, enum: [QUEUED, CLAIMED, RUNNING, SUCCEEDED, FAILED, CANCELLED, EXPIRED]}
+    FailurePresentation:
+      type: object
+      additionalProperties: false
+      required: [titleTh, summaryTh, stageTh, nextActionsTh]
+      properties:
+        titleTh: {type: string}
+        summaryTh: {type: string}
+        stageTh: {type: string}
+        evidenceNoteTh: {type: string}
+        nextActionsTh: {type: array, items: {type: string}}
+    FailureEvidence:
+      type: object
+      additionalProperties: false
+      required: [version, level, category, stage, occurredAt, retryable, remoteStateUnknown, safeErrorCode, presentation]
+      properties:
+        version: {type: integer, minimum: 0}
+        level: {type: string, enum: [CONFIRMED, LEGACY_PARTIAL]}
+        category: {type: string, enum: [SML_CONFIGURATION, JAVA_WS_CONNECTIVITY, JAVA_WS_RESPONSE, REPORT_PROCESSING, QUEUE_WORKER, NOTIFICATION, LINE_DELIVERY, PLATFORM, CAPACITY]}
+        stage: {type: string, enum: [LOAD_CONNECTION, RESOLVE_ENDPOINT, CONNECT_JAVA_WS, SEND_REQUEST, WAIT_RESPONSE, READ_RESPONSE, VALIDATE_RESPONSE, DECODE_PAYLOAD, BUILD_REPORT, SAVE_REPORT, PREPARE_NOTIFICATION, SEND_LINE, QUEUE_EXECUTION, PLATFORM_CHECK]}
+        transportPhase: {type: string, enum: [BEFORE_REQUEST_SENT, REQUEST_SENT_RESULT_UNKNOWN, RESPONSE_STARTED]}
+        occurredAt: {type: string, format: date-time}
+        startedAt: {type: string, format: date-time}
+        finishedAt: {type: string, format: date-time}
+        durationMs: {type: integer, minimum: 0}
+        attempt: {type: integer, minimum: 0}
+        retryable: {type: boolean}
+        remoteStateUnknown: {type: boolean}
+        connectionVersion: {type: integer, minimum: 0}
+        safeErrorCode: {type: string}
+        presentation: {$ref: '#/components/schemas/FailurePresentation'}
+    FailureImpact:
+      type: object
+      additionalProperties: false
+      required: [reportsTotal, reportsSucceeded, reportsFailed, reportsCancelled, notificationOutcome]
+      properties:
+        reportsTotal: {type: integer, minimum: 0}
+        reportsSucceeded: {type: integer, minimum: 0}
+        reportsFailed: {type: integer, minimum: 0}
+        reportsCancelled: {type: integer, minimum: 0}
+        notificationOutcome: {type: string, enum: [NOT_APPLICABLE, NOT_CREATED_INCOMPLETE_REPORT_SET, CREATED, UNKNOWN]}
     CreateReportRunInput:
       type: object
       additionalProperties: false
@@ -1552,12 +1607,22 @@ components:
         reconciliation: {type: object, additionalProperties: true}
         safeErrorCode: {type: string, nullable: true}
         safeErrorMessage: {type: string, nullable: true}
+        failureSummary: {$ref: '#/components/schemas/FailureEvidence'}
         queuePosition: {type: integer, minimum: 1, nullable: true}
         queuedAt: {type: string, format: date-time}
         startedAt: {type: string, format: date-time, nullable: true}
         finishedAt: {type: string, format: date-time, nullable: true}
         expiresAt: {type: string, format: date-time}
         progress: {$ref: '#/components/schemas/ReportRunProgress'}
+    ReportRunDetail:
+      allOf:
+        - {$ref: '#/components/schemas/ReportRun'}
+        - type: object
+          required: [tenantName, impact, triggerKind, connectionChangedSinceFailure]
+          properties:
+            impact: {$ref: '#/components/schemas/FailureImpact'}
+            triggerKind: {type: string, enum: [UNKNOWN, SCHEDULED, TEST, DASHBOARD, BACKGROUND]}
+            connectionChangedSinceFailure: {type: boolean}
     ReportRunProgress:
       type: object
       additionalProperties: false
@@ -1929,7 +1994,7 @@ components:
     OperationalIncident:
       type: object
       additionalProperties: false
-      required: [id, alertRef, incidentType, rootCause, severity, status, occurrenceCount, affectedCount, firstSeenAt, lastSeenAt, version]
+      required: [id, alertRef, incidentType, rootCause, severity, status, occurrenceCount, affectedCount, firstSeenAt, lastSeenAt, version, presentation, isDownstream]
       properties:
         id: {type: string, format: uuid}
         alertRef: {type: string, pattern: '^NST-[A-Z0-9]{12}$'}
@@ -1947,18 +2012,28 @@ components:
         acceptedAt: {type: string, format: date-time}
         acceptedReason: {type: string, minLength: 12, maxLength: 500}
         version: {type: integer, minimum: 1}
+        presentation: {$ref: '#/components/schemas/FailurePresentation'}
+        isDownstream: {type: boolean}
+        causedByAlertRef: {type: string, pattern: '^NST-[A-Z0-9]{12}$'}
         events: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/OperationalIncidentEvent'}}
     OperationalIncidentEvent:
       type: object
       additionalProperties: false
-      required: [id, eventKind, observedAt]
+      required: [id, eventKind, observedAt, isDownstream, connectionChangedSinceFailure]
       properties:
         id: {type: string, format: uuid}
-        eventKind: {type: string, enum: [OBSERVED, ACKNOWLEDGED, EVIDENCE_RESOLVED, RISK_ACCEPTED, ALERT_SENT, ALERT_FAILED]}
+        eventKind: {type: string, enum: [OBSERVED, DOWNSTREAM_IMPACT, ACKNOWLEDGED, EVIDENCE_RESOLVED, RISK_ACCEPTED, ALERT_SENT, ALERT_FAILED]}
         sourceKind: {type: string, enum: [NOTIFICATION, DELIVERY, REPORT, WORKER, SML_CIRCUIT, HOST, BACKUP, DATABASE]}
         safeErrorCode: {type: string, maxLength: 96}
         tenantName: {type: string, maxLength: 160, description: Authenticated Admin detail only; never returned in Telegram.}
         observedAt: {type: string, format: date-time}
+        failureEvidence: {$ref: '#/components/schemas/FailureEvidence'}
+        reportKey: {$ref: '#/components/schemas/ReportKey'}
+        triggerKind: {type: string, enum: [UNKNOWN, SCHEDULED, TEST, VIEWER, BACKGROUND]}
+        impact: {$ref: '#/components/schemas/FailureImpact'}
+        isDownstream: {type: boolean}
+        causedByAlertRef: {type: string, pattern: '^NST-[A-Z0-9]{12}$'}
+        connectionChangedSinceFailure: {type: boolean}
     OperationalIncidentDetail:
       allOf:
         - {$ref: '#/components/schemas/OperationalIncident'}

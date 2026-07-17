@@ -2,12 +2,14 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sentinel"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,10 +38,28 @@ func (store *SentinelStore) ScanObservations(ctx context.Context, now time.Time,
 		scan  func(pgx.Rows) (*sentinel.Observation, error)
 	}{
 		{key: "notification_terminal", query: `
-			select n.id, n.tenant_id, n.trigger_kind, n.status, coalesce(n.safe_error_code, ''), n.updated_at
+			select n.id, n.tenant_id, n.trigger_kind, n.status, coalesce(n.safe_error_code, ''), n.updated_at,
+			       coalesce(impact.reports_total, 0), coalesce(impact.reports_succeeded, 0),
+			       coalesce(impact.reports_failed, 0), coalesce(impact.reports_cancelled, 0)
 			from notification_runs n
+			left join lateral (
+			  select count(*)::integer reports_total,
+			         count(*) filter (where run.status = 'SUCCEEDED')::integer reports_succeeded,
+			         count(*) filter (where run.status = 'FAILED')::integer reports_failed,
+			         count(*) filter (where run.status = 'CANCELLED')::integer reports_cancelled
+			  from notification_run_reports linked join report_runs run on run.id = linked.report_run_id
+			  where linked.notification_run_id = n.id
+			) impact on true
 			where n.trigger_kind = 'SCHEDULED'
 			  and n.status in ('FAILED', 'PARTIAL_FAILED', 'BLOCKED_QUOTA')
+			  and not (
+			    n.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED')
+			    and exists (
+			      select 1 from notification_run_reports linked
+			      join report_runs failed_run on failed_run.id = linked.report_run_id
+			      where linked.notification_run_id = n.id and failed_run.status = 'FAILED'
+			    )
+			  )
 			  and n.updated_at between $1 and $2
 			  and not exists (
 			    select 1 from operational_incident_events event
@@ -57,8 +77,34 @@ func (store *SentinelStore) ScanObservations(ctx context.Context, now time.Time,
 			  )
 			order by delivery.updated_at, delivery.id limit $3`, scan: scanDeliveryObservation},
 		{key: "report_terminal", query: `
-			select run.id, run.tenant_id, run.status, coalesce(run.safe_error_code, ''), run.updated_at
+			select run.id, run.tenant_id, run.status, coalesce(run.safe_error_code, ''), run.updated_at,
+			       run.report_key, run.failure_evidence_version, run.failure_category, run.failure_stage,
+			       run.failure_transport_phase, run.failure_occurred_at, run.failure_duration_ms,
+			       run.failure_attempt, run.failure_retryable, run.failure_remote_state_unknown,
+			       run.data_source_version, linked.notification_run_id,
+			       coalesce(notification.trigger_kind, 'SCHEDULED'),
+			       coalesce(impact.reports_total, 1),
+			       coalesce(impact.reports_succeeded, case when run.status = 'SUCCEEDED' then 1 else 0 end),
+			       coalesce(impact.reports_failed, case when run.status = 'FAILED' then 1 else 0 end),
+			       coalesce(impact.reports_cancelled, case when run.status = 'CANCELLED' then 1 else 0 end),
+			       case when linked.notification_run_id is null then 'NOT_APPLICABLE'
+			            when notification.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED') then 'NOT_CREATED_INCOMPLETE_REPORT_SET'
+			            when exists (select 1 from line_deliveries delivery where delivery.notification_run_id = linked.notification_run_id) then 'CREATED'
+			            else 'UNKNOWN' end
 			from report_runs run
+			left join lateral (
+			  select materialized.notification_run_id from notification_run_reports materialized
+			  where materialized.report_run_id = run.id order by materialized.notification_run_id limit 1
+			) linked on true
+			left join notification_runs notification on notification.id = linked.notification_run_id
+			left join lateral (
+			  select count(*)::integer reports_total,
+			         count(*) filter (where sibling.status = 'SUCCEEDED')::integer reports_succeeded,
+			         count(*) filter (where sibling.status = 'FAILED')::integer reports_failed,
+			         count(*) filter (where sibling.status = 'CANCELLED')::integer reports_cancelled
+			  from notification_run_reports occurrence_report join report_runs sibling on sibling.id = occurrence_report.report_run_id
+			  where occurrence_report.notification_run_id = linked.notification_run_id
+			) impact on linked.notification_run_id is not null
 			where run.source = 'SCHEDULE' and run.status = 'FAILED'
 			  and run.updated_at between $1 and $2
 			  and not exists (
@@ -117,10 +163,21 @@ func scanNotificationObservation(rows pgx.Rows) (*sentinel.Observation, error) {
 	var trigger sentinel.TriggerKind
 	var status, safeCode string
 	var observedAt time.Time
-	if err := rows.Scan(&sourceID, &tenantID, &trigger, &status, &safeCode, &observedAt); err != nil {
+	var total, succeeded, failed, cancelled int
+	if err := rows.Scan(&sourceID, &tenantID, &trigger, &status, &safeCode, &observedAt, &total, &succeeded, &failed, &cancelled); err != nil {
 		return nil, err
 	}
-	return sentinel.NotificationObservation(sourceID, tenantID, trigger, status, safeCode, observedAt), nil
+	observation := sentinel.NotificationObservation(sourceID, tenantID, trigger, status, safeCode, observedAt)
+	if observation != nil {
+		evidence := failure.EvidenceForCode(safeCode)
+		evidence.OccurredAt = observedAt
+		evidence = failure.Complete(evidence)
+		observation.Evidence = &evidence
+		observation.TriggerKind = trigger
+		observation.CorrelationKey = sentinel.OccurrenceCorrelationKey(sourceID)
+		observation.Impact = &failure.Impact{ReportsTotal: total, ReportsSucceeded: succeeded, ReportsFailed: failed, ReportsCancelled: cancelled, Notification: failure.NotificationOutcomeUnknown}
+	}
+	return observation, nil
 }
 
 func scanDeliveryObservation(rows pgx.Rows) (*sentinel.Observation, error) {
@@ -130,17 +187,71 @@ func scanDeliveryObservation(rows pgx.Rows) (*sentinel.Observation, error) {
 	if err := rows.Scan(&sourceID, &tenantID, &status, &safeCode, &observedAt); err != nil {
 		return nil, err
 	}
-	return sentinel.DeliveryObservation(sourceID, tenantID, status, safeCode, observedAt), nil
+	observation := sentinel.DeliveryObservation(sourceID, tenantID, status, safeCode, observedAt)
+	if observation != nil {
+		evidence := failure.EvidenceForCode(safeCode)
+		evidence.OccurredAt = observedAt
+		evidence = failure.Complete(evidence)
+		observation.Evidence = &evidence
+	}
+	return observation, nil
 }
 
 func scanReportObservation(rows pgx.Rows) (*sentinel.Observation, error) {
 	var sourceID, tenantID uuid.UUID
-	var status, safeCode string
+	var status, safeCode, reportKey string
 	var observedAt time.Time
-	if err := rows.Scan(&sourceID, &tenantID, &status, &safeCode, &observedAt); err != nil {
+	var evidenceVersion, attempt, connectionVersion *int
+	var durationMS *int64
+	var category, stage, transportPhase *string
+	var evidenceOccurredAt *time.Time
+	var retryable, remoteStateUnknown *bool
+	var notificationRunID *uuid.UUID
+	var trigger sentinel.TriggerKind
+	var total, succeeded, failed, cancelled int
+	var notificationOutcome failure.NotificationOutcome
+	if err := rows.Scan(&sourceID, &tenantID, &status, &safeCode, &observedAt, &reportKey,
+		&evidenceVersion, &category, &stage, &transportPhase, &evidenceOccurredAt, &durationMS,
+		&attempt, &retryable, &remoteStateUnknown, &connectionVersion, &notificationRunID, &trigger,
+		&total, &succeeded, &failed, &cancelled, &notificationOutcome); err != nil {
 		return nil, err
 	}
-	return sentinel.ReportObservation(sourceID, tenantID, status, safeCode, observedAt), nil
+	observation := sentinel.ReportObservation(sourceID, tenantID, status, safeCode, observedAt)
+	if observation == nil {
+		return nil, nil
+	}
+	evidence := failure.EvidenceForCode(safeCode)
+	evidence.Level = failure.LevelLegacyPartial
+	evidence.Version = 0
+	evidence.OccurredAt = observedAt
+	if evidenceVersion != nil && category != nil && stage != nil && evidenceOccurredAt != nil && retryable != nil && remoteStateUnknown != nil {
+		evidence.Version = *evidenceVersion
+		evidence.Level = failure.LevelConfirmed
+		evidence.Category = failure.Category(*category)
+		evidence.Stage = failure.Stage(*stage)
+		evidence.OccurredAt = *evidenceOccurredAt
+		evidence.Retryable = *retryable
+		evidence.RemoteStateUnknown = *remoteStateUnknown
+		if transportPhase != nil {
+			evidence.TransportPhase = failure.TransportPhase(*transportPhase)
+		}
+	}
+	if durationMS != nil {
+		evidence.DurationMS = durationMS
+	}
+	evidence.Attempt = attempt
+	evidence.ConnectionVersion = connectionVersion
+	evidence = failure.Complete(evidence)
+	observation.Evidence = &evidence
+	observation.ReportKey = reportKey
+	observation.TriggerKind = trigger
+	observation.Impact = &failure.Impact{ReportsTotal: total, ReportsSucceeded: succeeded, ReportsFailed: failed, ReportsCancelled: cancelled, Notification: notificationOutcome}
+	if notificationRunID != nil {
+		observation.CorrelationKey = sentinel.OccurrenceCorrelationKey(*notificationRunID)
+	} else {
+		observation.CorrelationKey = sentinel.OccurrenceCorrelationKey(sourceID)
+	}
+	return observation, nil
 }
 
 func (store *SentinelStore) monitorCursor(ctx context.Context, key string, now time.Time) (time.Time, bool, error) {
@@ -453,35 +564,108 @@ func (store *SentinelStore) RecordObservations(ctx context.Context, observations
 		return fmt.Errorf("upsert operational incidents batch: %w", err)
 	}
 
-	eventFingerprints := make([]string, 0, len(observations))
-	eventSourceKinds := make([]string, 0, len(observations))
-	eventSourceIDs := make([]uuid.UUID, 0, len(observations))
-	eventTenantIDs := make([]string, 0, len(observations))
-	eventSafeCodes := make([]string, 0, len(observations))
-	eventObservedAt := make([]time.Time, 0, len(observations))
+	type persistedIncidentEvent struct {
+		Fingerprint            string     `json:"fingerprint"`
+		EventKind              string     `json:"event_kind"`
+		SourceKind             string     `json:"source_kind"`
+		SourceID               uuid.UUID  `json:"source_id"`
+		TenantID               string     `json:"tenant_id"`
+		SafeErrorCode          string     `json:"safe_error_code"`
+		ObservedAt             time.Time  `json:"observed_at"`
+		CorrelationKey         string     `json:"correlation_key"`
+		Downstream             bool       `json:"downstream"`
+		EvidenceVersion        *int       `json:"failure_evidence_version"`
+		EvidenceLevel          string     `json:"failure_level"`
+		EvidenceCategory       string     `json:"failure_category"`
+		EvidenceStage          string     `json:"failure_stage"`
+		EvidenceTransportPhase string     `json:"failure_transport_phase"`
+		EvidenceOccurredAt     *time.Time `json:"failure_occurred_at"`
+		EvidenceDurationMS     *int64     `json:"failure_duration_ms"`
+		EvidenceAttempt        *int       `json:"failure_attempt"`
+		EvidenceRetryable      *bool      `json:"failure_retryable"`
+		RemoteStateUnknown     *bool      `json:"failure_remote_state_unknown"`
+		ConnectionVersion      *int       `json:"connection_version"`
+		ReportKey              string     `json:"report_key"`
+		TriggerKind            string     `json:"trigger_kind"`
+		ReportsTotal           *int       `json:"reports_total"`
+		ReportsSucceeded       *int       `json:"reports_succeeded"`
+		ReportsFailed          *int       `json:"reports_failed"`
+		ReportsCancelled       *int       `json:"reports_cancelled"`
+		NotificationOutcome    string     `json:"notification_outcome"`
+	}
+	events := make([]persistedIncidentEvent, 0, len(observations))
 	for _, observation := range observations {
 		tenantID := ""
 		if observation.TenantID != nil {
 			tenantID = observation.TenantID.String()
 		}
-		eventFingerprints = append(eventFingerprints, observation.Fingerprint())
-		eventSourceKinds = append(eventSourceKinds, string(observation.SourceKind))
-		eventSourceIDs = append(eventSourceIDs, observation.SourceID)
-		eventTenantIDs = append(eventTenantIDs, tenantID)
-		eventSafeCodes = append(eventSafeCodes, observation.SafeErrorCode)
-		eventObservedAt = append(eventObservedAt, observation.ObservedAt)
+		event := persistedIncidentEvent{
+			Fingerprint: observation.Fingerprint(), EventKind: "OBSERVED", SourceKind: string(observation.SourceKind),
+			SourceID: observation.SourceID, TenantID: tenantID, SafeErrorCode: observation.SafeErrorCode,
+			ObservedAt: observation.ObservedAt, CorrelationKey: observation.CorrelationKey,
+			Downstream: observation.Downstream, ReportKey: observation.ReportKey, TriggerKind: string(observation.TriggerKind),
+		}
+		if observation.Downstream {
+			event.EventKind = "DOWNSTREAM_IMPACT"
+		}
+		if evidence := observation.Evidence; evidence != nil {
+			if evidence.Version > 0 {
+				version := evidence.Version
+				event.EvidenceVersion = &version
+			}
+			event.EvidenceLevel = string(evidence.Level)
+			event.EvidenceCategory = string(evidence.Category)
+			event.EvidenceStage = string(evidence.Stage)
+			event.EvidenceTransportPhase = string(evidence.TransportPhase)
+			event.EvidenceOccurredAt = &evidence.OccurredAt
+			event.EvidenceDurationMS = evidence.DurationMS
+			event.EvidenceAttempt = evidence.Attempt
+			retryable, remoteUnknown := evidence.Retryable, evidence.RemoteStateUnknown
+			event.EvidenceRetryable = &retryable
+			event.RemoteStateUnknown = &remoteUnknown
+			event.ConnectionVersion = evidence.ConnectionVersion
+		}
+		if impact := observation.Impact; impact != nil {
+			total, succeeded, failed, cancelled := impact.ReportsTotal, impact.ReportsSucceeded, impact.ReportsFailed, impact.ReportsCancelled
+			event.ReportsTotal, event.ReportsSucceeded, event.ReportsFailed, event.ReportsCancelled = &total, &succeeded, &failed, &cancelled
+			event.NotificationOutcome = string(impact.Notification)
+		}
+		events = append(events, event)
+	}
+	eventsJSON, err := json.Marshal(events)
+	if err != nil {
+		return fmt.Errorf("encode operational incident evidence: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into operational_incident_events (
-		  incident_id, event_kind, source_kind, source_id, tenant_id, safe_error_code, observed_at
+		  incident_id, event_kind, source_kind, source_id, tenant_id, safe_error_code, observed_at,
+		  correlation_key, downstream, failure_evidence_version, failure_level, failure_category,
+		  failure_stage, failure_transport_phase, failure_occurred_at, failure_duration_ms,
+		  failure_attempt, failure_retryable, failure_remote_state_unknown, connection_version,
+		  report_key, trigger_kind, reports_total, reports_succeeded, reports_failed,
+		  reports_cancelled, notification_outcome
 		)
-		select incident.id, 'OBSERVED', input.source_kind, input.source_id,
-		       nullif(input.tenant_id, '')::uuid, nullif(input.safe_error_code, ''), input.observed_at
-		from unnest($1::text[], $2::text[], $3::uuid[], $4::text[], $5::text[], $6::timestamptz[])
-		  as input(fingerprint, source_kind, source_id, tenant_id, safe_error_code, observed_at)
+		select incident.id, input.event_kind, input.source_kind, input.source_id,
+		       nullif(input.tenant_id, '')::uuid, nullif(input.safe_error_code, ''), input.observed_at,
+		       nullif(input.correlation_key, ''), input.downstream, input.failure_evidence_version,
+		       nullif(input.failure_level, ''), nullif(input.failure_category, ''), nullif(input.failure_stage, ''),
+		       nullif(input.failure_transport_phase, ''), input.failure_occurred_at, input.failure_duration_ms,
+		       input.failure_attempt, input.failure_retryable, input.failure_remote_state_unknown,
+		       input.connection_version, nullif(input.report_key, ''), nullif(input.trigger_kind, ''),
+		       input.reports_total, input.reports_succeeded, input.reports_failed, input.reports_cancelled,
+		       nullif(input.notification_outcome, '')
+		from jsonb_to_recordset($1::jsonb) as input(
+		  fingerprint text, event_kind text, source_kind text, source_id uuid, tenant_id text,
+		  safe_error_code text, observed_at timestamptz, correlation_key text, downstream boolean,
+		  failure_evidence_version integer, failure_level text, failure_category text, failure_stage text,
+		  failure_transport_phase text, failure_occurred_at timestamptz, failure_duration_ms bigint,
+		  failure_attempt integer, failure_retryable boolean, failure_remote_state_unknown boolean,
+		  connection_version integer, report_key text, trigger_kind text, reports_total integer,
+		  reports_succeeded integer, reports_failed integer, reports_cancelled integer, notification_outcome text
+		)
 		join operational_incidents incident on incident.fingerprint = input.fingerprint
 		  and incident.status in ('OPEN', 'ACKNOWLEDGED')
-		on conflict do nothing`, eventFingerprints, eventSourceKinds, eventSourceIDs, eventTenantIDs, eventSafeCodes, eventObservedAt); err != nil {
+		on conflict do nothing`, eventsJSON); err != nil {
 		return fmt.Errorf("insert operational incident events batch: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -551,6 +735,14 @@ func (store *SentinelStore) AdvanceObservationCursors(ctx context.Context, scann
 		    select 1 from notification_runs run
 		    where run.trigger_kind = 'SCHEDULED' and run.status in ('FAILED', 'PARTIAL_FAILED', 'BLOCKED_QUOTA')
 		      and run.updated_at between cursor.cursor_updated_at - interval '5 minutes' and $1
+		      and not (
+		        run.safe_error_code in ('REPORT_SET_INCOMPLETE', 'ALL_REPORTS_FAILED')
+		        and exists (
+		          select 1 from notification_run_reports linked
+		          join report_runs failed_run on failed_run.id = linked.report_run_id
+		          where linked.notification_run_id = run.id and failed_run.status = 'FAILED'
+		        )
+		      )
 		      and not exists (select 1 from operational_incident_events event
 		        where event.source_kind = 'NOTIFICATION' and event.source_id = run.id and event.observed_at = run.updated_at)
 		  ))
@@ -738,8 +930,19 @@ func (store *SentinelStore) GetIncident(ctx context.Context, id uuid.UUID) (sent
 	}
 	rows, err := store.pool.Query(ctx, `
 		select event.id, event.event_kind, coalesce(event.source_kind, ''), coalesce(event.safe_error_code, ''),
-		       coalesce(tenant.name, ''), event.observed_at
-		from operational_incident_events event left join tenants tenant on tenant.id = event.tenant_id
+		       coalesce(tenant.name, ''), event.observed_at,
+		       event.failure_evidence_version, event.failure_level, event.failure_category, event.failure_stage,
+		       event.failure_transport_phase, event.failure_occurred_at, event.failure_duration_ms,
+		       event.failure_attempt, event.failure_retryable, event.failure_remote_state_unknown,
+		       event.connection_version, coalesce(event.report_key, ''), coalesce(event.trigger_kind, ''),
+		       event.reports_total, event.reports_succeeded, event.reports_failed, event.reports_cancelled,
+		       event.notification_outcome, event.downstream, coalesce(cause.alert_ref, ''),
+		       case when event.connection_version is null or connection.version is null then false
+		            else event.connection_version <> connection.version end
+		from operational_incident_events event
+		left join tenants tenant on tenant.id = event.tenant_id
+		left join tenant_sml_connections connection on connection.tenant_id = event.tenant_id
+		left join operational_incidents cause on cause.id = event.caused_by_incident_id
 		where event.incident_id = $1 order by event.observed_at desc, event.id desc limit 500`, id)
 	if err != nil {
 		return sentinel.IncidentDetail{}, fmt.Errorf("list operational incident events: %w", err)
@@ -748,8 +951,48 @@ func (store *SentinelStore) GetIncident(ctx context.Context, id uuid.UUID) (sent
 	detail := sentinel.IncidentDetail{Incident: item, Events: make([]sentinel.IncidentEvent, 0)}
 	for rows.Next() {
 		var event sentinel.IncidentEvent
-		if err := rows.Scan(&event.ID, &event.EventKind, &event.SourceKind, &event.SafeErrorCode, &event.TenantName, &event.ObservedAt); err != nil {
+		var evidenceVersion *int
+		var evidenceLevel, category, stage, transportPhase *string
+		var evidenceOccurredAt *time.Time
+		var durationMS *int64
+		var attempt, connectionVersion *int
+		var retryable, remoteStateUnknown *bool
+		var reportsTotal, reportsSucceeded, reportsFailed, reportsCancelled *int
+		var notificationOutcome *string
+		if err := rows.Scan(&event.ID, &event.EventKind, &event.SourceKind, &event.SafeErrorCode, &event.TenantName, &event.ObservedAt,
+			&evidenceVersion, &evidenceLevel, &category, &stage, &transportPhase, &evidenceOccurredAt,
+			&durationMS, &attempt, &retryable, &remoteStateUnknown, &connectionVersion,
+			&event.ReportKey, &event.TriggerKind, &reportsTotal, &reportsSucceeded, &reportsFailed,
+			&reportsCancelled, &notificationOutcome, &event.IsDownstream, &event.CausedByAlertRef,
+			&event.ConnectionChangedSinceFailure); err != nil {
 			return sentinel.IncidentDetail{}, fmt.Errorf("scan operational incident event: %w", err)
+		}
+		if evidenceLevel != nil && category != nil && stage != nil && evidenceOccurredAt != nil && retryable != nil && remoteStateUnknown != nil {
+			evidence := failure.Evidence{
+				Level: failure.EvidenceLevel(*evidenceLevel), Category: failure.Category(*category), Stage: failure.Stage(*stage),
+				OccurredAt: *evidenceOccurredAt, DurationMS: durationMS, Attempt: attempt,
+				Retryable: *retryable, RemoteStateUnknown: *remoteStateUnknown,
+				ConnectionVersion: connectionVersion, SafeErrorCode: event.SafeErrorCode,
+			}
+			if evidenceVersion != nil {
+				evidence.Version = *evidenceVersion
+			}
+			if transportPhase != nil {
+				evidence.TransportPhase = failure.TransportPhase(*transportPhase)
+			}
+			evidence = failure.Complete(evidence)
+			event.FailureEvidence = &evidence
+		}
+		if reportsTotal != nil && reportsSucceeded != nil && reportsFailed != nil && reportsCancelled != nil {
+			impact := failure.Impact{
+				ReportsTotal: *reportsTotal, ReportsSucceeded: *reportsSucceeded,
+				ReportsFailed: *reportsFailed, ReportsCancelled: *reportsCancelled,
+				Notification: failure.NotificationOutcomeUnknown,
+			}
+			if notificationOutcome != nil {
+				impact.Notification = failure.NotificationOutcome(*notificationOutcome)
+			}
+			event.Impact = &impact
 		}
 		detail.Events = append(detail.Events, event)
 	}

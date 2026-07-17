@@ -10,14 +10,14 @@ import (
 
 type emergencySender struct{ incidents []Incident }
 
-func (sender *emergencySender) Send(_ context.Context, incident Incident, _ string) (string, error) {
-	sender.incidents = append(sender.incidents, incident)
+func (sender *emergencySender) Send(_ context.Context, alert Alert, _ string) (string, error) {
+	sender.incidents = append(sender.incidents, alert.Incident)
 	return "1", nil
 }
 
 type failingEmergencySender struct{ calls int }
 
-func (sender *failingEmergencySender) Send(_ context.Context, _ Incident, _ string) (string, error) {
+func (sender *failingEmergencySender) Send(_ context.Context, _ Alert, _ string) (string, error) {
 	sender.calls++
 	if sender.calls == 1 {
 		return "", &SendError{Code: "TELEGRAM_NETWORK_ERROR"}
