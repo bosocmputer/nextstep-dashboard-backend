@@ -25,6 +25,7 @@ type RuntimeConfig struct {
 	TelegramToken    string
 	TelegramChatID   string
 	TelegramAPIBase  string
+	BackupPolicy     BackupPolicy
 }
 
 func LoadRuntimeConfig(lookup LookupFunc) (RuntimeConfig, error) {
@@ -40,6 +41,10 @@ func LoadRuntimeConfig(lookup LookupFunc) (RuntimeConfig, error) {
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
+	backupPolicy, err := ParseBackupPolicy(value(lookup, "BACKUP_POLICY", string(BackupPolicyPreMigrationOnly)))
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
 	intervalSeconds, err := strconv.Atoi(value(lookup, "SENTINEL_INTERVAL_SECONDS", "30"))
 	if err != nil || intervalSeconds < 15 || intervalSeconds > 300 {
 		return RuntimeConfig{}, errors.New("SENTINEL_INTERVAL_SECONDS must be between 15 and 300")
@@ -51,7 +56,7 @@ func LoadRuntimeConfig(lookup LookupFunc) (RuntimeConfig, error) {
 	}
 	config := RuntimeConfig{
 		DatabaseURL: databaseURL, PublicBaseURL: publicBaseURL, Mode: mode, Interval: time.Duration(intervalSeconds) * time.Second,
-		StatePath: statePath, RuntimeDirectory: runtimeDirectory,
+		StatePath: statePath, RuntimeDirectory: runtimeDirectory, BackupPolicy: backupPolicy,
 		TelegramAPIBase: strings.TrimRight(value(lookup, "TELEGRAM_API_BASE_URL", "https://api.telegram.org"), "/"),
 	}
 	if mode == ModeSend {

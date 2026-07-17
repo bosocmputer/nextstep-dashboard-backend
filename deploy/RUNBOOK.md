@@ -45,33 +45,24 @@ Generate `POSTGRES_PASSWORD` with `openssl rand -hex 32`, then place that same
 URL-safe value in `DATABASE_URL`. Keep the TLS hostname as `postgres` and use
 `sslmode=verify-full&sslrootcert=/run/secrets/postgres-root.crt`.
 
-## Backup and restore
+## Pre-migration backup and restore verification
 
-Create an owner-only custom-format backup before every migration and at least
-daily:
-
-```bash
-./deploy/backup.sh ./deploy/.env.production
-```
-
-The script writes a SHA-256 sidecar under `backups/`. Copy backups to encrypted
-off-host storage; a backup on the same disk is not disaster recovery. At least
-monthly, and before the first schedule is activated, restore the newest backup
-into an isolated temporary PostgreSQL container, private Docker network, and
-disposable volume. The script first performs a read-only busy check against
-Production, then validates the catalog/migration ledger in isolation:
-
-```bash
-./deploy/restore-drill.sh ./deploy/.env.production ./backups/<backup>.dump
-```
+Production uses `BACKUP_POLICY=PRE_MIGRATION_ONLY`. `deploy/release.sh` checks
+the immutable backend image for pending migrations before mutating services. A
+release with no pending migration does not create a backup. When a migration is
+pending, the release creates an owner-only custom-format dump with SHA-256
+sidecar and verifies it through `restore-drill.sh` in an isolated temporary
+PostgreSQL container, private network, and disposable volume before proceeding.
 
 The drill has CPU/memory limits, publishes no port, destroys its container,
-network, and volume on exit, and never restores into Production PostgreSQL.
+network, and volume on exit, and never restores into Production PostgreSQL. The
+backup script retains at most the two newest verified pre-migration dump/checksum
+sets. Daily backup, offsite-backup freshness, and monthly restore timers are not
+part of this policy and must remain disabled.
 
-Install the host probe, daily backup, and monthly restore units from
-`deploy/systemd/`. `host-probe.sh` inspects only Compose services labelled for
-this project and writes bounded sanitized JSON under
-`/run/nextstep-dashboard/host`.
+Install only the host-probe unit from `deploy/systemd/`. `host-probe.sh`
+inspects Compose services labelled for this project and writes bounded sanitized
+JSON under `/run/nextstep-dashboard/host`.
 
 ## Operational incident alerting
 
@@ -123,7 +114,10 @@ its credential remains a deploy-only root secret.
    ./deploy/preflight.sh ./deploy/.env.production full
    ```
 
-4. Run `backup.sh` and verify the most recent `restore-drill.sh` result.
+4. Confirm `BACKUP_POLICY=PRE_MIGRATION_ONLY`. The release script performs the
+   checksummed backup and isolated restore verification automatically only when
+   the backend image reports pending migrations; do not create a routine backup
+   for a migration-free release.
 5. Run the report-management data preflight against the current database. It
    prints affected rows and exits non-zero if an active schedule has a recipient
    missing any selected report permission. Resolve every row manually; do not

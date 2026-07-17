@@ -1,7 +1,7 @@
 ---
 status: current
 last_verified: 2026-07-17
-source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/retention/worker.go, internal/sentinel/service.go, internal/database/sentinel_store.go, internal/failure/catalog.go, deploy/RUNBOOK.md]
+source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/sml/config_service.go, internal/database/sml_test_coordinator.go, internal/retention/worker.go, internal/sentinel/service.go, internal/database/sentinel_store.go, internal/database/sentinel_subject_store.go, internal/failure/catalog.go, deploy/RUNBOOK.md]
 tags: [backend, security, operations, retention]
 ---
 
@@ -49,13 +49,14 @@ tags: [backend, security, operations, retention]
   backlog-aware advancement so the 500-row limit cannot skip later events.
   Historical notification rows remain `UNKNOWN` and do not generate alerts.
 - P1 Telegram delivery is disabled in `off`/`observe` modes. `send` requires root-owned token/chat files and must follow the runbook preflight and observation window.
-- Incidents group by root cause and severity to avoid a multi-tenant message storm. Acknowledge stops reminders; only system evidence resolves an incident. Manual closure is `CLOSED_ACCEPTED` with a reason.
+- Incidents use root-cause/severity families, five-minute episodes, and per-subject lifecycle state. Discrete bursts send at most OPEN plus one UPDATE; continuous probes do not inflate occurrence/version on every heartbeat. Acknowledge stops reminders; only system evidence resolves every active subject. Manual closure is `CLOSED_ACCEPTED` with a reason.
 - The emergency database alert lane stores only a safe reference and timestamps in a protected volume. Host probe and monitor heartbeat files are bounded, schema-checked, and contain no customer data.
 - Admin incident APIs are Admin-only, CSRF-protected for mutations, and `no-store`. Telegram carries only an alert reference and safe operational fields; tenant names are resolved only inside the authenticated Admin detail page.
 - Incident events copy sanitized failure evidence and LINE/report impact at
   observation time, so the 365-day incident record remains useful after source
-  Report or Notification retention. A connection version may be compared with
-  the current version, but the incident never stores the endpoint or credential.
+  Report or Notification retention. The occurrence resolver may match a
+  connection version to a sanitized historical audit URL, or explicitly label a
+  current-only fallback. URL userinfo, query, and fragment are removed.
 - The authenticated Incident list includes at most two tenant-name examples per
   incident from the same bounded SQL query; Telegram and Codex clipboard output
   never include those names. Incident detail returns at most 200 newest events
@@ -64,10 +65,18 @@ tags: [backend, security, operations, retention]
   is suppressed as a second P1 alert. If no root report is provable inside the
   aggregation window, the notification failure remains eligible as a standalone
   incident rather than being hidden.
-- Telegram uses Thai local time and different OPEN, REMINDER, and RECOVERY
-  wording. Acknowledge only stops reminders; recovery still requires system
-  evidence.
-- Daily backup/host probes and isolated restore drills are host systemd jobs. Restore validation uses a temporary PostgreSQL container/volume and never targets the Production PostgreSQL instance.
+- Telegram uses Thai local time and different OPEN, UPDATE, and RECOVERY wording.
+  It never carries JavaWS URLs. Acknowledge only stops reminders; recovery still
+  requires system evidence for each subject.
+- Admin JavaWS investigation separates opening a sanitized URL in the operator's
+  browser from a guarded Server Dashboard test. The test uses fixed `select 1`,
+  shares report admission limits, is single-flight with cooldown, yields to an
+  active/nearby Schedule, and never resolves an incident. An uncertain remote
+  outcome opens the tenant circuit and is not retried automatically.
+- Backup policy is `PRE_MIGRATION_ONLY`: the release checks pending migrations,
+  then creates a checksummed backup and performs an isolated restore verification
+  only when a migration is pending. There are no daily/offsite/monthly stale P2s;
+  the two newest verified pre-migration backup sets are retained.
 
 ## Living Context Gate
 

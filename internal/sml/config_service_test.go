@@ -55,6 +55,25 @@ func (query queryFunc) Query(ctx context.Context, connection Connection, sql str
 	return query(ctx, connection, sql)
 }
 
+type testCoordinatorStub struct {
+	permit        ConnectionTestPermit
+	err           error
+	acquireCalls  int
+	completeCalls int
+	remoteUnknown bool
+}
+
+func (stub *testCoordinatorStub) Acquire(context.Context, uuid.UUID, time.Time) (ConnectionTestPermit, error) {
+	stub.acquireCalls++
+	return stub.permit, stub.err
+}
+
+func (stub *testCoordinatorStub) Complete(_ context.Context, _ ConnectionTestPermit, _ time.Time, remoteStateUnknown bool) error {
+	stub.completeCalls++
+	stub.remoteUnknown = remoteStateUnknown
+	return nil
+}
+
 func TestConnectionServiceEncryptsSecretsAndReturnsOnlyRedactedStatus(t *testing.T) {
 	tenantID := uuid.MustParse("4a06e1c2-29cd-4b5a-81d4-b2a26c2e11ec")
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
@@ -123,6 +142,62 @@ func TestConnectionServiceTestUsesFixedQueryAndStoresSafeFailure(t *testing.T) {
 	}
 	if queriedSQL != "select 1 as ok" || store.lastStatus != ReadinessFailed || store.lastCode != "SML_TIMEOUT" {
 		t.Fatalf("query/status = %q %s %s", queriedSQL, store.lastStatus, store.lastCode)
+	}
+}
+
+func TestConnectionServiceTestUsesCoordinatorAndAlwaysReleasesPermit(t *testing.T) {
+	tenantID := uuid.MustParse("4a06e1c2-29cd-4b5a-81d4-b2a26c2e11ec")
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-2026-01", bytes.NewReader(bytes.Repeat([]byte{2}, 24)))
+	username, _ := box.Encrypt(nil, []byte(tenantID.String()+":username"))
+	password, _ := box.Encrypt(nil, []byte(tenantID.String()+":password"))
+	store := &memoryConnectionStore{stored: StoredConnection{TenantID: tenantID, EndpointURL: "http://10.0.0.8/service", ConfigFileName: "SMLConfigDATA.xml", DatabaseName: "demo", Username: username, Password: password, Version: 1}}
+	coordinator := &testCoordinatorStub{permit: ConnectionTestPermit{TenantID: tenantID, LeaseID: uuid.New()}}
+	service := NewConnectionService(store, box, EndpointPolicy{}, queryFunc(func(context.Context, Connection, string) ([]map[string]string, error) {
+		return nil, &SafeError{Code: "SML_TIMEOUT", Retryable: true}
+	}), func() time.Time { return now }).ConfigureTestCoordinator(coordinator)
+
+	_, _ = service.Test(context.Background(), []byte("admin"), "request", tenantID)
+	if coordinator.acquireCalls != 1 || coordinator.completeCalls != 1 {
+		t.Fatalf("coordinator acquire=%d complete=%d", coordinator.acquireCalls, coordinator.completeCalls)
+	}
+	if coordinator.remoteUnknown {
+		t.Fatal("connection test without transport phase must not open the uncertainty circuit")
+	}
+}
+
+func TestConnectionServiceMarksRemoteStateUnknownAfterRequestWasSent(t *testing.T) {
+	tenantID := uuid.MustParse("4a06e1c2-29cd-4b5a-81d4-b2a26c2e11ec")
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-2026-01", bytes.NewReader(bytes.Repeat([]byte{2}, 24)))
+	username, _ := box.Encrypt(nil, []byte(tenantID.String()+":username"))
+	password, _ := box.Encrypt(nil, []byte(tenantID.String()+":password"))
+	store := &memoryConnectionStore{stored: StoredConnection{TenantID: tenantID, EndpointURL: "http://10.0.0.8/service", ConfigFileName: "SMLConfigDATA.xml", DatabaseName: "demo", Username: username, Password: password, Version: 1}}
+	coordinator := &testCoordinatorStub{permit: ConnectionTestPermit{TenantID: tenantID, LeaseID: uuid.New()}}
+	service := NewConnectionService(store, box, EndpointPolicy{}, queryFunc(func(context.Context, Connection, string) ([]map[string]string, error) {
+		return nil, &SafeError{Code: "SML_TIMEOUT", Retryable: true, Phase: ResponseStarted}
+	}), func() time.Time { return now }).ConfigureTestCoordinator(coordinator)
+
+	_, _ = service.Test(context.Background(), []byte("admin"), "request", tenantID)
+	if !coordinator.remoteUnknown {
+		t.Fatal("connection test must open the uncertainty circuit after the request reached JavaWS")
+	}
+}
+
+func TestConnectionServiceTestReturnsBusyWithoutContactingJavaWS(t *testing.T) {
+	tenantID := uuid.New()
+	retryAt := time.Now().UTC().Add(time.Minute)
+	coordinator := &testCoordinatorStub{err: &ConnectionTestBlockError{SafeCode: "SML_TEST_BUSY", RetryAfter: retryAt}}
+	queries := 0
+	service := &ConnectionService{coordinator: coordinator, client: queryFunc(func(context.Context, Connection, string) ([]map[string]string, error) {
+		queries++
+		return nil, nil
+	}), now: time.Now}
+
+	_, err := service.Test(context.Background(), nil, "request", tenantID)
+	var blocked *ConnectionTestError
+	if !errors.As(err, &blocked) || blocked.SafeCode != "SML_TEST_BUSY" || blocked.RetryAfter == nil || queries != 0 {
+		t.Fatalf("error=%v queries=%d", err, queries)
 	}
 }
 

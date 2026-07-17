@@ -354,16 +354,24 @@ func (store *ReportStore) Claim(ctx context.Context, workerID string, lease time
 		return report.Run{}, fmt.Errorf("begin report claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, int64(7214501625)); err != nil {
+		return report.Run{}, fmt.Errorf("lock SML query admission: %w", err)
+	}
 	var runID uuid.UUID
 	err = tx.QueryRow(ctx, `
 		select r.id
 		from report_runs r
 		where r.status = 'QUEUED' and r.queued_at <= $1
 		  and not exists (
+		    select 1 from sml_connection_tests test
+		    where test.tenant_id = r.tenant_id and test.status = 'RUNNING' and test.lease_expires_at > $1
+		  )
+		  and not exists (
 		    select 1 from tenant_sml_circuits circuit
 		    where circuit.tenant_id = r.tenant_id and circuit.open_until > $1
 		  )
-		  and (select count(*) from report_runs system_active where system_active.status in ('CLAIMED', 'RUNNING')) < $2
+		  and ((select count(*) from report_runs system_active where system_active.status in ('CLAIMED', 'RUNNING'))
+		       + (select count(*) from sml_connection_tests test where test.status = 'RUNNING' and test.lease_expires_at > $1)) < $2
 		  and (
 		    r.source = 'SCHEDULE'
 		    or (select count(*) from report_runs interactive_active
@@ -376,12 +384,21 @@ func (store *ReportStore) Claim(ctx context.Context, workerID string, lease time
 		      and active.status in ('CLAIMED', 'RUNNING')
 		  )
 		  and (
-		    select count(*)
-		    from report_runs host_active
-		    join tenant_sml_connections active_connection on active_connection.tenant_id = host_active.tenant_id
-		    join tenant_sml_connections candidate_connection on candidate_connection.tenant_id = r.tenant_id
-		    where host_active.status in ('CLAIMED', 'RUNNING')
-		      and active_connection.endpoint_host_key = candidate_connection.endpoint_host_key
+		    select count(*) from (
+		      select host_active.id::text active_id
+		      from report_runs host_active
+		      join tenant_sml_connections active_connection on active_connection.tenant_id = host_active.tenant_id
+		      join tenant_sml_connections candidate_connection on candidate_connection.tenant_id = r.tenant_id
+		      where host_active.status in ('CLAIMED', 'RUNNING')
+		        and active_connection.endpoint_host_key = candidate_connection.endpoint_host_key
+		      union all
+		      select test.lease_id::text
+		      from sml_connection_tests test
+		      join tenant_sml_connections active_connection on active_connection.tenant_id = test.tenant_id
+		      join tenant_sml_connections candidate_connection on candidate_connection.tenant_id = r.tenant_id
+		      where test.status = 'RUNNING' and test.lease_expires_at > $1
+		        and active_connection.endpoint_host_key = candidate_connection.endpoint_host_key
+		    ) host_work
 		  ) < $3
 		  and not exists (
 		    select 1

@@ -81,6 +81,9 @@ func TestLoadAcceptsSafeProductionConfiguration(t *testing.T) {
 	if cfg.ReportWorkerConcurrency != 4 {
 		t.Fatalf("ReportWorkerConcurrency = %d", cfg.ReportWorkerConcurrency)
 	}
+	if cfg.BackupPolicy != "PRE_MIGRATION_ONLY" {
+		t.Fatalf("BackupPolicy = %q", cfg.BackupPolicy)
+	}
 	if cfg.DeliveryWorkerConcurrency != 4 {
 		t.Fatalf("DeliveryWorkerConcurrency = %d", cfg.DeliveryWorkerConcurrency)
 	}

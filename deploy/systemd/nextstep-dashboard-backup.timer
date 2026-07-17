@@ -1,9 +1,0 @@
-[Unit]
-Description=Daily Nextstep Dashboard backup at 02:30 Asia/Bangkok
-
-[Timer]
-OnCalendar=*-*-* 02:30:00 Asia/Bangkok
-Persistent=true
-
-[Install]
-WantedBy=timers.target

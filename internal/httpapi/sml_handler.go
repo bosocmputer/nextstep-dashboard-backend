@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sml"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/tenant"
@@ -96,7 +98,20 @@ func handleSMLError(response http.ResponseWriter, request *http.Request, err err
 	case errors.Is(err, sml.ErrConnectionVersionConflict):
 		writeProblem(response, request, http.StatusConflict, "VERSION_CONFLICT", "SML connection changed since it was loaded. Reload before saving again.", false)
 	case errors.As(err, &testError):
-		writeProblem(response, request, http.StatusFailedDependency, testError.SafeCode, "SML connection test failed safely.", testError.Retryable)
+		if testError.RetryAfter != nil {
+			retrySeconds := int(time.Until(*testError.RetryAfter).Seconds())
+			if retrySeconds < 1 {
+				retrySeconds = 1
+			}
+			response.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		}
+		status := http.StatusFailedDependency
+		if testError.SafeCode == "SML_TEST_BUSY" {
+			status = http.StatusConflict
+		} else if testError.SafeCode == "SML_TEST_COOLDOWN" {
+			status = http.StatusTooManyRequests
+		}
+		writeProblem(response, request, status, testError.SafeCode, "SML connection test failed safely.", testError.Retryable)
 	default:
 		writeProblem(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to process the SML connection.", false)
 	}

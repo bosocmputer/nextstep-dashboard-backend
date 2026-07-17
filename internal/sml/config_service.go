@@ -70,8 +70,9 @@ type ConnectionTestResult struct {
 }
 
 type ConnectionTestError struct {
-	SafeCode  string
-	Retryable bool
+	SafeCode   string
+	Retryable  bool
+	RetryAfter *time.Time
 }
 
 func (err *ConnectionTestError) Error() string { return err.SafeCode }
@@ -86,12 +87,35 @@ type QueryClient interface {
 	Query(context.Context, Connection, string) ([]map[string]string, error)
 }
 
+type ConnectionTestPermit struct {
+	TenantID uuid.UUID
+	LeaseID  uuid.UUID
+}
+
+type ConnectionTestBlockError struct {
+	SafeCode   string
+	RetryAfter time.Time
+}
+
+func (err *ConnectionTestBlockError) Error() string { return err.SafeCode }
+
+type ConnectionTestCoordinator interface {
+	Acquire(context.Context, uuid.UUID, time.Time) (ConnectionTestPermit, error)
+	Complete(context.Context, ConnectionTestPermit, time.Time, bool) error
+}
+
 type ConnectionService struct {
-	store  ConnectionStore
-	box    *secret.Box
-	policy EndpointPolicy
-	client QueryClient
-	now    func() time.Time
+	store       ConnectionStore
+	box         *secret.Box
+	policy      EndpointPolicy
+	client      QueryClient
+	now         func() time.Time
+	coordinator ConnectionTestCoordinator
+}
+
+func (service *ConnectionService) ConfigureTestCoordinator(coordinator ConnectionTestCoordinator) *ConnectionService {
+	service.coordinator = coordinator
+	return service
 }
 
 func NewConnectionService(store ConnectionStore, box *secret.Box, policy EndpointPolicy, client QueryClient, now func() time.Time) *ConnectionService {
@@ -129,7 +153,26 @@ func (service *ConnectionService) Get(ctx context.Context, tenantID uuid.UUID) (
 	return redactedStatus(stored), nil
 }
 
-func (service *ConnectionService) Test(ctx context.Context, actorHash []byte, requestID string, tenantID uuid.UUID) (ConnectionTestResult, error) {
+func (service *ConnectionService) Test(ctx context.Context, actorHash []byte, requestID string, tenantID uuid.UUID) (result ConnectionTestResult, resultErr error) {
+	remoteStateUnknown := false
+	if service.coordinator != nil {
+		permit, err := service.coordinator.Acquire(ctx, tenantID, service.now().UTC())
+		if err != nil {
+			var blocked *ConnectionTestBlockError
+			if errors.As(err, &blocked) {
+				retryAt := blocked.RetryAfter
+				return ConnectionTestResult{}, &ConnectionTestError{SafeCode: blocked.SafeCode, Retryable: true, RetryAfter: &retryAt}
+			}
+			return ConnectionTestResult{}, err
+		}
+		defer func() {
+			completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer cancel()
+			if err := service.coordinator.Complete(completeCtx, permit, service.now().UTC(), remoteStateUnknown); err != nil && resultErr == nil {
+				result, resultErr = ConnectionTestResult{}, err
+			}
+		}()
+	}
 	connection, err := service.Open(ctx, tenantID)
 	if err != nil {
 		return ConnectionTestResult{}, err
@@ -142,6 +185,7 @@ func (service *ConnectionService) Test(ctx context.Context, actorHash []byte, re
 		var safeError *SafeError
 		if errors.As(queryErr, &safeError) {
 			safeCode, retryable = safeError.Code, safeError.Retryable
+			remoteStateUnknown = safeError.Phase == RequestSentResultUnknown || safeError.Phase == ResponseStarted
 		}
 		if err := service.store.MarkTested(ctx, actorHash, requestID, tenantID, ReadinessFailed, safeCode, testedAt); err != nil {
 			return ConnectionTestResult{}, err

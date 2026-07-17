@@ -142,6 +142,47 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// PendingMigrationCount is read-only and is used by the release gate to decide
+// whether a verified pre-migration backup is required.
+func PendingMigrationCount(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	migrations, err := LoadMigrations()
+	if err != nil {
+		return 0, err
+	}
+	var ledgerExists bool
+	if err := pool.QueryRow(ctx, `select to_regclass('public.schema_migrations') is not null`).Scan(&ledgerExists); err != nil {
+		return 0, fmt.Errorf("inspect migration ledger: %w", err)
+	}
+	if !ledgerExists {
+		return len(migrations), nil
+	}
+	rows, err := pool.Query(ctx, `select version, name, checksum from schema_migrations order by version`)
+	if err != nil {
+		return 0, fmt.Errorf("read applied migrations: %w", err)
+	}
+	defer rows.Close()
+	applied := make(map[int]struct{}, len(migrations))
+	for rows.Next() {
+		var version int
+		var name, checksum string
+		if err := rows.Scan(&version, &name, &checksum); err != nil {
+			return 0, fmt.Errorf("scan applied migration: %w", err)
+		}
+		if version < 1 || version > len(migrations) {
+			return 0, errors.New("database migration ledger is newer than this image")
+		}
+		expected := migrations[version-1]
+		if name != expected.Name || checksum != expected.Checksum {
+			return 0, fmt.Errorf("migration %06d does not match this image", version)
+		}
+		applied[version] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("read applied migrations: %w", err)
+	}
+	return len(migrations) - len(applied), nil
+}
+
 func nonTransactionalStatements(sql string) []string {
 	// Non-transactional migrations are intentionally restricted to simple DDL
 	// such as CREATE INDEX CONCURRENTLY. Sending multiple statements in one

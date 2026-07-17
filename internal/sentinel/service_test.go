@@ -37,7 +37,7 @@ func (store *monitorStoreStub) AdvanceObservationCursors(context.Context, time.T
 	store.advanced = true
 	return nil
 }
-func (store *monitorStoreStub) AdvanceLifecycle(_ context.Context, _ []string, _ time.Time, enqueue bool) error {
+func (store *monitorStoreStub) AdvanceLifecycle(_ context.Context, _ []Observation, _ bool, _ time.Time, enqueue bool) error {
 	store.lifecycle = true
 	store.lifecycleOutbox = enqueue
 	return nil
@@ -111,5 +111,26 @@ func TestAcceptedRiskReasonRejectsPotentialCustomerOrSecretData(t *testing.T) {
 	}
 	if !validOperatorReason("ปิดบริการนี้ถาวรตามนโยบายปฏิบัติการ") {
 		t.Fatal("safe operational reason was rejected")
+	}
+}
+
+func TestSanitizeConnectionReferenceRemovesSecretsAndClassifiesHTTP(t *testing.T) {
+	reference := sanitizeConnectionReference(SMLConnectionReference{
+		EndpointURLAtFailure: "http://user:password@example.test:8092/service?token=secret#fragment",
+		CurrentEndpointURL:   "https://example.test/current?ignored=yes",
+		Status:               ConnectionChanged,
+	})
+	if reference.EndpointURLAtFailure != "http://example.test:8092/service" || reference.CurrentEndpointURL != "https://example.test/current" {
+		t.Fatalf("unsafe URL was not sanitized: %+v", reference)
+	}
+	if reference.EndpointHost != "example.test" || reference.SchemeSecurity != SchemeHTTP {
+		t.Fatalf("reference classification = %+v", reference)
+	}
+}
+
+func TestSanitizeConnectionReferenceFallsBackToCurrentWithoutGuessing(t *testing.T) {
+	reference := sanitizeConnectionReference(SMLConnectionReference{EndpointURLAtFailure: "ftp://unsafe.test/file", CurrentEndpointURL: "https://current.test", Status: ConnectionChanged})
+	if reference.Status != ConnectionCurrentOnly || reference.EndpointURLAtFailure != "" {
+		t.Fatalf("reference = %+v", reference)
 	}
 }

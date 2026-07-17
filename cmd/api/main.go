@@ -59,7 +59,8 @@ func main() {
 	}
 	smlPolicy := sml.EndpointPolicy{AllowedPrefixes: cfg.SMLAllowedPrefixes, AllowedHosts: cfg.SMLAllowedHosts, AllowPublicEndpoints: cfg.SMLAllowPublicEndpoints, AllowedPorts: cfg.SMLAllowedPorts}
 	smlClient := sml.NewClient(smlPolicy, 30*time.Second, 32*1024*1024, 200_000)
-	smlService := sml.NewConnectionService(database.NewSMLConnectionStore(pool), secretBox, smlPolicy, smlClient, time.Now)
+	smlService := sml.NewConnectionService(database.NewSMLConnectionStore(pool), secretBox, smlPolicy, smlClient, time.Now).
+		ConfigureTestCoordinator(database.NewSMLTestCoordinator(pool))
 	recipientService := recipient.NewService(database.NewRecipientStore(pool), secretBox, sessionManager, rand.Reader, cfg.PublicBaseURL.String(), time.Now)
 	lineVerifier := line.NewIDTokenVerifier(cfg.LineLoginChannelID, line.DefaultIDTokenVerifyEndpoint, 10*time.Second, time.Now)
 	viewerService := viewer.NewService(lineVerifier, recipientService, database.NewViewerStore(pool), sessionManager, time.Now)
@@ -77,7 +78,12 @@ func main() {
 	sentinelStore := database.NewSentinelStore(pool)
 	var watchdog httpapi.WatchdogAPI
 	if cfg.WatchdogEnabled {
-		watchdog = sentinel.NewWatchdog(cfg.SentinelRuntimeDirectory, time.Now)
+		backupPolicy, policyErr := sentinel.ParseBackupPolicy(cfg.BackupPolicy)
+		if policyErr != nil {
+			logger.Error("invalid backup policy", "safeErrorCode", "BACKUP_POLICY_INVALID")
+			os.Exit(1)
+		}
+		watchdog = sentinel.NewWatchdog(cfg.SentinelRuntimeDirectory, time.Now).ConfigureBackupPolicy(backupPolicy)
 	}
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,

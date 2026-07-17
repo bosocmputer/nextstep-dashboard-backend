@@ -1043,6 +1043,7 @@ paths:
         - {$ref: '#/components/parameters/PageSize'}
         - {name: status, in: query, schema: {$ref: '#/components/schemas/OperationalIncidentStatus'}}
         - {name: severity, in: query, schema: {$ref: '#/components/schemas/OperationalIncidentSeverity'}}
+        - {name: scope, in: query, schema: {type: string, enum: [ACTIVE, ALL], default: ACTIVE}}
       responses:
         '200':
           description: Cursor-paginated sanitized operational incidents.
@@ -1062,6 +1063,22 @@ paths:
           content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncidentDetail'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/admin/operational-incidents/{incidentId}/occurrences:
+    get:
+      tags: [Admin operations]
+      operationId: listOperationalIncidentOccurrences
+      security: [{AdminSession: []}]
+      parameters:
+        - {name: incidentId, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Cursor-paginated root occurrences. Sanitized JavaWS URLs are present only here.
+          content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncidentOccurrencePage'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/operational-incidents/{incidentId}/acknowledge:
     post:
       tags: [Admin operations]
@@ -1991,10 +2008,39 @@ components:
     OperationalIncidentSeverity:
       type: string
       enum: [P1, P2]
+    OperationalIncidentSubjectType:
+      type: string
+      enum: [TENANT, HOST_RESOURCE, BACKUP_POLICY, DATABASE, CONTAINER, LINE_PROVIDER]
+    OperationalMeasurement:
+      type: object
+      additionalProperties: false
+      required: [kind, value, threshold, unit]
+      properties:
+        kind: {type: string, enum: [DISK_USED_PERCENT, MEMORY_AVAILABLE_PERCENT, DATABASE_CONNECTIONS_PERCENT, QUEUE_AGE_SECONDS]}
+        value: {type: number}
+        threshold: {type: number}
+        unit: {type: string, enum: [PERCENT, SECONDS, COUNT]}
+    OperationalIncidentCauseBreakdown:
+      type: object
+      additionalProperties: false
+      required: [presentation, investigationScope, subjectType, occurrenceCount, affectedCount, activeAffectedCount, affectedLabelTh, firstSeenAt, lastSeenAt]
+      properties:
+        presentation: {$ref: '#/components/schemas/FailurePresentation'}
+        category: {type: string}
+        stage: {type: string}
+        transportPhase: {type: string, enum: [BEFORE_REQUEST_SENT, REQUEST_SENT_RESULT_UNKNOWN, RESPONSE_STARTED]}
+        investigationScope: {type: string, enum: [CUSTOMER_SYSTEM, NEXTSTEP_PLATFORM, LINE_PROVIDER, CONFIGURATION, UNKNOWN]}
+        subjectType: {$ref: '#/components/schemas/OperationalIncidentSubjectType'}
+        occurrenceCount: {type: integer, minimum: 1}
+        affectedCount: {type: integer, minimum: 1}
+        activeAffectedCount: {type: integer, minimum: 0}
+        affectedLabelTh: {type: string}
+        firstSeenAt: {type: string, format: date-time}
+        lastSeenAt: {type: string, format: date-time}
     OperationalIncident:
       type: object
       additionalProperties: false
-      required: [id, alertRef, incidentType, rootCause, severity, status, occurrenceCount, affectedCount, firstSeenAt, lastSeenAt, version, presentation, isDownstream]
+      required: [id, alertRef, incidentType, rootCause, severity, status, occurrenceCount, affectedCount, activeAffectedCount, observationMode, subjectType, firstSeenAt, lastSeenAt, version, presentation, isDownstream]
       properties:
         id: {type: string, format: uuid}
         alertRef: {type: string, pattern: '^NST-[A-Z0-9]{12}$'}
@@ -2005,6 +2051,11 @@ components:
         safeErrorCode: {type: string, maxLength: 96}
         occurrenceCount: {type: integer, minimum: 1}
         affectedCount: {type: integer, minimum: 1}
+        activeAffectedCount: {type: integer, minimum: 0}
+        observationMode: {type: string, enum: [DISCRETE, CONTINUOUS]}
+        subjectType: {$ref: '#/components/schemas/OperationalIncidentSubjectType'}
+        measurement: {$ref: '#/components/schemas/OperationalMeasurement'}
+        causeBreakdown: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/OperationalIncidentCauseBreakdown'}}
         tenantExamples: {type: array, maxItems: 2, items: {type: string, maxLength: 160}, description: Authenticated Admin list only; never returned in Telegram.}
         firstSeenAt: {type: string, format: date-time}
         lastSeenAt: {type: string, format: date-time}
@@ -2023,7 +2074,7 @@ components:
       required: [id, eventKind, observedAt, isDownstream, connectionChangedSinceFailure]
       properties:
         id: {type: string, format: uuid}
-        eventKind: {type: string, enum: [OBSERVED, DOWNSTREAM_IMPACT, ACKNOWLEDGED, EVIDENCE_RESOLVED, RISK_ACCEPTED, ALERT_SENT, ALERT_FAILED]}
+        eventKind: {type: string, enum: [OBSERVED, CONDITION_UPDATED, DOWNSTREAM_IMPACT, SUBJECT_RECOVERED, ACKNOWLEDGED, EVIDENCE_RESOLVED, POLICY_CHANGED, RISK_ACCEPTED, ALERT_SENT, ALERT_FAILED]}
         sourceKind: {type: string, enum: [NOTIFICATION, DELIVERY, REPORT, WORKER, SML_CIRCUIT, HOST, BACKUP, DATABASE]}
         safeErrorCode: {type: string, maxLength: 96}
         tenantName: {type: string, maxLength: 160, description: Authenticated Admin detail only; never returned in Telegram.}
@@ -2047,6 +2098,41 @@ components:
       required: [data, page]
       properties:
         data: {type: array, items: {$ref: '#/components/schemas/OperationalIncident'}}
+        page: {$ref: '#/components/schemas/PageInfo'}
+    SMLConnectionReference:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        endpointUrlAtFailure: {type: string, format: uri, description: 'Sanitized Admin-only URL without userinfo, query, or fragment.'}
+        currentEndpointUrl: {type: string, format: uri, description: 'Sanitized Admin-only URL without userinfo, query, or fragment.'}
+        endpointHost: {type: string}
+        versionAtFailure: {type: integer, minimum: 1}
+        currentVersion: {type: integer, minimum: 1}
+        status: {type: string, enum: [EXACT_VERSION, CHANGED_SINCE_FAILURE, CURRENT_ONLY, UNAVAILABLE]}
+        schemeSecurity: {type: string, enum: [HTTP, HTTPS]}
+        testAvailableAt: {type: string, format: date-time}
+        testBlockedReason: {type: string, maxLength: 96}
+    OperationalIncidentOccurrence:
+      type: object
+      additionalProperties: false
+      required: [id, sourceKind, safeErrorCode, observedAt]
+      properties:
+        id: {type: string, format: uuid}
+        tenantId: {type: string, format: uuid, description: Authenticated Admin action context only; never returned in Telegram or clipboard.}
+        tenantName: {type: string, maxLength: 160}
+        reportKey: {$ref: '#/components/schemas/ReportKey'}
+        sourceKind: {type: string, enum: [NOTIFICATION, DELIVERY, REPORT, WORKER, SML_CIRCUIT, HOST, BACKUP, DATABASE]}
+        safeErrorCode: {type: string, maxLength: 96}
+        observedAt: {type: string, format: date-time}
+        failureEvidence: {$ref: '#/components/schemas/FailureEvidence'}
+        impact: {$ref: '#/components/schemas/FailureImpact'}
+        smlConnectionReference: {$ref: '#/components/schemas/SMLConnectionReference'}
+    OperationalIncidentOccurrencePage:
+      type: object
+      required: [data, page]
+      properties:
+        data: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/OperationalIncidentOccurrence'}}
         page: {$ref: '#/components/schemas/PageInfo'}
     OperationalIncidentVersionInput:
       type: object

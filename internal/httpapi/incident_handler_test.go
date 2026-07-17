@@ -27,6 +27,10 @@ func (fake *fakeIncidentAPI) Get(context.Context, uuid.UUID) (sentinel.IncidentD
 	fake.calls++
 	return fake.detail, nil
 }
+func (fake *fakeIncidentAPI) Occurrences(context.Context, uuid.UUID, sentinel.OccurrenceFilter) (sentinel.OccurrencePage, error) {
+	fake.calls++
+	return sentinel.OccurrencePage{}, nil
+}
 func (fake *fakeIncidentAPI) Acknowledge(context.Context, uuid.UUID, int) (sentinel.Incident, error) {
 	fake.calls++
 	fake.incident.Status = sentinel.StatusAcknowledged
