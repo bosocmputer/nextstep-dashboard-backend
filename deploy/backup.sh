@@ -60,10 +60,10 @@ trap 'rm -f "$temporary" "$checksum_temporary"' EXIT INT TERM
 
 if [ -n "$docker_prefix" ]; then
   timeout 30m sudo docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-    sh -ceu 'exec pg_dump --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --format=custom --compress=6 --no-owner --no-acl' > "$temporary"
+    sh -ceu 'exec pg_dump --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --format=custom --compress=6 --no-owner --no-acl' < /dev/null > "$temporary"
 else
   timeout 30m docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-    sh -ceu 'exec pg_dump --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --format=custom --compress=6 --no-owner --no-acl' > "$temporary"
+    sh -ceu 'exec pg_dump --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --format=custom --compress=6 --no-owner --no-acl' < /dev/null > "$temporary"
 fi
 test -s "$temporary"
 (cd "$backup_dir" && sha256sum "$(basename -- "$temporary")" | sed 's/\.tmp$//' > "$checksum_temporary")
