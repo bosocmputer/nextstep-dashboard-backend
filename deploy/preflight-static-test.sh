@@ -16,6 +16,11 @@ for runtime_script in backup.sh restore-drill.sh host-probe.sh; do
   fi
 done
 
+if [ "$(grep -Fc '< /dev/null > "$temporary"' "$script_dir/backup.sh")" -ne 2 ]; then
+  echo "backup.sh must detach pg_dump stdin for interactive production releases" >&2
+  exit 1
+fi
+
 for feature_key in \
   SMART_SCHEDULE_PERIODS_ENABLED SMART_SCHEDULE_PERIOD_TENANT_IDS \
   SUMMARY_QUERY_ENABLED GENERATION_CACHE_ENABLED STALE_REVALIDATION_ENABLED \
