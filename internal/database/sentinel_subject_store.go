@@ -663,30 +663,43 @@ func reconcileOperationalEpisodes(ctx context.Context, tx pgx.Tx, incidentIDs, v
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `
-		update operational_incidents incident
-		set occurrence_count = aggregate.occurrence_count,
-		    affected_count = aggregate.affected_count,
-		    active_affected_count = aggregate.active_affected_count,
-		    first_seen_at = least(incident.first_seen_at, aggregate.first_seen_at),
-		    last_seen_at = greatest(incident.last_seen_at, aggregate.last_seen_at),
-		    safe_error_code = aggregate.safe_error_code,
-		    measurement_kind = aggregate.measurement_kind,
-		    measurement_value = aggregate.measurement_value,
-		    measurement_threshold = aggregate.measurement_threshold,
-		    measurement_unit = aggregate.measurement_unit
-		from (
+		with subject_aggregate as (
 		  select subject.incident_id, sum(subject.occurrence_count)::integer occurrence_count,
 		         count(*)::integer affected_count,
 		         count(*) filter (where subject.status = 'ACTIVE')::integer active_affected_count,
 		         min(subject.first_seen_at) first_seen_at, max(subject.last_seen_at) last_seen_at,
-		         case when count(distinct subject.safe_error_code) = 1 then max(subject.safe_error_code) else 'MULTIPLE_SAFE_ERRORS' end safe_error_code,
+		         case when count(distinct subject.safe_error_code) = 1 then max(subject.safe_error_code) else 'MULTIPLE_SAFE_ERRORS' end subject_safe_error_code,
 		         case when count(*) = 1 then max(subject.measurement_kind) end measurement_kind,
 		         case when count(*) = 1 then max(subject.measurement_value) end measurement_value,
 		         case when count(*) = 1 then max(subject.measurement_threshold) end measurement_threshold,
 		         case when count(*) = 1 then max(subject.measurement_unit) end measurement_unit
 		  from operational_incident_subjects subject where subject.incident_id = any($1::uuid[])
 		  group by subject.incident_id
-		) aggregate
+		), event_aggregate as (
+		  select event.incident_id, count(distinct event.safe_error_code)::integer safe_error_code_count,
+		         max(event.safe_error_code) safe_error_code
+		  from operational_incident_events event
+		  where event.incident_id = any($1::uuid[]) and not event.downstream
+		    and event.safe_error_code is not null
+		  group by event.incident_id
+		)
+		update operational_incidents incident
+		set occurrence_count = aggregate.occurrence_count,
+		    affected_count = aggregate.affected_count,
+		    active_affected_count = aggregate.active_affected_count,
+		    first_seen_at = least(incident.first_seen_at, aggregate.first_seen_at),
+		    last_seen_at = greatest(incident.last_seen_at, aggregate.last_seen_at),
+		    safe_error_code = case
+		      when coalesce(event.safe_error_code_count, 0) > 1 then 'MULTIPLE_SAFE_ERRORS'
+		      when event.safe_error_code_count = 1 then event.safe_error_code
+		      else aggregate.subject_safe_error_code
+		    end,
+		    measurement_kind = aggregate.measurement_kind,
+		    measurement_value = aggregate.measurement_value,
+		    measurement_threshold = aggregate.measurement_threshold,
+		    measurement_unit = aggregate.measurement_unit
+		from subject_aggregate aggregate
+		left join event_aggregate event on event.incident_id = aggregate.incident_id
 		where incident.id = aggregate.incident_id`, incidentIDs); err != nil {
 		return fmt.Errorf("reconcile operational incident episodes: %w", err)
 	}
