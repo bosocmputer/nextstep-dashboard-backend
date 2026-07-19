@@ -1843,16 +1843,16 @@ func findRunByIdempotency(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, so
 }
 
 const reportRunColumns = `
-id, tenant_id, report_key, source, result_kind, priority, coalesce(execution_key, ''), idempotency_key, status, period_preset,
+id, tenant_id, report_key, source, result_kind, priority, coalesce(execution_key, '') as execution_key, idempotency_key, status, period_preset,
 period_from::text, period_to::text, requested_by_recipient_id,
-coalesce(claimed_by, ''), lease_expires_at, attempt, row_count, is_truncated,
-summary_json, reconciliation_json, coalesce(safe_error_code, ''),
-coalesce(safe_error_message, ''), queued_at, started_at, finished_at,
-expires_at, created_at, updated_at, coalesce(report_definition_version, ''),
+coalesce(claimed_by, '') as claimed_by, lease_expires_at, attempt, row_count, is_truncated,
+summary_json, reconciliation_json, coalesce(safe_error_code, '') as safe_error_code,
+coalesce(safe_error_message, '') as safe_error_message, queued_at, started_at, finished_at,
+expires_at, created_at, updated_at, coalesce(report_definition_version, '') as report_definition_version,
 coalesce(data_source_version, 0) as data_source_version, progress_phase, progress_sequence,
 progress_completed_steps, progress_total_steps, progress_updated_at,
-coalesce(expected_p50_ms, 0), coalesce(expected_p90_ms, 0), expected_sample_count,
-coalesce(query_plan_fingerprint, ''), execution_strategy, source_consistency,
+coalesce(expected_p50_ms, 0) as expected_p50_ms, coalesce(expected_p90_ms, 0) as expected_p90_ms, expected_sample_count,
+coalesce(query_plan_fingerprint, '') as query_plan_fingerprint, execution_strategy, source_consistency,
 source_started_at, source_finished_at, progress_completed_chunks, progress_total_chunks,
 failure_evidence_version, failure_category, failure_stage, failure_transport_phase,
 failure_occurred_at, failure_duration_ms, failure_attempt, failure_retryable,
