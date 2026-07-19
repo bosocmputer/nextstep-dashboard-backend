@@ -139,7 +139,7 @@ func (store *TableQueryStore) QueryReportRuns(ctx context.Context, input tablequ
 		if err := tx.QueryRow(ctx, `select count(*) from report_runs r join tenants tenant on tenant.id=r.tenant_id where `+where, args...).Scan(&total); err != nil {
 			return fmt.Errorf("count report runs query: %w", err)
 		}
-		rows, err := tx.Query(ctx, `select `+reportRunColumns+`,tenant.name,
+		rows, err := tx.Query(ctx, `select r.*,tenant.name,
 		  case when r.status in ('CLAIMED','RUNNING') and r.lease_expires_at<$10 then 'STALLED' else 'ACTIVE' end,
 		  (select max(retry_at) from(
 		    select circuit.open_until retry_at from tenant_sml_circuits circuit where circuit.tenant_id=r.tenant_id and circuit.open_until>$10
@@ -153,7 +153,9 @@ func (store *TableQueryStore) QueryReportRuns(ctx context.Context, input tablequ
 		    when (select count(*) from report_runs active join tenant_sml_connections active_connection on active_connection.tenant_id=active.tenant_id join tenant_sml_connections candidate_connection on candidate_connection.tenant_id=r.tenant_id where active.status in ('CLAIMED','RUNNING') and active_connection.endpoint_host_key=candidate_connection.endpoint_host_key)>=$11 then 'HOST_BUSY'
 		    when r.source<>'SCHEDULE' and ((select count(*) from report_runs active where active.status in ('CLAIMED','RUNNING') and active.source<>'SCHEDULE')>=$12 or (r.report_key in ('stock_balance','ar_customer_movement') and exists(select 1 from notification_schedules scheduled join tenant_sml_connections scheduled_connection on scheduled_connection.tenant_id=scheduled.tenant_id join tenant_sml_connections candidate_connection on candidate_connection.tenant_id=r.tenant_id and candidate_connection.endpoint_host_key=scheduled_connection.endpoint_host_key where scheduled.status='ACTIVE' and scheduled.next_run_at between $10 and $10+interval '15 minutes'))) then 'SCHEDULE_RESERVED'
 		    else null end
-		  from report_runs r join tenants tenant on tenant.id=r.tenant_id where `+where+` order by r.created_at desc,r.id desc offset $8 limit $9`, append(args, input.Page*input.PageSize, input.PageSize, now, boundedEnvInt("REPORT_HOST_QUERY_CONCURRENCY", 2, 1, 16), max(1, boundedEnvInt("REPORT_GLOBAL_QUERY_CONCURRENCY", 4, 1, 32)-1))...)
+		  from (select `+reportRunColumns+` from report_runs) r
+		  join tenants tenant on tenant.id=r.tenant_id
+		  where `+where+` order by r.created_at desc,r.id desc offset $8 limit $9`, append(args, input.Page*input.PageSize, input.PageSize, now, boundedEnvInt("REPORT_HOST_QUERY_CONCURRENCY", 2, 1, 16), max(1, boundedEnvInt("REPORT_GLOBAL_QUERY_CONCURRENCY", 4, 1, 32)-1))...)
 		if err != nil {
 			return fmt.Errorf("query report runs page: %w", err)
 		}
