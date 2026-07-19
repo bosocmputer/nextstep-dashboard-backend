@@ -7,10 +7,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/operations"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sentinel"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/tablequery"
 	"github.com/google/uuid"
 )
+
+func TestTableReportRunResponseIncludesSource(t *testing.T) {
+	t.Parallel()
+
+	for _, source := range []report.Source{report.SourceSchedule, report.SourceDashboard, report.SourceBackground} {
+		t.Run(string(source), func(t *testing.T) {
+			response := tableReportRunResponse(operations.ReportRun{Run: report.Run{Source: source}})
+			if got := response["source"]; got != source {
+				t.Fatalf("source = %v, want %s", got, source)
+			}
+		})
+	}
+}
 
 type fakeTableQueryAPI struct {
 	reportRunsInput tablequery.ReportRunsInput

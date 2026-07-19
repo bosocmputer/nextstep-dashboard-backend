@@ -489,7 +489,7 @@ func reportRunResponse(run report.Run) map[string]any {
 		reconciliation = map[string]any{}
 	}
 	result := map[string]any{
-		"id": run.ID, "tenantId": run.TenantID, "reportKey": run.ReportKey, "status": run.Status,
+		"id": run.ID, "tenantId": run.TenantID, "reportKey": run.ReportKey, "status": run.Status, "source": run.Source,
 		"periodPreset": run.Period.Preset, "rowCount": run.RowCount, "isTruncated": run.IsTruncated,
 		"summary": summary, "reconciliation": reconciliation,
 		"queuedAt": run.QueuedAt, "expiresAt": run.ExpiresAt,

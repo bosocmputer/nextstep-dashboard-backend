@@ -1957,13 +1957,14 @@ components:
         dateTo: {type: string, format: date}
     ReportRun:
       type: object
-      required: [id, tenantId, reportKey, status, periodPreset, rowCount, isTruncated, queuedAt, expiresAt]
+      required: [id, tenantId, reportKey, status, source, periodPreset, rowCount, isTruncated, queuedAt, expiresAt]
       properties:
         id: {type: string, format: uuid}
         tenantId: {type: string, format: uuid}
         tenantName: {type: string, description: Present on Admin report history responses.}
         reportKey: {$ref: '#/components/schemas/ReportKey'}
         status: {$ref: '#/components/schemas/ReportRunStatus'}
+        source: {type: string, enum: [DASHBOARD, SCHEDULE, BACKGROUND]}
         runtimeStatus: {type: string, enum: [ACTIVE, STALLED], description: Operational lease health for Admin monitoring.}
         retryAvailableAt: {type: string, format: date-time, nullable: true}
         waitReason: {type: string, enum: [TENANT_BUSY, HOST_BUSY, TENANT_COOLDOWN, HOST_COOLDOWN, SCHEDULE_RESERVED]}
