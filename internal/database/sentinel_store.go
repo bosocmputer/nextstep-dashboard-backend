@@ -1173,7 +1173,7 @@ func (store *SentinelStore) mutateIncident(ctx context.Context, id uuid.UUID, ve
 	return item, nil
 }
 
-func (store *SentinelStore) ClaimAlert(ctx context.Context, workerID string, lease time.Duration, now time.Time) (sentinel.Alert, error) {
+func (store *SentinelStore) ClaimAlert(ctx context.Context, workerID string, lease time.Duration, now time.Time, includeTenantContext bool) (sentinel.Alert, error) {
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return sentinel.Alert{}, fmt.Errorf("begin operational alert claim: %w", err)
@@ -1254,7 +1254,80 @@ func (store *SentinelStore) ClaimAlert(ctx context.Context, workerID string, lea
 	if err := tx.Commit(ctx); err != nil {
 		return sentinel.Alert{}, fmt.Errorf("commit operational alert claim: %w", err)
 	}
+	if includeTenantContext && alert.Incident.SubjectType == sentinel.SubjectTenant {
+		expectedCount := alert.Incident.ActiveAffectedCount
+		if alert.Kind == "RECOVERY" || expectedCount == 0 {
+			expectedCount = alert.Incident.AffectedCount
+		}
+		contexts, additional, err := store.loadTelegramTenantContexts(ctx, alert.Incident.ID, alert.Kind, expectedCount)
+		if err != nil {
+			alert.TenantContextResult = sentinel.TelegramContextQueryFailed
+			return alert, nil
+		}
+		alert.TenantContexts = contexts
+		alert.AdditionalTenantCount = additional
+		alert.TenantContextResult = sentinel.TelegramContextIncluded
+	}
 	return alert, nil
+}
+
+func (store *SentinelStore) loadTelegramTenantContexts(ctx context.Context, incidentID uuid.UUID, alertKind string, expectedCount int) ([]sentinel.TelegramTenantContext, int, error) {
+	activeOnly := alertKind != "RECOVERY"
+	rows, err := store.pool.Query(ctx, `
+		select tenant.name, coalesce(history.after_json->>'endpointUrl', ''), coalesce(current.endpoint_url, ''),
+		       latest.connection_version, current.version
+		from operational_incident_subjects subject
+		join tenants tenant on tenant.id = subject.tenant_id
+		left join tenant_sml_connections current on current.tenant_id = subject.tenant_id
+		left join lateral (
+		  select event.connection_version
+		  from operational_incident_events event
+		  where event.incident_id = subject.incident_id and event.tenant_id = subject.tenant_id
+		    and event.event_kind in ('OBSERVED', 'CONDITION_UPDATED') and not event.downstream
+		  order by event.observed_at desc, event.id desc limit 1
+		) latest on true
+		left join lateral (
+		  select audit.after_json
+		  from audit_logs audit
+		  where audit.tenant_id = subject.tenant_id and audit.action = 'SML_CONNECTION_REPLACED'
+		    and latest.connection_version is not null
+		    and audit.after_json->>'version' = latest.connection_version::text
+		  order by audit.created_at desc limit 1
+		) history on true
+		where subject.incident_id = $1 and subject.tenant_id is not null
+		  and (not $2 or subject.status = 'ACTIVE')
+		order by subject.last_seen_at desc, subject.tenant_id
+		limit 5`, incidentID, activeOnly)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load Telegram tenant context: %w", err)
+	}
+	defer rows.Close()
+	contexts := make([]sentinel.TelegramTenantContext, 0, 5)
+	for rows.Next() {
+		var tenantName, historicalURL, currentURL string
+		var connectionVersion, currentVersion *int
+		if err := rows.Scan(&tenantName, &historicalURL, &currentURL, &connectionVersion, &currentVersion); err != nil {
+			return nil, 0, fmt.Errorf("scan Telegram tenant context: %w", err)
+		}
+		context := sentinel.TelegramTenantContext{TenantName: tenantName, URLStatus: sentinel.TelegramURLUnavailable}
+		switch {
+		case historicalURL != "" && connectionVersion != nil && currentVersion != nil && *connectionVersion == *currentVersion:
+			context.EndpointURL, context.URLStatus = historicalURL, sentinel.TelegramURLAtFailure
+		case historicalURL != "":
+			context.EndpointURL, context.URLStatus = historicalURL, sentinel.TelegramURLChangedSinceFailure
+		case currentURL != "":
+			context.EndpointURL, context.URLStatus = currentURL, sentinel.TelegramURLCurrentOnly
+		}
+		contexts = append(contexts, context)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate Telegram tenant context: %w", err)
+	}
+	additional := expectedCount - len(contexts)
+	if additional < 0 {
+		additional = 0
+	}
+	return contexts, additional, nil
 }
 
 func (store *SentinelStore) CompleteAlert(ctx context.Context, alertID uuid.UUID, workerID string, now time.Time) error {

@@ -22,6 +22,7 @@ func main() {
 		logger.Error("Sentinel Telegram configuration rejected", "safeErrorCode", "TELEGRAM_CONFIG_INVALID")
 		os.Exit(1)
 	}
+	client.ConfigureTenantContext(config.TelegramTenantContextMode)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := client.Preflight(ctx); err != nil {

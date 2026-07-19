@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/google/uuid"
@@ -294,6 +295,11 @@ func rootCauseFor(safeErrorCode string) RootCause {
 }
 
 func TelegramMessage(alert Alert, adminBaseURL string) string {
+	message, _ := telegramMessage(alert, adminBaseURL, false)
+	return message
+}
+
+func telegramMessage(alert Alert, adminBaseURL string, includeTenantContext bool) (string, TelegramContextResult) {
 	incident := alert.Incident
 	adminURL := strings.TrimRight(adminBaseURL, "/")
 	if incident.ID != uuid.Nil {
@@ -318,6 +324,7 @@ func TelegramMessage(alert Alert, adminBaseURL string) string {
 	if affectedCount == 0 {
 		affectedCount = incident.AffectedCount
 	}
+	header := ""
 	if incident.RootCause == RootSMLConnectivity && len(incident.CauseBreakdown) > 1 {
 		causeLines := make([]string, 0, min(3, len(incident.CauseBreakdown)))
 		for _, cause := range incident.CauseBreakdown {
@@ -334,23 +341,118 @@ func TelegramMessage(alert Alert, adminBaseURL string) string {
 				label = "เริ่มรับคำตอบแล้วแต่ข้อมูลไม่ครบ"
 			}
 			count := cause.ActiveAffectedCount
-			if count == 0 { count = cause.AffectedCount }
+			if count == 0 {
+				count = cause.AffectedCount
+			}
 			causeLines = append(causeLines, fmt.Sprintf("• %s: %d ร้าน", label, count))
 		}
-		message := fmt.Sprintf(
-			"%s\nอ้างอิง: %s\nสาเหตุ: พบปัญหา Java Web Service %d รูปแบบ\n%s\nผลกระทบ: %s\nร้านที่ได้รับผล: %d ร้าน\nพบครั้งแรก: %s น. เวลาไทย\nตรวจสอบ: %s",
-			heading, incident.AlertRef, len(incident.CauseBreakdown), strings.Join(causeLines, "\n"), impact, affectedCount, thaiTime, adminURL,
-		)
-		if len(message) > 3499 {
-			return message[:3499]
-		}
-		return message
+		header = fmt.Sprintf("%s\nอ้างอิง: %s\nสาเหตุ: พบปัญหา Java Web Service %d รูปแบบ\n%s",
+			heading, incident.AlertRef, len(incident.CauseBreakdown), strings.Join(causeLines, "\n"))
+	} else {
+		header = fmt.Sprintf("%s\nอ้างอิง: %s\nสาเหตุ: %s", heading, incident.AlertRef, presentation.TitleTH)
 	}
-	return fmt.Sprintf(
-		"%s\nอ้างอิง: %s\nสาเหตุ: %s\nผลกระทบ: %s\nส่วนที่ได้รับผล: %d\nพบครั้งแรก: %s น. เวลาไทย\nข้อมูลเทคนิค: %s\nตรวจสอบ: %s",
-		heading, incident.AlertRef, presentation.TitleTH, impact,
-		affectedCount, thaiTime, safeText(incident.SafeErrorCode), adminURL,
-	)
+	tail := fmt.Sprintf("ผลกระทบ: %s\nส่วนที่ได้รับผล: %d\nพบครั้งแรก: %s น. เวลาไทย", impact, affectedCount, thaiTime)
+	if incident.SafeErrorCode != "MULTIPLE_SAFE_ERRORS" {
+		tail += "\nข้อมูลเทคนิค: " + safeText(incident.SafeErrorCode)
+	}
+	tail += "\nตรวจสอบ: " + adminURL
+	contextBudget := 3499 - len(header) - len(tail) - 4
+	contextBlock, result := telegramTenantContextBlock(alert, includeTenantContext, contextBudget)
+	message := header + "\n"
+	if contextBlock != "" {
+		message += "\n" + contextBlock + "\n"
+	}
+	message += "\n" + tail
+	if len(message) > 3499 {
+		message = truncateUTF8Bytes(message, 3499)
+	}
+	return message, result
+}
+
+func telegramTenantContextBlock(alert Alert, include bool, budget int) (string, TelegramContextResult) {
+	if alert.Incident.SubjectType != SubjectTenant || alert.Incident.Severity != SeverityP1 {
+		return "", TelegramContextNotTenantScoped
+	}
+	if !include {
+		return "", TelegramContextNotTenantScoped
+	}
+	if alert.TenantContextResult == TelegramContextQueryFailed {
+		return "", TelegramContextQueryFailed
+	}
+	if budget <= 0 {
+		return "", TelegramContextMessageBudgetExceeded
+	}
+	blocks := make([]string, 0, min(5, len(alert.TenantContexts)))
+	omitted := alert.AdditionalTenantCount
+	budgetOmitted := false
+	urlUnavailable := false
+	includeURL := alert.Incident.RootCause == RootSMLConnectivity && alert.Kind != "RECOVERY"
+	for index, tenantContext := range alert.TenantContexts {
+		if index >= 5 {
+			omitted++
+			continue
+		}
+		name := sanitizeTelegramTenantName(tenantContext.TenantName)
+		if name == "" {
+			omitted++
+			continue
+		}
+		lines := []string{"ร้าน: " + name}
+		if includeURL {
+			endpointURL := sanitizeEndpointURL(tenantContext.EndpointURL)
+			if endpointURL == "" {
+				lines = append(lines, "Java Web Service Base URL: ไม่พบ URL ที่ปลอดภัยสำหรับแสดง")
+				urlUnavailable = true
+			} else {
+				switch tenantContext.URLStatus {
+				case TelegramURLAtFailure, TelegramURLChangedSinceFailure:
+					lines = append(lines, "Java Web Service Base URL ตอนเกิดเหตุ:", endpointURL)
+				default:
+					lines = append(lines, "Java Web Service Base URL ปัจจุบัน:", endpointURL)
+				}
+				if tenantContext.URLStatus == TelegramURLChangedSinceFailure {
+					lines = append(lines, "การตั้งค่าถูกเปลี่ยนหลังเกิดเหตุ")
+				}
+			}
+		}
+		candidate := strings.Join(lines, "\n")
+		joined := strings.Join(append(append([]string(nil), blocks...), candidate), "\n\n")
+		if len(joined) > budget {
+			omitted++
+			budgetOmitted = true
+			continue
+		}
+		blocks = append(blocks, candidate)
+	}
+	if omitted > 0 {
+		remainder := fmt.Sprintf("และอีก %d ร้าน — เปิดรายละเอียดเพื่อดูทั้งหมด", omitted)
+		joined := strings.Join(append(append([]string(nil), blocks...), remainder), "\n\n")
+		if len(joined) <= budget {
+			blocks = append(blocks, remainder)
+		} else {
+			return strings.Join(blocks, "\n\n"), TelegramContextMessageBudgetExceeded
+		}
+	}
+	if len(blocks) == 0 {
+		return "", TelegramContextURLUnavailable
+	}
+	if budgetOmitted {
+		return strings.Join(blocks, "\n\n"), TelegramContextMessageBudgetExceeded
+	}
+	if urlUnavailable {
+		return strings.Join(blocks, "\n\n"), TelegramContextURLUnavailable
+	}
+	return strings.Join(blocks, "\n\n"), TelegramContextIncluded
+}
+
+func truncateUTF8Bytes(value string, maximum int) string {
+	if len(value) <= maximum {
+		return value
+	}
+	for maximum > 0 && !utf8.ValidString(value[:maximum]) {
+		maximum--
+	}
+	return value[:maximum]
 }
 
 func incidentPresentation(incident Incident) failure.Presentation {

@@ -151,6 +151,7 @@ services:
     environment:
       <<: *app-environment
       OPERATIONAL_ALERTS_MODE: ${OPERATIONAL_ALERTS_MODE:-off}
+      TELEGRAM_TENANT_CONTEXT_MODE: ${TELEGRAM_TENANT_CONTEXT_MODE:-off}
       SENTINEL_INTERVAL_SECONDS: ${SENTINEL_INTERVAL_SECONDS:-30}
       SENTINEL_STATE_PATH: /var/lib/nextstep-sentinel/state.json
       TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram/bot-token

@@ -16,16 +16,17 @@ import (
 type LookupFunc func(string) (string, bool)
 
 type RuntimeConfig struct {
-	DatabaseURL      string
-	PublicBaseURL    *url.URL
-	Mode             Mode
-	Interval         time.Duration
-	StatePath        string
-	RuntimeDirectory string
-	TelegramToken    string
-	TelegramChatID   string
-	TelegramAPIBase  string
-	BackupPolicy     BackupPolicy
+	DatabaseURL               string
+	PublicBaseURL             *url.URL
+	Mode                      Mode
+	Interval                  time.Duration
+	StatePath                 string
+	RuntimeDirectory          string
+	TelegramToken             string
+	TelegramChatID            string
+	TelegramAPIBase           string
+	TelegramTenantContextMode TelegramTenantContextMode
+	BackupPolicy              BackupPolicy
 }
 
 func LoadRuntimeConfig(lookup LookupFunc) (RuntimeConfig, error) {
@@ -45,6 +46,10 @@ func LoadRuntimeConfig(lookup LookupFunc) (RuntimeConfig, error) {
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
+	telegramTenantContextMode, err := ParseTelegramTenantContextMode(value(lookup, "TELEGRAM_TENANT_CONTEXT_MODE", string(TelegramTenantContextOff)))
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
 	intervalSeconds, err := strconv.Atoi(value(lookup, "SENTINEL_INTERVAL_SECONDS", "30"))
 	if err != nil || intervalSeconds < 15 || intervalSeconds > 300 {
 		return RuntimeConfig{}, errors.New("SENTINEL_INTERVAL_SECONDS must be between 15 and 300")
@@ -57,7 +62,8 @@ func LoadRuntimeConfig(lookup LookupFunc) (RuntimeConfig, error) {
 	config := RuntimeConfig{
 		DatabaseURL: databaseURL, PublicBaseURL: publicBaseURL, Mode: mode, Interval: time.Duration(intervalSeconds) * time.Second,
 		StatePath: statePath, RuntimeDirectory: runtimeDirectory, BackupPolicy: backupPolicy,
-		TelegramAPIBase: strings.TrimRight(value(lookup, "TELEGRAM_API_BASE_URL", "https://api.telegram.org"), "/"),
+		TelegramTenantContextMode: telegramTenantContextMode,
+		TelegramAPIBase:           strings.TrimRight(value(lookup, "TELEGRAM_API_BASE_URL", "https://api.telegram.org"), "/"),
 	}
 	if mode == ModeSend {
 		tokenPath := strings.TrimSpace(value(lookup, "TELEGRAM_BOT_TOKEN_FILE", "/run/secrets/telegram-bot-token"))

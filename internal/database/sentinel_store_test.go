@@ -6,10 +6,75 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sentinel"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestSentinelAlertTenantContextUsesHistoricalConnectionVersion(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `truncate operational_alert_outbox, operational_incident_events, operational_incidents cascade`); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 7, 19, 1, 0, 0, 0, time.UTC)
+	tenantID := uuid.New()
+	defer func() { _, _ = pool.Exec(context.Background(), `delete from tenants where id=$1`, tenantID) }()
+	if _, err := pool.Exec(ctx, `insert into tenants (id, slug, name, timezone, status, access_ends_at) values ($1,$2,$3,'Asia/Bangkok','ACTIVE',$4)`,
+		tenantID, "telegram-context-"+tenantID.String(), "ร้านทดสอบ Telegram", now.AddDate(1, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into tenant_sml_connections (
+		  tenant_id, endpoint_url, database_name, username_ciphertext, username_nonce,
+		  password_ciphertext, password_nonce, encryption_key_id, version
+		) values ($1,'https://current.example.test:8092','DATA',decode('01','hex'),decode('02','hex'),decode('03','hex'),decode('04','hex'),'test',2)`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into audit_logs (tenant_id, actor_type, action, resource_type, result, after_json, created_at)
+		values ($1,'SYSTEM','SML_CONNECTION_REPLACED','SML_CONNECTION','SUCCESS',jsonb_build_object('version',1,'endpointUrl','http://old.example.test:11680'),$2)`, tenantID, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	connectionVersion := 1
+	evidence := failure.Complete(failure.EvidenceForCode("SML_UNREACHABLE"))
+	evidence.OccurredAt = now
+	evidence.ConnectionVersion = &connectionVersion
+	observation := sentinel.Observation{
+		IncidentType: "SCHEDULED_REPORT_FAILED", RootCause: sentinel.RootSMLConnectivity, Severity: sentinel.SeverityP1,
+		SourceKind: sentinel.SourceReport, SourceID: uuid.New(), TenantID: &tenantID, SubjectType: sentinel.SubjectTenant,
+		SubjectKey: sentinel.TenantSubjectKey(tenantID), ObservationMode: sentinel.ObservationDiscrete,
+		SafeErrorCode: "SML_UNREACHABLE", ObservedAt: now, Evidence: &evidence,
+	}
+	store := NewSentinelStore(pool)
+	if err := store.RecordObservations(ctx, []sentinel.Observation{observation}, now, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	alert, err := store.ClaimAlert(ctx, "telegram-context-test", time.Minute, now, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alert.TenantContexts) != 1 || alert.AdditionalTenantCount != 0 {
+		t.Fatalf("tenant contexts = %+v additional=%d", alert.TenantContexts, alert.AdditionalTenantCount)
+	}
+	context := alert.TenantContexts[0]
+	if context.TenantName != "ร้านทดสอบ Telegram" || context.EndpointURL != "http://old.example.test:11680" || context.URLStatus != sentinel.TelegramURLChangedSinceFailure {
+		t.Fatalf("tenant context = %+v", context)
+	}
+}
 
 func TestSentinelStoreClassifiesScheduledEventsAndGroupsLargeBatches(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
@@ -188,11 +253,11 @@ func TestSentinelStoreClassifiesScheduledEventsAndGroupsLargeBatches(t *testing.
 	if err := store.RecordObservations(ctx, []sentinel.Observation{leaseObservation}, leaseObservation.ObservedAt, 0, true); err != nil {
 		t.Fatal(err)
 	}
-	firstClaim, err := store.ClaimAlert(ctx, "sentinel-before-restart", time.Minute, leaseObservation.ObservedAt)
+	firstClaim, err := store.ClaimAlert(ctx, "sentinel-before-restart", time.Minute, leaseObservation.ObservedAt, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondClaim, err := store.ClaimAlert(ctx, "sentinel-after-restart", time.Minute, leaseObservation.ObservedAt.Add(time.Minute))
+	secondClaim, err := store.ClaimAlert(ctx, "sentinel-after-restart", time.Minute, leaseObservation.ObservedAt.Add(time.Minute), false)
 	if err != nil {
 		t.Fatal(err)
 	}

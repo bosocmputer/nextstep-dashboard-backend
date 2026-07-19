@@ -46,7 +46,7 @@ func (store *monitorStoreStub) MaintenanceActive(context.Context, time.Time) (bo
 	return store.maintenance, nil
 }
 
-func (store *monitorStoreStub) ClaimAlert(context.Context, string, time.Duration, time.Time) (Alert, error) {
+func (store *monitorStoreStub) ClaimAlert(context.Context, string, time.Duration, time.Time, bool) (Alert, error) {
 	store.claimed = true
 	return Alert{}, ErrNoAlertReady
 }

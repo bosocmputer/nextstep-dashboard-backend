@@ -54,7 +54,35 @@ func TestWatchdogRejectsMalformedOversizedAndCriticalProbe(t *testing.T) {
 	if status.Status != "degraded" || len(status.SafeErrorCodes) < 4 {
 		t.Fatalf("critical = %+v", status)
 	}
-	for _, code := range status.SafeErrorCodes { if code == "BACKUP_OVERDUE" || code == "BACKUP_CHECKSUM_INVALID" || code == "RESTORE_VERIFICATION_OVERDUE" { t.Fatalf("pre-migration policy emitted backup health code: %+v", status) } }
+	for _, code := range status.SafeErrorCodes {
+		if code == "BACKUP_OVERDUE" || code == "BACKUP_CHECKSUM_INVALID" || code == "RESTORE_VERIFICATION_OVERDUE" {
+			t.Fatalf("pre-migration policy emitted backup health code: %+v", status)
+		}
+	}
+}
+
+func TestWatchdogExposesOnlyBoundedTelegramContextHealth(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	heartbeat := MonitorHeartbeat{
+		Version: 1, CheckedAt: now, Mode: ModeSend, DatabaseReachable: true, LastEvaluationSucceeded: true,
+		TelegramContextStatus: TelegramTenantContextRedactedChatNotPrivate,
+		TelegramContextTotals: map[string]uint64{string(TelegramContextChatNotPrivate): 2},
+	}
+	if err := WriteMonitorHeartbeat(directory, heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	writeProbeFixture(t, directory, HostProbe{
+		Version: 1, CheckedAt: now, Containers: HostContainers{API: true, Worker: true, Frontend: true, Postgres: true, Sentinel: true},
+		DiskUsedPercent: 10, InodeUsedPercent: 10, MemoryAvailablePercent: 80, NTPSynchronized: true,
+	})
+	status := NewWatchdog(directory, func() time.Time { return now }).Status()
+	if len(status.SafeWarningCodes) != 1 || status.SafeWarningCodes[0] != "TELEGRAM_CONTEXT_REDACTED_CHAT_NOT_PRIVATE" {
+		t.Fatalf("warning codes = %+v", status.SafeWarningCodes)
+	}
+	if status.SentinelTelegramContextTotal[string(TelegramContextChatNotPrivate)] != 2 {
+		t.Fatalf("context totals = %+v", status.SentinelTelegramContextTotal)
+	}
 }
 
 func writeProbeFixture(t *testing.T, directory string, probe HostProbe) {

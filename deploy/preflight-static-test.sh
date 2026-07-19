@@ -7,6 +7,7 @@ trap 'rm -rf "$temporary"' EXIT INT TERM
 tls_dir="$temporary/tls"
 env_file="$temporary/production.env"
 bad_env_file="$temporary/production-bad.env"
+bad_telegram_context_env_file="$temporary/production-bad-telegram-context.env"
 raw_hash_env_file="$temporary/production-raw-hash.env"
 
 for runtime_script in backup.sh restore-drill.sh host-probe.sh; do
@@ -76,6 +77,7 @@ SCHEDULE_CHUNK_ENABLED=false
 SMART_SCHEDULE_PERIODS_ENABLED=false
 SMART_SCHEDULE_PERIOD_TENANT_IDS=
 OPERATIONAL_ALERTS_MODE=observe
+TELEGRAM_TENANT_CONTEXT_MODE=off
 SENTINEL_INTERVAL_SECONDS=30
 SENTINEL_HOST_RUNTIME_DIR=/run/nextstep-dashboard
 WATCHDOG_ENABLED=true
@@ -98,6 +100,13 @@ sed 's/SML_ALLOWED_HOSTS=sml.internal.local/SML_ALLOWED_HOSTS=sml-shop.example.c
 chmod 600 "$bad_env_file"
 if POSTGRES_TLS_DIR="$tls_dir" "$script_dir/preflight.sh" "$bad_env_file" static >/dev/null 2>&1; then
   echo "Preflight accepted an example SML hostname" >&2
+  exit 1
+fi
+
+sed 's/TELEGRAM_TENANT_CONTEXT_MODE=off/TELEGRAM_TENANT_CONTEXT_MODE=group/' "$env_file" > "$bad_telegram_context_env_file"
+chmod 600 "$bad_telegram_context_env_file"
+if POSTGRES_TLS_DIR="$tls_dir" "$script_dir/preflight.sh" "$bad_telegram_context_env_file" static >/dev/null 2>&1; then
+  echo "Preflight accepted a non-private Telegram tenant context mode" >&2
   exit 1
 fi
 
