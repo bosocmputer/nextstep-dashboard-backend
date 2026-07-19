@@ -603,6 +603,10 @@ paths:
         - {$ref: '#/components/parameters/PageSize'}
         - {name: tenantId, in: query, schema: {type: string, format: uuid}}
         - {name: status, in: query, schema: {$ref: '#/components/schemas/ReportRunStatus'}}
+        - {name: reportKey, in: query, schema: {$ref: '#/components/schemas/ReportKey'}}
+        - {name: source, in: query, schema: {type: string, enum: [DASHBOARD, SCHEDULE, BACKGROUND]}}
+        - {name: dateFrom, in: query, description: Start date in Asia/Bangkok., schema: {type: string, format: date}}
+        - {name: dateTo, in: query, description: Inclusive end date in Asia/Bangkok., schema: {type: string, format: date}}
       responses:
         '200':
           description: Report run history.
@@ -645,6 +649,10 @@ paths:
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/PageSize'}
         - {name: tenantId, in: query, schema: {type: string, format: uuid}}
+        - {name: status, in: query, schema: {type: string, enum: [PENDING, SENDING, ACCEPTED, RETRY_WAIT, UNCERTAIN, FAILED_PERMANENT]}}
+        - {name: recipientId, in: query, schema: {type: string, format: uuid}}
+        - {name: dateFrom, in: query, description: Start date in Asia/Bangkok., schema: {type: string, format: date}}
+        - {name: dateTo, in: query, description: Inclusive end date in Asia/Bangkok., schema: {type: string, format: date}}
       responses:
         '200':
           description: Redacted LINE delivery history.
@@ -660,6 +668,11 @@ paths:
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/PageSize'}
         - {name: tenantId, in: query, schema: {type: string, format: uuid}}
+        - {name: actorType, in: query, schema: {type: string, enum: [ADMIN, VIEWER, WORKER, SYSTEM]}}
+        - {name: action, in: query, schema: {type: string, pattern: '^[A-Z][A-Z0-9_]*$', maxLength: 100}}
+        - {name: result, in: query, schema: {type: string, enum: [SUCCESS, DENIED, FAILED]}}
+        - {name: dateFrom, in: query, description: Start date in Asia/Bangkok., schema: {type: string, format: date}}
+        - {name: dateTo, in: query, description: Inclusive end date in Asia/Bangkok., schema: {type: string, format: date}}
       responses:
         '200':
           description: Redacted audit events.

@@ -17,11 +17,15 @@ type LineQuotaStatus = quota.Status
 var ErrInvalidCursor = errors.New("operations cursor is invalid")
 
 type ReportRunFilter struct {
-	TenantID *uuid.UUID
-	Status   *report.RunStatus
-	Cursor   string
-	PageSize int
-	Now      time.Time
+	TenantID    *uuid.UUID
+	Status      *report.RunStatus
+	ReportKey   *report.Key
+	Source      *report.Source
+	CreatedFrom *time.Time
+	CreatedTo   *time.Time
+	Cursor      string
+	PageSize    int
+	Now         time.Time
 }
 
 type ReportRunPage struct {
@@ -66,9 +70,13 @@ type Delivery struct {
 }
 
 type DeliveryFilter struct {
-	TenantID *uuid.UUID
-	Cursor   string
-	PageSize int
+	TenantID    *uuid.UUID
+	Status      *DeliveryStatus
+	RecipientID *uuid.UUID
+	CreatedFrom *time.Time
+	CreatedTo   *time.Time
+	Cursor      string
+	PageSize    int
 }
 
 type DeliveryPage struct {
@@ -91,9 +99,14 @@ type AuditEvent struct {
 }
 
 type AuditFilter struct {
-	TenantID *uuid.UUID
-	Cursor   string
-	PageSize int
+	TenantID    *uuid.UUID
+	ActorType   *string
+	Action      *string
+	Result      *string
+	CreatedFrom *time.Time
+	CreatedTo   *time.Time
+	Cursor      string
+	PageSize    int
 }
 
 type AuditPage struct {
