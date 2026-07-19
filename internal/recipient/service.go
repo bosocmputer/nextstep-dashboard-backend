@@ -99,34 +99,42 @@ type ScheduleRecipientOption struct {
 type ScheduleRecipientOptionsInput struct {
 	ReportKeys           []report.Key `json:"reportKeys"`
 	SelectedRecipientIDs []uuid.UUID  `json:"selectedRecipientIds"`
-	Search               string       `json:"search"`
+	Search               string       `json:"search,omitempty"`
+	GlobalSearch         string       `json:"globalSearch,omitempty"`
+	Statuses             []Status     `json:"statuses,omitempty"`
+	EligibilityStates    []string     `json:"eligibilityStates,omitempty"`
 	Page                 int          `json:"page"`
 	PageSize             int          `json:"pageSize"`
 }
 
 type ScheduleRecipientOptions struct {
-	Data     []ScheduleRecipientOption `json:"data"`
-	Selected []ScheduleRecipientOption `json:"selected"`
-	Page     int                       `json:"page"`
-	PageSize int                       `json:"pageSize"`
-	Total    int                       `json:"total"`
-	HasMore  bool                      `json:"hasMore"`
+	Data       []ScheduleRecipientOption `json:"data"`
+	Selected   []ScheduleRecipientOption `json:"selected"`
+	Page       int                       `json:"page"`
+	PageSize   int                       `json:"pageSize"`
+	Total      int                       `json:"total"`
+	TotalPages int                       `json:"totalPages"`
+	HasMore    bool                      `json:"hasMore"`
 }
 
 type QueryInput struct {
-	Search          string `json:"search"`
-	Status          Status `json:"status,omitempty"`
-	PermissionState string `json:"permissionState,omitempty"`
-	Page            int    `json:"page"`
-	PageSize        int    `json:"pageSize"`
+	Search           string   `json:"search,omitempty"`
+	GlobalSearch     string   `json:"globalSearch,omitempty"`
+	Status           Status   `json:"status,omitempty"`
+	Statuses         []Status `json:"statuses,omitempty"`
+	PermissionState  string   `json:"permissionState,omitempty"`
+	PermissionStates []string `json:"permissionStates,omitempty"`
+	Page             int      `json:"page"`
+	PageSize         int      `json:"pageSize"`
 }
 
 type QueryResult struct {
-	Data     []Recipient `json:"data"`
-	Page     int         `json:"page"`
-	PageSize int         `json:"pageSize"`
-	Total    int         `json:"total"`
-	HasMore  bool        `json:"hasMore"`
+	Data       []Recipient `json:"data"`
+	Page       int         `json:"page"`
+	PageSize   int         `json:"pageSize"`
+	Total      int         `json:"total"`
+	TotalPages int         `json:"totalPages"`
+	HasMore    bool        `json:"hasMore"`
 }
 
 type Page struct {
@@ -163,7 +171,8 @@ func (service *Service) PermissionDependencies(ctx context.Context, tenantID, re
 }
 
 func (service *Service) ScheduleRecipientOptions(ctx context.Context, tenantID uuid.UUID, input ScheduleRecipientOptionsInput) (ScheduleRecipientOptions, error) {
-	if tenantID == uuid.Nil || input.Page < 0 || input.PageSize < 1 || input.PageSize > 100 || len(input.ReportKeys) < 1 || len(input.ReportKeys) > 10 || len(input.SelectedRecipientIDs) > 500 || len(strings.TrimSpace(input.Search)) > 160 {
+	search, err := normalizedTableSearch(input.Search, input.GlobalSearch)
+	if err != nil || tenantID == uuid.Nil || input.Page < 0 || !validTablePageSize(input.PageSize) || len(input.ReportKeys) < 1 || len(input.ReportKeys) > 10 || len(input.SelectedRecipientIDs) > 500 || !validRecipientStatuses(input.Statuses) || !validEligibilityStates(input.EligibilityStates) {
 		return ScheduleRecipientOptions{}, ErrInvalidInput
 	}
 	required := make(map[report.Key]struct{}, len(input.ReportKeys))
@@ -193,7 +202,7 @@ func (service *Service) ScheduleRecipientOptions(ctx context.Context, tenantID u
 	if len(stored) > 500 {
 		return ScheduleRecipientOptions{}, ErrInvalidInput
 	}
-	needle := strings.ToLower(strings.TrimSpace(input.Search))
+	needle := strings.ToLower(search)
 	filtered := make([]ScheduleRecipientOption, 0, len(stored))
 	selected := make([]ScheduleRecipientOption, 0, len(selectedIDs))
 	for _, item := range stored {
@@ -215,7 +224,13 @@ func (service *Service) ScheduleRecipientOptions(ctx context.Context, tenantID u
 		if _, ok := selectedIDs[public.ID]; ok {
 			selected = append(selected, option)
 		}
-		if needle == "" || strings.Contains(strings.ToLower(public.DisplayName), needle) {
+		eligibilityState := "ELIGIBLE"
+		if public.Status != StatusActive {
+			eligibilityState = "NOT_ACTIVE"
+		} else if len(missing) > 0 {
+			eligibilityState = "MISSING_PERMISSIONS"
+		}
+		if containsRecipientStatus(input.Statuses, public.Status) && containsStringFilter(input.EligibilityStates, eligibilityState) && (needle == "" || strings.Contains(strings.ToLower(public.DisplayName), needle)) {
 			filtered = append(filtered, option)
 		}
 	}
@@ -226,18 +241,27 @@ func (service *Service) ScheduleRecipientOptions(ctx context.Context, tenantID u
 	end := min(start+input.PageSize, len(filtered))
 	return ScheduleRecipientOptions{
 		Data: filtered[start:end], Selected: selected, Page: input.Page, PageSize: input.PageSize,
-		Total: len(filtered), HasMore: end < len(filtered),
+		Total: len(filtered), TotalPages: pageCount(len(filtered), input.PageSize), HasMore: end < len(filtered),
 	}, nil
 }
 
 func (service *Service) Query(ctx context.Context, tenantID uuid.UUID, input QueryInput) (QueryResult, error) {
-	if tenantID == uuid.Nil || input.Page < 0 || input.PageSize < 1 || input.PageSize > 100 || len(strings.TrimSpace(input.Search)) > 160 {
+	search, err := normalizedTableSearch(input.Search, input.GlobalSearch)
+	if err != nil || tenantID == uuid.Nil || input.Page < 0 || !validTablePageSize(input.PageSize) {
 		return QueryResult{}, ErrInvalidInput
 	}
-	if input.Status != "" && input.Status != StatusPending && input.Status != StatusActive {
+	statuses := append([]Status(nil), input.Statuses...)
+	if input.Status != "" {
+		statuses = append(statuses, input.Status)
+	}
+	permissionStates := append([]string(nil), input.PermissionStates...)
+	if input.PermissionState != "" {
+		permissionStates = append(permissionStates, input.PermissionState)
+	}
+	if !validRecipientStatuses(statuses) {
 		return QueryResult{}, ErrInvalidInput
 	}
-	if input.PermissionState != "" && input.PermissionState != "WITH_REPORTS" && input.PermissionState != "WITHOUT_REPORTS" {
+	if !validPermissionStates(permissionStates) {
 		return QueryResult{}, ErrInvalidInput
 	}
 	stored, err := service.store.ListScheduleCandidates(ctx, tenantID, 501)
@@ -247,20 +271,21 @@ func (service *Service) Query(ctx context.Context, tenantID uuid.UUID, input Que
 	if len(stored) > 500 {
 		return QueryResult{}, ErrInvalidInput
 	}
-	needle := strings.ToLower(strings.TrimSpace(input.Search))
+	needle := strings.ToLower(search)
 	filtered := make([]Recipient, 0, len(stored))
 	for _, item := range stored {
 		public, err := service.publicRecipient(item)
 		if err != nil {
 			return QueryResult{}, err
 		}
-		if input.Status != "" && public.Status != input.Status {
+		if !containsRecipientStatus(statuses, public.Status) {
 			continue
 		}
-		if input.PermissionState == "WITH_REPORTS" && len(public.ReportKeys) == 0 {
-			continue
+		permissionState := "WITHOUT_REPORTS"
+		if len(public.ReportKeys) > 0 {
+			permissionState = "WITH_REPORTS"
 		}
-		if input.PermissionState == "WITHOUT_REPORTS" && len(public.ReportKeys) > 0 {
+		if !containsStringFilter(permissionStates, permissionState) {
 			continue
 		}
 		if needle == "" || strings.Contains(strings.ToLower(public.DisplayName), needle) {
@@ -269,7 +294,99 @@ func (service *Service) Query(ctx context.Context, tenantID uuid.UUID, input Que
 	}
 	start := min(input.Page*input.PageSize, len(filtered))
 	end := min(start+input.PageSize, len(filtered))
-	return QueryResult{Data: filtered[start:end], Page: input.Page, PageSize: input.PageSize, Total: len(filtered), HasMore: end < len(filtered)}, nil
+	return QueryResult{Data: filtered[start:end], Page: input.Page, PageSize: input.PageSize, Total: len(filtered), TotalPages: pageCount(len(filtered), input.PageSize), HasMore: end < len(filtered)}, nil
+}
+
+func normalizedTableSearch(legacy, global string) (string, error) {
+	legacy = strings.TrimSpace(legacy)
+	global = strings.TrimSpace(global)
+	if len([]rune(legacy)) > 160 || len([]rune(global)) > 160 || (global != "" && len([]rune(global)) < 2) {
+		return "", ErrInvalidInput
+	}
+	if legacy != "" && global != "" && legacy != global {
+		return "", ErrInvalidInput
+	}
+	if global != "" {
+		return global, nil
+	}
+	return legacy, nil
+}
+
+func validTablePageSize(pageSize int) bool {
+	return pageSize == 25 || pageSize == 50 || pageSize == 100
+}
+
+func validRecipientStatuses(statuses []Status) bool {
+	if len(statuses) > 2 {
+		return false
+	}
+	seen := make(map[Status]struct{}, len(statuses))
+	for _, status := range statuses {
+		if status != StatusPending && status != StatusActive {
+			return false
+		}
+		if _, duplicate := seen[status]; duplicate {
+			return false
+		}
+		seen[status] = struct{}{}
+	}
+	return true
+}
+
+func validPermissionStates(values []string) bool {
+	return validStringEnum(values, map[string]struct{}{"WITH_REPORTS": {}, "WITHOUT_REPORTS": {}})
+}
+
+func validEligibilityStates(values []string) bool {
+	return validStringEnum(values, map[string]struct{}{"ELIGIBLE": {}, "NOT_ACTIVE": {}, "MISSING_PERMISSIONS": {}})
+}
+
+func validStringEnum(values []string, allowed map[string]struct{}) bool {
+	if len(values) > len(allowed) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, ok := allowed[value]; !ok {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
+}
+
+func containsRecipientStatus(values []Status, value Status) bool {
+	if len(values) == 0 {
+		return true
+	}
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func containsStringFilter(values []string, value string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func pageCount(total, pageSize int) int {
+	if total == 0 {
+		return 0
+	}
+	return (total + pageSize - 1) / pageSize
 }
 
 func (service *Service) Get(ctx context.Context, recipientID uuid.UUID) (Recipient, error) {

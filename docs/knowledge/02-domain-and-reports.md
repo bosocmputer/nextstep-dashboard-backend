@@ -61,5 +61,5 @@ The catalog owns labels, version, status, selection policy, period mode, metrics
 - Audit records operational actions without copying business output.
 - Recipient query pages search at most the supported 500-recipient tenant set,
   return an exact filtered total, and preserve identifier/display-name values.
-- Schedule listing accepts bounded name/status/archive filters before cursor
+- Schedule listing accepts bounded name/status/archive filters before exact-page
   pagination; report and recipient eligibility rules are unchanged.

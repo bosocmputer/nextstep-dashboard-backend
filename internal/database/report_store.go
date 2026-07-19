@@ -1748,6 +1748,10 @@ func (store *ReportStore) QueryRows(ctx context.Context, runID uuid.UUID, input 
 	if err != nil {
 		return report.RowsQueryPage{}, fmt.Errorf("encode report row filters: %w", err)
 	}
+	globalColumnsJSON, err := json.Marshal(input.GlobalSearchColumns)
+	if err != nil {
+		return report.RowsQueryPage{}, fmt.Errorf("encode report row global columns: %w", err)
+	}
 	rows, err := store.pool.Query(ctx, `
 		with filtered as (
 		  select stored.ordinal, stored.row_json
@@ -1778,29 +1782,45 @@ func (store *ReportStore) QueryRows(ctx context.Context, runID uuid.UUID, input 
 		          when selected ->> 'valueType' = 'NUMBER' then false
 		          else coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') <= selected ->> 'value'
 		        end
+		        when 'BETWEEN' then
+		          coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') >= selected ->> 'value'
+		          and coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') <= selected ->> 'valueTo'
 		        else false
 		      end
 		    )
+		    and ($5 = '' or exists (
+		      select 1
+		      from jsonb_array_elements_text($6::jsonb) searchable(column_key)
+		      where strpos(lower(coalesce(stored.row_json ->> searchable.column_key, '')), lower($5)) > 0
+		    ))
+		), counted as materialized (
+		  select count(*)::int as total from filtered
+		), paged as materialized (
+		  select ordinal, row_json from filtered order by ordinal offset $3 limit $4
 		)
-		select row_json, count(*) over()
-		from filtered
-		order by ordinal
-		offset $3 limit $4`, runID, filtersJSON, input.Page*input.PageSize, input.PageSize)
+		select paged.ordinal, paged.row_json, counted.total
+		from counted left join paged on true
+		order by paged.ordinal`, runID, filtersJSON, input.Page*input.PageSize, input.PageSize, input.GlobalSearch, globalColumnsJSON)
 	if err != nil {
 		return report.RowsQueryPage{}, fmt.Errorf("query report rows: %w", err)
 	}
 	defer rows.Close()
-	page := report.RowsQueryPage{Rows: make([]map[string]string, 0, input.PageSize), Page: input.Page, PageSize: input.PageSize}
+	page := report.RowsQueryPage{Rows: make([]map[string]string, 0, input.PageSize), RowOrdinals: make([]int, 0, input.PageSize), Page: input.Page, PageSize: input.PageSize}
 	for rows.Next() {
+		var ordinal *int
 		var rowJSON []byte
-		if err := rows.Scan(&rowJSON, &page.Total); err != nil {
+		if err := rows.Scan(&ordinal, &rowJSON, &page.Total); err != nil {
 			return report.RowsQueryPage{}, fmt.Errorf("scan queried report row: %w", err)
+		}
+		if ordinal == nil {
+			continue
 		}
 		var row map[string]string
 		if err := json.Unmarshal(rowJSON, &row); err != nil {
 			return report.RowsQueryPage{}, fmt.Errorf("decode queried report row: %w", err)
 		}
 		page.Rows = append(page.Rows, row)
+		page.RowOrdinals = append(page.RowOrdinals, *ordinal)
 	}
 	if err := rows.Err(); err != nil {
 		return report.RowsQueryPage{}, fmt.Errorf("iterate queried report rows: %w", err)

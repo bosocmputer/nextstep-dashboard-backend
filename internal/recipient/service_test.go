@@ -150,12 +150,44 @@ func TestServiceQueriesEncryptedRecipientNamesWithExactPagination(t *testing.T) 
 		t.Fatal(err)
 	}
 	result, err := service.Query(context.Background(), tenantID, QueryInput{Search: "บริหาร", Status: StatusPending, PermissionState: "WITHOUT_REPORTS", Page: 0, PageSize: 25})
-	if err != nil || result.Total != 1 || len(result.Data) != 1 || result.Data[0].DisplayName != "ผู้บริหารร้าน" {
+	if err != nil || result.Total != 1 || result.TotalPages != 1 || len(result.Data) != 1 || result.Data[0].DisplayName != "ผู้บริหารร้าน" {
 		t.Fatalf("Query() = %+v, %v", result, err)
 	}
 	empty, err := service.Query(context.Background(), tenantID, QueryInput{Status: StatusActive, Page: 0, PageSize: 25})
 	if err != nil || empty.Total != 0 || len(empty.Data) != 0 {
 		t.Fatalf("active Query() = %+v, %v", empty, err)
+	}
+	multi, err := service.Query(context.Background(), tenantID, QueryInput{GlobalSearch: "บริหาร", Statuses: []Status{StatusPending}, PermissionStates: []string{"WITHOUT_REPORTS"}, Page: 0, PageSize: 25})
+	if err != nil || multi.Total != 1 || len(multi.Data) != 1 {
+		t.Fatalf("multi Query() = %+v, %v", multi, err)
+	}
+	if _, err := service.Query(context.Background(), tenantID, QueryInput{GlobalSearch: "x", Page: 0, PageSize: 25}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("single-character global Query() error = %v, want ErrInvalidInput", err)
+	}
+	if _, err := service.Query(context.Background(), tenantID, QueryInput{GlobalSearch: strings.Repeat("ร", 160), Page: 0, PageSize: 25}); err != nil {
+		t.Fatalf("160-character Thai global Query() error = %v", err)
+	}
+	if _, err := service.Query(context.Background(), tenantID, QueryInput{GlobalSearch: strings.Repeat("ร", 161), Page: 0, PageSize: 25}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("161-character Thai global Query() error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestScheduleRecipientOptionsKeepsSelectedRecipientOutsideRequestedPage(t *testing.T) {
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 12)))
+	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{3}, 32), bytes.NewReader(nil), func() time.Time { return now })
+	store := &memoryRecipientStore{}
+	service := NewService(store, box, tokens, bytes.NewReader(bytes.Repeat([]byte{4}, 32)), "https://dashboard.nextstep-soft.com", func() time.Time { return now })
+	tenantID := uuid.New()
+	created, err := service.CreateInvitation(context.Background(), []byte("admin"), "request-1", "recipient-selected-page-test", tenantID, "ผู้รับที่เลือกไว้")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ScheduleRecipientOptions(context.Background(), tenantID, ScheduleRecipientOptionsInput{
+		ReportKeys: []report.Key{report.StockBalance}, SelectedRecipientIDs: []uuid.UUID{created.ID}, Page: 1, PageSize: 25,
+	})
+	if err != nil || len(result.Data) != 0 || len(result.Selected) != 1 || result.Selected[0].ID != created.ID || result.Total != 1 || result.TotalPages != 1 {
+		t.Fatalf("ScheduleRecipientOptions() = %+v, %v", result, err)
 	}
 }
 

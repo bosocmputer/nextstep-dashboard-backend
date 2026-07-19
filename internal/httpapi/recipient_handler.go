@@ -46,7 +46,7 @@ func registerRecipientRoutes(router chi.Router, adminAuth AdminAuthenticator, re
 	})
 
 	router.Post("/api/v1/admin/tenants/{tenantId}/schedule-recipient-options/query", func(response http.ResponseWriter, request *http.Request) {
-		if _, ok := operationalAdmin(response, request, adminAuth, false); !ok {
+		if _, ok := operationalAdmin(response, request, adminAuth, true); !ok {
 			return
 		}
 		tenantID, ok := parseTenantID(response, request)

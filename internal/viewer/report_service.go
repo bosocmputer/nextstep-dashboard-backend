@@ -6,7 +6,9 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 	"github.com/google/uuid"
@@ -85,12 +87,21 @@ type ReportRows struct {
 }
 
 type ReportRowsQuery struct {
-	RunID    uuid.UUID
-	Columns  []string
-	Rows     []map[string]string
-	Page     int
-	PageSize int
-	Total    int
+	RunID              uuid.UUID
+	Columns            []string
+	Rows               []map[string]string
+	RowOrdinals        []int
+	FilterCapabilities []ReportRowFilterCapability
+	Page               int
+	PageSize           int
+	Total              int
+}
+
+type ReportRowFilterCapability struct {
+	ColumnKey        string                     `json:"columnKey"`
+	DataType         string                     `json:"dataType"`
+	Operators        []report.RowFilterOperator `json:"operators"`
+	GlobalSearchable bool                       `json:"globalSearchable"`
 }
 
 type ReportService struct {
@@ -412,7 +423,10 @@ func (service *ReportService) ListRows(ctx context.Context, recipientID, tenantI
 }
 
 func (service *ReportService) QueryRows(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID, input report.RowsQueryInput) (ReportRowsQuery, error) {
-	if input.Page < 0 || input.Page > 200_000 || input.PageSize < 1 || input.PageSize > 100 || len(input.Filters) > 5 {
+	input.GlobalSearch = strings.TrimSpace(input.GlobalSearch)
+	searchLength := utf8.RuneCountInString(input.GlobalSearch)
+	validPageSize := input.PageSize == 25 || input.PageSize == 50 || input.PageSize == 100
+	if input.Page < 0 || input.Page > 200_000 || !validPageSize || len(input.Filters) > 5 || (input.GlobalSearch != "" && (searchLength < 2 || searchLength > 160)) {
 		return ReportRowsQuery{}, ErrReportInputInvalid
 	}
 	if _, err := service.Get(ctx, recipientID, tenantID, reportKey, runID); err != nil {
@@ -421,6 +435,7 @@ func (service *ReportService) QueryRows(ctx context.Context, recipientID, tenant
 	if err := validateReportRowFilters(reportKey, input.Filters); err != nil {
 		return ReportRowsQuery{}, err
 	}
+	input.GlobalSearchColumns = append([]string(nil), reportRowGlobalSearchColumns[reportKey]...)
 	page, err := service.store.QueryRows(ctx, runID, input, service.now().UTC())
 	if err != nil {
 		return ReportRowsQuery{}, err
@@ -436,7 +451,10 @@ func (service *ReportService) QueryRows(ctx context.Context, recipientID, tenant
 		orderedColumns = append(orderedColumns, column)
 	}
 	sort.Strings(orderedColumns)
-	return ReportRowsQuery{RunID: runID, Columns: orderedColumns, Rows: page.Rows, Page: page.Page, PageSize: page.PageSize, Total: page.Total}, nil
+	return ReportRowsQuery{
+		RunID: runID, Columns: orderedColumns, Rows: page.Rows, RowOrdinals: page.RowOrdinals,
+		FilterCapabilities: reportRowCapabilities(reportKey), Page: page.Page, PageSize: page.PageSize, Total: page.Total,
+	}, nil
 }
 
 func (service *ReportService) GetDashboard(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID) (report.Dashboard, error) {

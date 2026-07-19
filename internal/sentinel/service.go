@@ -219,6 +219,20 @@ func (service *AdminService) List(ctx context.Context, filter IncidentFilter) (I
 	return page, nil
 }
 
+// PresentIncident applies the same Thai failure catalog used by the cursor
+// endpoint to additive numbered table-query results.
+func PresentIncident(item Incident) Incident {
+	item.Presentation = incidentPresentation(item)
+	return item
+}
+
+func SanitizeOccurrenceConnectionReference(reference *SMLConnectionReference) *SMLConnectionReference {
+	if reference == nil {
+		return nil
+	}
+	return sanitizeConnectionReference(*reference)
+}
+
 func (service *AdminService) Get(ctx context.Context, id uuid.UUID) (IncidentDetail, error) {
 	if id == uuid.Nil {
 		return IncidentDetail{}, ErrInvalidInput

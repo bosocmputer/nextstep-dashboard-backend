@@ -148,26 +148,31 @@ const (
 	RowFilterEquals   RowFilterOperator = "EQUALS"
 	RowFilterGTE      RowFilterOperator = "GTE"
 	RowFilterLTE      RowFilterOperator = "LTE"
+	RowFilterBetween  RowFilterOperator = "BETWEEN"
 )
 
 type RowFilter struct {
 	ColumnKey string            `json:"columnKey"`
 	Operator  RowFilterOperator `json:"operator"`
 	Value     string            `json:"value"`
+	ValueTo   string            `json:"valueTo,omitempty"`
 	ValueType string            `json:"valueType,omitempty"`
 }
 
 type RowsQueryInput struct {
-	Filters  []RowFilter `json:"filters"`
-	Page     int         `json:"page"`
-	PageSize int         `json:"pageSize"`
+	GlobalSearch        string      `json:"globalSearch,omitempty"`
+	GlobalSearchColumns []string    `json:"-"`
+	Filters             []RowFilter `json:"filters"`
+	Page                int         `json:"page"`
+	PageSize            int         `json:"pageSize"`
 }
 
 type RowsQueryPage struct {
-	Rows     []map[string]string
-	Page     int
-	PageSize int
-	Total    int
+	Rows        []map[string]string
+	RowOrdinals []int
+	Page        int
+	PageSize    int
+	Total       int
 }
 
 type ChunkManifest struct {
