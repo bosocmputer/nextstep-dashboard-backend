@@ -218,6 +218,12 @@ func TestReportStoreIdempotencyLeaseCompletionAndCursorRows(t *testing.T) {
 	if err != nil || len(secondPage.Rows) != 1 || secondPage.HasMore {
 		t.Fatalf("ListRows() second = %+v, %v", secondPage, err)
 	}
+	queried, err := store.QueryRows(ctx, claimed.ID, report.RowsQueryInput{
+		Filters: []report.RowFilter{{ColumnKey: "doc_no", Operator: report.RowFilterEquals, Value: "S2"}}, Page: 0, PageSize: 25,
+	}, now.Add(time.Second))
+	if err != nil || queried.Total != 1 || len(queried.Rows) != 1 || queried.Rows[0]["doc_no"] != "S2" {
+		t.Fatalf("QueryRows() = %+v, %v", queried, err)
+	}
 	if _, err := store.ListRows(ctx, claimed.ID, 0, 25, now.Add(25*time.Hour)); !errors.Is(err, report.ErrRunRowsExpired) {
 		t.Fatalf("expired ListRows() error = %v", err)
 	}

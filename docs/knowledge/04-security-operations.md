@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-17
+last_verified: 2026-07-19
 source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/sml/config_service.go, internal/database/sml_test_coordinator.go, internal/retention/worker.go, internal/sentinel/service.go, internal/database/sentinel_store.go, internal/database/sentinel_subject_store.go, internal/failure/catalog.go, deploy/RUNBOOK.md]
 tags: [backend, security, operations, retention]
 ---
@@ -12,6 +12,10 @@ tags: [backend, security, operations, retention]
 - Admin and Viewer use separate secure, httpOnly, same-site sessions and CSRF cookies for unsafe requests.
 - LINE identity is verified server-side before a viewer session is issued.
 - Every viewer resource rechecks tenant membership and report permission.
+- Viewer stored-row query POSTs require the Viewer CSRF check even though they
+  are read-only queries, then re-authorize tenant, report, run, and row expiry.
+- Row filter columns/operators are selected from the backend report catalog;
+  client-supplied value types are ignored and SQL values remain parameterized.
 - Invitation/delivery references are opaque entry references, not authorization tokens.
 - Explicit tenant/delivery mismatch fails closed without revealing whether another tenant resource exists.
 

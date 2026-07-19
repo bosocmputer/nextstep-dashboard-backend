@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-17
+last_verified: 2026-07-19
 source_of_truth: [cmd/api/main.go, cmd/worker/main.go, cmd/sentinel/main.go, internal/database/pool.go, internal/httpapi/operations_handler.go, internal/httpapi/incident_handler.go, internal/database/sentinel_subject_store.go, internal/failure/catalog.go, deploy/compose.production.yml]
 tags: [backend, architecture, multitenant]
 ---
@@ -54,6 +54,10 @@ Sentinel monitor (independent process)
 - Summary generations publish only after their required report set satisfies the generation rules.
 - Chunked work, when enabled, records a collection window and never claims a single instant snapshot.
 - Cache keys/fingerprints include report/query/builder/data-source identity so incompatible output is not reused.
+- Admin history/schedule filters and viewer stored-row filters are bounded,
+  parameterized database reads. Recipient name search decrypts only the bounded
+  supported tenant set in the service. None enters the report queue or contacts
+  customer JavaWS.
 
 ## Operational Evidence API
 

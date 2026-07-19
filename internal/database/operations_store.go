@@ -100,51 +100,65 @@ func (store *OperationsStore) ListReportRuns(ctx context.Context, filter operati
 		value := string(*filter.Status)
 		status = &value
 	}
+	var reportKey, source *string
+	if filter.ReportKey != nil {
+		value := string(*filter.ReportKey)
+		reportKey = &value
+	}
+	if filter.Source != nil {
+		value := string(*filter.Source)
+		source = &value
+	}
 	rows, err := store.pool.Query(ctx, `
 		select `+reportRunColumns+`,
 		       (select name from tenants where id = r.tenant_id),
-		       case when r.status in ('CLAIMED', 'RUNNING') and r.lease_expires_at < $6 then 'STALLED' else 'ACTIVE' end,
+		       case when r.status in ('CLAIMED', 'RUNNING') and r.lease_expires_at < $10 then 'STALLED' else 'ACTIVE' end,
 		       (select max(retry_at) from (
 		          select circuit.open_until as retry_at
 		          from tenant_sml_circuits circuit
-		          where circuit.tenant_id = r.tenant_id and circuit.open_until > $6
+		          where circuit.tenant_id = r.tenant_id and circuit.open_until > $10
 		          union all
 		          select host_circuit.open_until
 		          from tenant_sml_connections connection
 		          join sml_host_circuits host_circuit on host_circuit.host_key = connection.endpoint_host_key
-		          where connection.tenant_id = r.tenant_id and host_circuit.open_until > $6
+		          where connection.tenant_id = r.tenant_id and host_circuit.open_until > $10
 		       ) retry_times),
 		       case when r.status <> 'QUEUED' then null
-		         when exists (select 1 from tenant_sml_circuits circuit where circuit.tenant_id = r.tenant_id and circuit.open_until > $6) then 'TENANT_COOLDOWN'
+		         when exists (select 1 from tenant_sml_circuits circuit where circuit.tenant_id = r.tenant_id and circuit.open_until > $10) then 'TENANT_COOLDOWN'
 		         when exists (
 		           select 1 from tenant_sml_connections connection
 		           join sml_host_circuits host_circuit on host_circuit.host_key = connection.endpoint_host_key
-		           where connection.tenant_id = r.tenant_id and host_circuit.open_until > $6
+		           where connection.tenant_id = r.tenant_id and host_circuit.open_until > $10
 		         ) then 'HOST_COOLDOWN'
 		         when exists (select 1 from report_runs active where active.tenant_id = r.tenant_id and active.status in ('CLAIMED', 'RUNNING')) then 'TENANT_BUSY'
 		         when (select count(*) from report_runs active
 		               join tenant_sml_connections active_connection on active_connection.tenant_id = active.tenant_id
 		               join tenant_sml_connections candidate_connection on candidate_connection.tenant_id = r.tenant_id
 		               where active.status in ('CLAIMED', 'RUNNING')
-		                 and active_connection.endpoint_host_key = candidate_connection.endpoint_host_key) >= $7 then 'HOST_BUSY'
+		                 and active_connection.endpoint_host_key = candidate_connection.endpoint_host_key) >= $11 then 'HOST_BUSY'
 		         when r.source <> 'SCHEDULE' and (
-		           (select count(*) from report_runs active where active.status in ('CLAIMED', 'RUNNING') and active.source <> 'SCHEDULE') >= $8
+		           (select count(*) from report_runs active where active.status in ('CLAIMED', 'RUNNING') and active.source <> 'SCHEDULE') >= $12
 		           or (r.report_key in ('stock_balance', 'ar_customer_movement') and exists (
 		             select 1 from notification_schedules schedule
 		             join tenant_sml_connections scheduled_connection on scheduled_connection.tenant_id = schedule.tenant_id
 		             join tenant_sml_connections candidate_connection on candidate_connection.tenant_id = r.tenant_id
 		               and candidate_connection.endpoint_host_key = scheduled_connection.endpoint_host_key
-		             where schedule.status = 'ACTIVE' and schedule.next_run_at between $6 and $6 + interval '15 minutes'
+		             where schedule.status = 'ACTIVE' and schedule.next_run_at between $10 and $10 + interval '15 minutes'
 		           ))
 		         ) then 'SCHEDULE_RESERVED'
 		         else null end
 		from report_runs r
 		where ($1::uuid is null or r.tenant_id = $1)
 		  and ($2::text is null or r.status = $2)
-		  and ($3::timestamptz is null or (r.created_at, r.id) < ($3, $4))
+		  and ($3::text is null or r.report_key = $3)
+		  and ($4::text is null or r.source = $4)
+		  and ($5::timestamptz is null or r.created_at >= $5)
+		  and ($6::timestamptz is null or r.created_at < $6)
+		  and ($7::timestamptz is null or (r.created_at, r.id) < ($7, $8))
 		order by r.created_at desc, r.id desc
-		limit $5`, filter.TenantID, status, cursorTime, cursorID, filter.PageSize+1,
-		filter.Now, boundedEnvInt("REPORT_HOST_QUERY_CONCURRENCY", 2, 1, 16), max(1, boundedEnvInt("REPORT_GLOBAL_QUERY_CONCURRENCY", 4, 1, 32)-1))
+		limit $9`, filter.TenantID, status, reportKey, source, filter.CreatedFrom, filter.CreatedTo,
+		cursorTime, cursorID, filter.PageSize+1, filter.Now,
+		boundedEnvInt("REPORT_HOST_QUERY_CONCURRENCY", 2, 1, 16), max(1, boundedEnvInt("REPORT_GLOBAL_QUERY_CONCURRENCY", 4, 1, 32)-1))
 	if err != nil {
 		return operations.ReportRunPage{}, fmt.Errorf("list admin report runs: %w", err)
 	}
@@ -179,6 +193,11 @@ func (store *OperationsStore) ListDeliveries(ctx context.Context, filter operati
 	if err != nil {
 		return operations.DeliveryPage{}, err
 	}
+	var status *string
+	if filter.Status != nil {
+		value := string(*filter.Status)
+		status = &value
+	}
 	rows, err := store.pool.Query(ctx, `
 		select delivery.id, delivery.tenant_id, tenant.name,
 		       recipient.id, recipient.line_user_id_hash,
@@ -195,9 +214,13 @@ func (store *OperationsStore) ListDeliveries(ctx context.Context, filter operati
 		  where linked.notification_run_id = delivery.notification_run_id
 		) actual_reports on true
 		where ($1::uuid is null or delivery.tenant_id = $1)
-		  and ($2::timestamptz is null or (delivery.created_at, delivery.id) < ($2, $3))
+		  and ($2::text is null or delivery.status = $2)
+		  and ($3::uuid is null or delivery.recipient_id = $3)
+		  and ($4::timestamptz is null or delivery.created_at >= $4)
+		  and ($5::timestamptz is null or delivery.created_at < $5)
+		  and ($6::timestamptz is null or (delivery.created_at, delivery.id) < ($6, $7))
 		order by delivery.created_at desc, delivery.id desc
-		limit $4`, filter.TenantID, cursorTime, cursorID, filter.PageSize+1)
+		limit $8`, filter.TenantID, status, filter.RecipientID, filter.CreatedFrom, filter.CreatedTo, cursorTime, cursorID, filter.PageSize+1)
 	if err != nil {
 		return operations.DeliveryPage{}, fmt.Errorf("list LINE deliveries: %w", err)
 	}
@@ -250,9 +273,14 @@ func (store *OperationsStore) ListAudit(ctx context.Context, filter operations.A
 		from audit_logs audit
 		left join tenants tenant on tenant.id = audit.tenant_id
 		where ($1::uuid is null or audit.tenant_id = $1)
-		  and ($2::timestamptz is null or (audit.created_at, audit.id) < ($2, $3))
+		  and ($2::text is null or audit.actor_type = $2)
+		  and ($3::text is null or audit.action = $3)
+		  and ($4::text is null or audit.result = $4)
+		  and ($5::timestamptz is null or audit.created_at >= $5)
+		  and ($6::timestamptz is null or audit.created_at < $6)
+		  and ($7::timestamptz is null or (audit.created_at, audit.id) < ($7, $8))
 		order by audit.created_at desc, audit.id desc
-		limit $4`, filter.TenantID, cursorTime, cursorID, filter.PageSize+1)
+		limit $9`, filter.TenantID, filter.ActorType, filter.Action, filter.Result, filter.CreatedFrom, filter.CreatedTo, cursorTime, cursorID, filter.PageSize+1)
 	if err != nil {
 		return operations.AuditPage{}, fmt.Errorf("list audit events: %w", err)
 	}

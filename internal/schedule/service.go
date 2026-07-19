@@ -78,9 +78,18 @@ type Page struct {
 	HasMore    bool
 }
 
+type ListFilter struct {
+	TenantID        uuid.UUID
+	PageSize        int
+	Cursor          string
+	IncludeArchived bool
+	Status          *Status
+	Search          string
+}
+
 type Store interface {
 	Create(context.Context, []byte, string, string, uuid.UUID, Input, time.Time) (Schedule, error)
-	List(context.Context, uuid.UUID, int, string, bool) (Page, error)
+	List(context.Context, ListFilter) (Page, error)
 	Get(context.Context, uuid.UUID, uuid.UUID) (Schedule, error)
 	Update(context.Context, []byte, string, uuid.UUID, uuid.UUID, Input, int, time.Time) (Schedule, error)
 	Readiness(context.Context, uuid.UUID, []uuid.UUID, time.Time) (map[uuid.UUID][]string, error)
@@ -238,18 +247,32 @@ func (service *Service) Create(ctx context.Context, actorHash []byte, requestID,
 	return service.hydrate(ctx, created)
 }
 
-func (service *Service) List(ctx context.Context, tenantID uuid.UUID, pageSize int, cursor string, includeArchived bool) (Page, error) {
-	if pageSize == 0 {
-		pageSize = 25
+func (service *Service) List(ctx context.Context, filter ListFilter) (Page, error) {
+	if filter.PageSize == 0 {
+		filter.PageSize = 25
 	}
-	if pageSize < 1 || pageSize > 100 {
+	filter.Search = strings.TrimSpace(filter.Search)
+	if filter.TenantID == uuid.Nil {
+		return Page{}, &ValidationError{Field: "tenantId", Code: "INVALID_ID"}
+	}
+	if filter.PageSize < 1 || filter.PageSize > 100 {
 		return Page{}, &ValidationError{Field: "pageSize", Code: "INVALID_PAGE_SIZE"}
 	}
-	page, err := service.store.List(ctx, tenantID, pageSize, cursor, includeArchived)
+	if len(filter.Search) > 160 {
+		return Page{}, &ValidationError{Field: "search", Code: "INVALID_SEARCH"}
+	}
+	if filter.Status != nil {
+		switch *filter.Status {
+		case StatusDraft, StatusActive, StatusPaused, StatusExpired, StatusArchived:
+		default:
+			return Page{}, &ValidationError{Field: "status", Code: "INVALID_STATUS"}
+		}
+	}
+	page, err := service.store.List(ctx, filter)
 	if err != nil {
 		return Page{}, err
 	}
-	items, err := service.hydrateMany(ctx, tenantID, page.Data)
+	items, err := service.hydrateMany(ctx, filter.TenantID, page.Data)
 	if err != nil {
 		return Page{}, err
 	}

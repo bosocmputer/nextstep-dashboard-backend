@@ -115,11 +115,11 @@ func (store *ScheduleStore) Create(ctx context.Context, actorHash []byte, reques
 	return created, nil
 }
 
-func (store *ScheduleStore) List(ctx context.Context, tenantID uuid.UUID, pageSize int, cursor string, includeArchived bool) (schedule.Page, error) {
+func (store *ScheduleStore) List(ctx context.Context, filter schedule.ListFilter) (schedule.Page, error) {
 	var cursorTime *time.Time
 	var cursorID *uuid.UUID
-	if cursor != "" {
-		valueTime, valueID, err := decodeTenantCursor(cursor)
+	if filter.Cursor != "" {
+		valueTime, valueID, err := decodeTenantCursor(filter.Cursor)
 		if err != nil {
 			return schedule.Page{}, &schedule.ValidationError{Field: "cursor", Code: "INVALID_CURSOR"}
 		}
@@ -130,14 +130,16 @@ func (store *ScheduleStore) List(ctx context.Context, tenantID uuid.UUID, pageSi
 		from notification_schedules s
 		where s.tenant_id = $1
 		  and ($4 or s.status <> 'ARCHIVED')
+		  and ($5::text is null or s.status = $5)
+		  and ($6::text = '' or strpos(lower(s.name), lower($6)) > 0)
 		  and ($2::timestamptz is null or (s.updated_at, s.id) < ($2, $3))
 		order by s.updated_at desc, s.id desc
-		limit $5`, tenantID, cursorTime, cursorID, includeArchived, pageSize+1)
+		limit $7`, filter.TenantID, cursorTime, cursorID, filter.IncludeArchived, filter.Status, filter.Search, filter.PageSize+1)
 	if err != nil {
 		return schedule.Page{}, fmt.Errorf("list schedules: %w", err)
 	}
 	defer rows.Close()
-	items := make([]schedule.Schedule, 0, pageSize+1)
+	items := make([]schedule.Schedule, 0, filter.PageSize+1)
 	for rows.Next() {
 		item, err := scanSchedule(rows)
 		if err != nil {
@@ -148,9 +150,9 @@ func (store *ScheduleStore) List(ctx context.Context, tenantID uuid.UUID, pageSi
 	if err := rows.Err(); err != nil {
 		return schedule.Page{}, fmt.Errorf("iterate schedules: %w", err)
 	}
-	hasMore := len(items) > pageSize
+	hasMore := len(items) > filter.PageSize
 	if hasMore {
-		items = items[:pageSize]
+		items = items[:filter.PageSize]
 	}
 	nextCursor := ""
 	if hasMore && len(items) > 0 {

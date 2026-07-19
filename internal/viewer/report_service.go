@@ -30,6 +30,7 @@ type ViewerRunStore interface {
 	GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) (DashboardRefresh, error)
 	GetDashboardRefreshResult(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (DashboardRefreshResult, error)
 	ListRows(context.Context, uuid.UUID, int, int, time.Time) (report.RowsPage, error)
+	QueryRows(context.Context, uuid.UUID, report.RowsQueryInput, time.Time) (report.RowsQueryPage, error)
 	Cancel(context.Context, uuid.UUID, time.Time) (report.Run, error)
 }
 
@@ -81,6 +82,15 @@ type ReportRows struct {
 	Rows       []map[string]string
 	NextCursor string
 	HasMore    bool
+}
+
+type ReportRowsQuery struct {
+	RunID    uuid.UUID
+	Columns  []string
+	Rows     []map[string]string
+	Page     int
+	PageSize int
+	Total    int
 }
 
 type ReportService struct {
@@ -399,6 +409,34 @@ func (service *ReportService) ListRows(ctx context.Context, recipientID, tenantI
 		nextCursor = encodeReportCursor(page.NextOrdinal)
 	}
 	return ReportRows{RunID: runID, Columns: orderedColumns, Rows: page.Rows, NextCursor: nextCursor, HasMore: page.HasMore}, nil
+}
+
+func (service *ReportService) QueryRows(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID, input report.RowsQueryInput) (ReportRowsQuery, error) {
+	if input.Page < 0 || input.Page > 200_000 || input.PageSize < 1 || input.PageSize > 100 || len(input.Filters) > 5 {
+		return ReportRowsQuery{}, ErrReportInputInvalid
+	}
+	if _, err := service.Get(ctx, recipientID, tenantID, reportKey, runID); err != nil {
+		return ReportRowsQuery{}, err
+	}
+	if err := validateReportRowFilters(reportKey, input.Filters); err != nil {
+		return ReportRowsQuery{}, err
+	}
+	page, err := service.store.QueryRows(ctx, runID, input, service.now().UTC())
+	if err != nil {
+		return ReportRowsQuery{}, err
+	}
+	columns := make(map[string]struct{})
+	for _, row := range page.Rows {
+		for column := range row {
+			columns[column] = struct{}{}
+		}
+	}
+	orderedColumns := make([]string, 0, len(columns))
+	for column := range columns {
+		orderedColumns = append(orderedColumns, column)
+	}
+	sort.Strings(orderedColumns)
+	return ReportRowsQuery{RunID: runID, Columns: orderedColumns, Rows: page.Rows, Page: page.Page, PageSize: page.PageSize, Total: page.Total}, nil
 }
 
 func (service *ReportService) GetDashboard(ctx context.Context, recipientID, tenantID uuid.UUID, reportKey report.Key, runID uuid.UUID) (report.Dashboard, error) {

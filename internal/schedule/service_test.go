@@ -27,8 +27,8 @@ func (store *memoryScheduleStore) Create(_ context.Context, _ []byte, _, _ strin
 	return store.item, nil
 }
 
-func (store *memoryScheduleStore) List(_ context.Context, _ uuid.UUID, _ int, _ string, includeArchived bool) (Page, error) {
-	store.listedArchived = includeArchived
+func (store *memoryScheduleStore) List(_ context.Context, filter ListFilter) (Page, error) {
+	store.listedArchived = filter.IncludeArchived
 	return Page{Data: []Schedule{store.item}}, nil
 }
 
@@ -164,7 +164,7 @@ func TestHydrationReturnsEmptyReadinessBlockersAsArray(t *testing.T) {
 		t.Fatalf("Create().ReadinessBlockers = %#v, want non-nil empty slice", created.ReadinessBlockers)
 	}
 
-	page, err := service.List(context.Background(), created.TenantID, 25, "", false)
+	page, err := service.List(context.Background(), ListFilter{TenantID: created.TenantID, PageSize: 25})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -192,7 +192,7 @@ func TestArchiveAndRestoreUseVersionAndArchivedHydration(t *testing.T) {
 	if err != nil || !store.restored || restored.Status != StatusDraft || restored.ArchivedAt != nil {
 		t.Fatalf("Restore() = %+v err=%v", restored, err)
 	}
-	if _, err := service.List(context.Background(), created.TenantID, 25, "", true); err != nil || !store.listedArchived {
+	if _, err := service.List(context.Background(), ListFilter{TenantID: created.TenantID, PageSize: 25, IncludeArchived: true}); err != nil || !store.listedArchived {
 		t.Fatalf("List(includeArchived) err=%v listed=%v", err, store.listedArchived)
 	}
 }

@@ -19,11 +19,32 @@ type RecipientAPI interface {
 	GetForTenant(context.Context, uuid.UUID, uuid.UUID) (recipient.Recipient, error)
 	PermissionDependencies(context.Context, uuid.UUID, uuid.UUID) (recipient.PermissionDependencies, error)
 	ScheduleRecipientOptions(context.Context, uuid.UUID, recipient.ScheduleRecipientOptionsInput) (recipient.ScheduleRecipientOptions, error)
+	Query(context.Context, uuid.UUID, recipient.QueryInput) (recipient.QueryResult, error)
 	ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, int) (recipient.Recipient, error)
 	Revoke(context.Context, []byte, string, uuid.UUID, uuid.UUID) error
 }
 
 func registerRecipientRoutes(router chi.Router, adminAuth AdminAuthenticator, recipients RecipientAPI) {
+	router.Post("/api/v1/admin/tenants/{tenantId}/recipients/query", func(response http.ResponseWriter, request *http.Request) {
+		if _, ok := operationalAdmin(response, request, adminAuth, true); !ok {
+			return
+		}
+		tenantID, ok := parseTenantID(response, request)
+		if !ok {
+			return
+		}
+		var input recipient.QueryInput
+		if err := decodeJSON(response, request, &input); err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Recipient query is invalid.", false)
+			return
+		}
+		result, err := recipients.Query(request.Context(), tenantID, input)
+		if handleRecipientError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, result)
+	})
+
 	router.Post("/api/v1/admin/tenants/{tenantId}/schedule-recipient-options/query", func(response http.ResponseWriter, request *http.Request) {
 		if _, ok := operationalAdmin(response, request, adminAuth, false); !ok {
 			return

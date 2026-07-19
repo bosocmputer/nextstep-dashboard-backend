@@ -141,6 +141,35 @@ type RowsPage struct {
 	HasMore     bool
 }
 
+type RowFilterOperator string
+
+const (
+	RowFilterContains RowFilterOperator = "CONTAINS"
+	RowFilterEquals   RowFilterOperator = "EQUALS"
+	RowFilterGTE      RowFilterOperator = "GTE"
+	RowFilterLTE      RowFilterOperator = "LTE"
+)
+
+type RowFilter struct {
+	ColumnKey string            `json:"columnKey"`
+	Operator  RowFilterOperator `json:"operator"`
+	Value     string            `json:"value"`
+	ValueType string            `json:"valueType,omitempty"`
+}
+
+type RowsQueryInput struct {
+	Filters  []RowFilter `json:"filters"`
+	Page     int         `json:"page"`
+	PageSize int         `json:"pageSize"`
+}
+
+type RowsQueryPage struct {
+	Rows     []map[string]string
+	Page     int
+	PageSize int
+	Total    int
+}
+
 type ChunkManifest struct {
 	Number     int
 	Key        string

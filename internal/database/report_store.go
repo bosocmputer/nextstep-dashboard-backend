@@ -1727,6 +1727,87 @@ func (store *ReportStore) ListRows(ctx context.Context, runID uuid.UUID, afterOr
 	return page, nil
 }
 
+func (store *ReportStore) QueryRows(ctx context.Context, runID uuid.UUID, input report.RowsQueryInput, now time.Time) (report.RowsQueryPage, error) {
+	if input.Page < 0 || input.Page > 200_000 || input.PageSize < 1 || input.PageSize > 100 || len(input.Filters) > 5 {
+		return report.RowsQueryPage{}, errors.New("invalid report row query")
+	}
+	var status report.RunStatus
+	var expiresAt time.Time
+	if err := store.pool.QueryRow(ctx, `select status, expires_at from report_runs where id = $1`, runID).Scan(&status, &expiresAt); errors.Is(err, pgx.ErrNoRows) {
+		return report.RowsQueryPage{}, report.ErrRunNotFound
+	} else if err != nil {
+		return report.RowsQueryPage{}, fmt.Errorf("read report row query status: %w", err)
+	}
+	if status == report.StatusExpired || !expiresAt.After(now) {
+		return report.RowsQueryPage{}, report.ErrRunRowsExpired
+	}
+	if status != report.StatusSucceeded {
+		return report.RowsQueryPage{}, report.ErrRunNotFound
+	}
+	filtersJSON, err := json.Marshal(input.Filters)
+	if err != nil {
+		return report.RowsQueryPage{}, fmt.Errorf("encode report row filters: %w", err)
+	}
+	rows, err := store.pool.Query(ctx, `
+		with filtered as (
+		  select stored.ordinal, stored.row_json
+		  from report_run_rows stored
+		  where stored.run_id = $1
+		    and not exists (
+		      select 1
+		      from jsonb_array_elements($2::jsonb) selected
+		      where not case selected ->> 'operator'
+		        when 'CONTAINS' then strpos(lower(coalesce(stored.row_json ->> (selected ->> 'columnKey'), '')), lower(selected ->> 'value')) > 0
+		        when 'EQUALS' then case
+		          when selected ->> 'valueType' = 'NUMBER' then
+		            coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') ~ $numeric$^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$numeric$
+		            and (stored.row_json ->> (selected ->> 'columnKey'))::numeric = (selected ->> 'value')::numeric
+		          else coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') = selected ->> 'value'
+		        end
+		        when 'GTE' then case
+		          when selected ->> 'valueType' = 'NUMBER' and coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') ~ $numeric$^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$numeric$
+		            and (selected ->> 'value') ~ $numeric$^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$numeric$
+		          then (stored.row_json ->> (selected ->> 'columnKey'))::numeric >= (selected ->> 'value')::numeric
+		          when selected ->> 'valueType' = 'NUMBER' then false
+		          else coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') >= selected ->> 'value'
+		        end
+		        when 'LTE' then case
+		          when selected ->> 'valueType' = 'NUMBER' and coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') ~ $numeric$^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$numeric$
+		            and (selected ->> 'value') ~ $numeric$^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$numeric$
+		          then (stored.row_json ->> (selected ->> 'columnKey'))::numeric <= (selected ->> 'value')::numeric
+		          when selected ->> 'valueType' = 'NUMBER' then false
+		          else coalesce(stored.row_json ->> (selected ->> 'columnKey'), '') <= selected ->> 'value'
+		        end
+		        else false
+		      end
+		    )
+		)
+		select row_json, count(*) over()
+		from filtered
+		order by ordinal
+		offset $3 limit $4`, runID, filtersJSON, input.Page*input.PageSize, input.PageSize)
+	if err != nil {
+		return report.RowsQueryPage{}, fmt.Errorf("query report rows: %w", err)
+	}
+	defer rows.Close()
+	page := report.RowsQueryPage{Rows: make([]map[string]string, 0, input.PageSize), Page: input.Page, PageSize: input.PageSize}
+	for rows.Next() {
+		var rowJSON []byte
+		if err := rows.Scan(&rowJSON, &page.Total); err != nil {
+			return report.RowsQueryPage{}, fmt.Errorf("scan queried report row: %w", err)
+		}
+		var row map[string]string
+		if err := json.Unmarshal(rowJSON, &row); err != nil {
+			return report.RowsQueryPage{}, fmt.Errorf("decode queried report row: %w", err)
+		}
+		page.Rows = append(page.Rows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return report.RowsQueryPage{}, fmt.Errorf("iterate queried report rows: %w", err)
+	}
+	return page, nil
+}
+
 func findRunByIdempotency(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, source report.Source, idempotencyKey string, now time.Time) (report.Run, error) {
 	run, err := scanReportRun(tx.QueryRow(ctx, `
 		select `+reportRunColumns+` from report_runs

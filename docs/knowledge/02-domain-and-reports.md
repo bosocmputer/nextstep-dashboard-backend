@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-15
+last_verified: 2026-07-19
 source_of_truth: [internal/report/catalog.go, internal/tenant/model.go, internal/schedule/service.go, api/openapi.yaml]
 tags: [backend, domain, reports]
 ---
@@ -59,3 +59,7 @@ The catalog owns labels, version, status, selection policy, period mode, metrics
 - Active schedules cannot depend on permissions that are removed concurrently.
 - Deprecated report keys remain readable for existing configuration but cannot be newly selected.
 - Audit records operational actions without copying business output.
+- Recipient query pages search at most the supported 500-recipient tenant set,
+  return an exact filtered total, and preserve identifier/display-name values.
+- Schedule listing accepts bounded name/status/archive filters before cursor
+  pagination; report and recipient eligibility rules are unchanged.

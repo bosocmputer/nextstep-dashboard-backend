@@ -17,6 +17,7 @@ type fakeRecipientAPI struct {
 	revokeErr    error
 	revokeCalls  int
 	reissueCalls int
+	queryInput   recipient.QueryInput
 }
 
 func (fake *fakeRecipientAPI) CreateInvitation(context.Context, []byte, string, string, uuid.UUID, string) (recipient.Recipient, error) {
@@ -42,6 +43,26 @@ func (fake *fakeRecipientAPI) PermissionDependencies(context.Context, uuid.UUID,
 
 func (fake *fakeRecipientAPI) ScheduleRecipientOptions(context.Context, uuid.UUID, recipient.ScheduleRecipientOptionsInput) (recipient.ScheduleRecipientOptions, error) {
 	return recipient.ScheduleRecipientOptions{Data: []recipient.ScheduleRecipientOption{}}, nil
+}
+
+func (fake *fakeRecipientAPI) Query(_ context.Context, _ uuid.UUID, input recipient.QueryInput) (recipient.QueryResult, error) {
+	fake.queryInput = input
+	return recipient.QueryResult{Data: []recipient.Recipient{fake.item}, Page: input.Page, PageSize: input.PageSize, Total: 1}, nil
+}
+
+func TestAdminQueriesRecipientsWithExactPaginationAndFilters(t *testing.T) {
+	tenantID := uuid.New()
+	api := &fakeRecipientAPI{item: recipient.Recipient{ID: uuid.New(), DisplayName: "ผู้บริหาร"}}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: &fakeAdminAuth{}, Recipients: api})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/tenants/"+tenantID.String()+"/recipients/query", strings.NewReader(`{"search":"ผู้","status":"ACTIVE","permissionState":"WITH_REPORTS","page":2,"pageSize":25}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", "admin-csrf")
+	request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "admin-session"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || api.queryInput.Page != 2 || api.queryInput.PageSize != 25 || api.queryInput.Status != recipient.StatusActive || api.queryInput.PermissionState != "WITH_REPORTS" || !strings.Contains(response.Body.String(), `"total":1`) {
+		t.Fatalf("status=%d input=%+v body=%s", response.Code, api.queryInput, response.Body.String())
+	}
 }
 
 func (fake *fakeRecipientAPI) ReplacePermissions(context.Context, []byte, string, uuid.UUID, uuid.UUID, []report.Key, int) (recipient.Recipient, error) {

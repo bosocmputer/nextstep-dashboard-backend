@@ -217,6 +217,7 @@ type ViewerReportAPI interface {
 	GetDashboardRefresh(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefresh, error)
 	GetDashboardRefreshResult(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (viewer.DashboardRefreshResult, error)
 	ListRows(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID, string, int) (viewer.ReportRows, error)
+	QueryRows(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID, report.RowsQueryInput) (viewer.ReportRowsQuery, error)
 	Cancel(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Run, error)
 	ExactSnapshot(context.Context, uuid.UUID, uuid.UUID, report.Key, viewer.CreateReportRunInput) (viewer.DashboardSnapshot, error)
 	Revalidate(context.Context, uuid.UUID, uuid.UUID, report.Key, viewer.CreateReportRunInput) (viewer.ReportRevalidation, error)
