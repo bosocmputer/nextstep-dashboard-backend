@@ -1,7 +1,7 @@
 ---
 status: current
 last_verified: 2026-07-19
-source_of_truth: [internal/report/catalog.go, internal/tenant/model.go, internal/schedule/service.go, api/openapi.yaml]
+source_of_truth: [internal/report/catalog.go, internal/tenant/model.go, internal/schedule/service.go, internal/tablequery/service.go, api/openapi.yaml]
 tags: [backend, domain, reports]
 ---
 
@@ -62,4 +62,7 @@ The catalog owns labels, version, status, selection policy, period mode, metrics
 - Recipient query pages search at most the supported 500-recipient tenant set,
   return an exact filtered total, and preserve identifier/display-name values.
 - Schedule listing accepts bounded name/status/archive filters before exact-page
-  pagination; report and recipient eligibility rules are unchanged.
+  pagination; report and recipient eligibility rules are unchanged. Required
+  schedule collections such as readiness blockers and next occurrences are
+  serialized as empty arrays rather than `null`, including ready and archived
+  rows.

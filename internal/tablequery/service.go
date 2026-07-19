@@ -43,7 +43,11 @@ func (service *Service) QuerySchedules(ctx context.Context, tenantID uuid.UUID, 
 		return SchedulesResult{}, err
 	}
 	for index := range items {
+		if items[index].ReadinessBlockers == nil {
+			items[index].ReadinessBlockers = []string{}
+		}
 		if items[index].Status == schedule.StatusArchived {
+			items[index].NextOccurrences = []time.Time{}
 			continue
 		}
 		if !service.lineReady {
