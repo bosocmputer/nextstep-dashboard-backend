@@ -123,7 +123,7 @@ func TestScheduleStoreLifecycleAndReadinessGates(t *testing.T) {
 	if err != nil || paused.Status != schedule.StatusPaused {
 		t.Fatalf("Pause() = %+v, %v", paused, err)
 	}
-	page, err := store.List(ctx, tenantID, 25, "", false)
+	page, err := store.List(ctx, schedule.ListFilter{TenantID: tenantID, PageSize: 25})
 	if err != nil || len(page.Data) != 1 || page.Data[0].ID != created.ID {
 		t.Fatalf("List() = %+v, %v", page, err)
 	}
@@ -131,11 +131,11 @@ func TestScheduleStoreLifecycleAndReadinessGates(t *testing.T) {
 	if err != nil || archived.Status != schedule.StatusArchived || archived.ArchivedAt == nil {
 		t.Fatalf("Archive() = %+v, %v", archived, err)
 	}
-	page, err = store.List(ctx, tenantID, 25, "", false)
+	page, err = store.List(ctx, schedule.ListFilter{TenantID: tenantID, PageSize: 25})
 	if err != nil || len(page.Data) != 0 {
 		t.Fatalf("default List() includes archived schedule: %+v, %v", page, err)
 	}
-	page, err = store.List(ctx, tenantID, 25, "", true)
+	page, err = store.List(ctx, schedule.ListFilter{TenantID: tenantID, PageSize: 25, IncludeArchived: true})
 	if err != nil || len(page.Data) != 1 || page.Data[0].Status != schedule.StatusArchived {
 		t.Fatalf("List(includeArchived) = %+v, %v", page, err)
 	}

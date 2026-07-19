@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-17
+last_verified: 2026-07-19
 source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/database/schedule_execution_store.go, internal/notification/worker.go, internal/delivery/worker.go, internal/failure/catalog.go]
 tags: [backend, reports, queue, line]
 ---
@@ -65,3 +65,7 @@ that an old or test occurrence was a scheduled customer delivery.
 - Fresh cache produces no JavaWS call.
 - Revalidation and generation-cache behavior is feature-flagged; inspect configuration before asserting it is active.
 - Delivery context always uses the report runs attached to that immutable occurrence and never revalidates automatically.
+- Viewer report tables can filter and exact-page existing `report_run_rows` by
+  catalog-approved text, identifier, date, or number columns. The query reads
+  only an authorized succeeded run before row expiry, keeps identifiers exact,
+  supports PostgreSQL scientific numeric strings, and never starts SML work.

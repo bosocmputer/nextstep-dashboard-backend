@@ -139,6 +139,26 @@ func TestServiceReturnsEmptyReportKeyArraysForNewRecipients(t *testing.T) {
 	}
 }
 
+func TestServiceQueriesEncryptedRecipientNamesWithExactPagination(t *testing.T) {
+	now := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 12)))
+	tokens, _ := auth.NewSessionManager(bytes.Repeat([]byte{3}, 32), bytes.NewReader(nil), func() time.Time { return now })
+	store := &memoryRecipientStore{}
+	service := NewService(store, box, tokens, bytes.NewReader(bytes.Repeat([]byte{4}, 32)), "https://dashboard.nextstep-soft.com", func() time.Time { return now })
+	tenantID := uuid.New()
+	if _, err := service.CreateInvitation(context.Background(), []byte("admin"), "request-1", "recipient-query-test", tenantID, "ผู้บริหารร้าน"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Query(context.Background(), tenantID, QueryInput{Search: "บริหาร", Status: StatusPending, PermissionState: "WITHOUT_REPORTS", Page: 0, PageSize: 25})
+	if err != nil || result.Total != 1 || len(result.Data) != 1 || result.Data[0].DisplayName != "ผู้บริหารร้าน" {
+		t.Fatalf("Query() = %+v, %v", result, err)
+	}
+	empty, err := service.Query(context.Background(), tenantID, QueryInput{Status: StatusActive, Page: 0, PageSize: 25})
+	if err != nil || empty.Total != 0 || len(empty.Data) != 0 {
+		t.Fatalf("active Query() = %+v, %v", empty, err)
+	}
+}
+
 func TestServiceReissuesPendingInvitationAndInvalidatesPreviousReference(t *testing.T) {
 	now := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
 	box, _ := secret.NewBox(bytes.Repeat([]byte{1}, 32), "key-1", bytes.NewReader(bytes.Repeat([]byte{2}, 60)))

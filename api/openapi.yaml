@@ -315,6 +315,25 @@ paths:
               schema: {$ref: '#/components/schemas/Recipient'}
         '409': {$ref: '#/components/responses/Conflict'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/tenants/{tenantId}/recipients/query:
+    post:
+      tags: [Admin configuration]
+      operationId: queryRecipients
+      description: Searches the bounded encrypted recipient set and returns an exact page without exposing encrypted fields.
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/TenantID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecipientQueryInput'}
+      responses:
+        '200':
+          description: Exact recipient query page.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RecipientQueryResult'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/tenants/{tenantId}/recipients/{recipientId}/permissions:
     put:
       tags: [Admin configuration]
@@ -424,6 +443,8 @@ paths:
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/PageSize'}
         - {name: includeArchived, in: query, schema: {type: boolean, default: false}, description: Include soft-deleted schedules retained for audit history.}
+        - {name: status, in: query, schema: {type: string, enum: [DRAFT, ACTIVE, PAUSED, EXPIRED, ARCHIVED]}}
+        - {name: search, in: query, schema: {type: string, maxLength: 160}, description: Case-insensitive schedule name search.}
       responses:
         '200':
           description: Tenant schedules.
@@ -1029,6 +1050,30 @@ paths:
               schema: {$ref: '#/components/schemas/ReportRowPage'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '410': {$ref: '#/components/responses/Gone'}
+  /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}/rows/query:
+    post:
+      tags: [Viewer]
+      operationId: queryViewerReportRows
+      description: Filters and page-navigates stored rows from an existing run. This endpoint never contacts SML or starts a report run.
+      security: [{ViewerSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/ReportKey'}
+        - {$ref: '#/components/parameters/RunID'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReportRowQueryInput'}
+      responses:
+        '200':
+          description: Exact page of stored report rows matching typed filters.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportRowQueryPage'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '410': {$ref: '#/components/responses/Gone'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/viewer/tenants/{tenantId}/reports/{reportKey}/runs/{runId}/cancel:
     post:
       tags: [Viewer]
@@ -1335,6 +1380,26 @@ components:
       properties:
         data: {type: array, items: {$ref: '#/components/schemas/Recipient'}}
         page: {$ref: '#/components/schemas/PageInfo'}
+    RecipientQueryInput:
+      type: object
+      additionalProperties: false
+      required: [search, page, pageSize]
+      properties:
+        search: {type: string, maxLength: 160}
+        status: {type: string, enum: [PENDING, ACTIVE]}
+        permissionState: {type: string, enum: [WITH_REPORTS, WITHOUT_REPORTS]}
+        page: {type: integer, minimum: 0}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+    RecipientQueryResult:
+      type: object
+      additionalProperties: false
+      required: [data, page, pageSize, total, hasMore]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Recipient'}}
+        page: {type: integer, minimum: 0}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0, maximum: 500}
+        hasMore: {type: boolean}
     PermissionUpdate:
       type: object
       additionalProperties: false
@@ -1682,6 +1747,33 @@ components:
         columns: {type: array, items: {type: string}}
         data: {type: array, items: {type: object, additionalProperties: true}}
         page: {$ref: '#/components/schemas/PageInfo'}
+    ReportRowFilter:
+      type: object
+      additionalProperties: false
+      required: [columnKey, operator, value]
+      properties:
+        columnKey: {type: string, pattern: '^[a-z][a-z0-9_]*$', maxLength: 80}
+        operator: {type: string, enum: [CONTAINS, EQUALS, GTE, LTE]}
+        value: {type: string, minLength: 1, maxLength: 160}
+    ReportRowQueryInput:
+      type: object
+      additionalProperties: false
+      required: [filters, page, pageSize]
+      properties:
+        filters: {type: array, maxItems: 5, items: {$ref: '#/components/schemas/ReportRowFilter'}}
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+    ReportRowQueryPage:
+      type: object
+      additionalProperties: false
+      required: [runId, columns, data, page, pageSize, total]
+      properties:
+        runId: {type: string, format: uuid}
+        columns: {type: array, items: {type: string}}
+        data: {type: array, maxItems: 100, items: {type: object, additionalProperties: true}}
+        page: {type: integer, minimum: 0}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0, maximum: 200000}
     ReportPeriod:
       type: object
       additionalProperties: false

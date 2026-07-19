@@ -23,6 +23,7 @@ type fakeScheduleAPI struct {
 	archiveCall     int
 	restoreCall     int
 	includeArchived bool
+	listFilter      schedule.ListFilter
 }
 
 type fakeSchedulePreviewAPI struct {
@@ -52,8 +53,9 @@ func (fake *fakeScheduleAPI) Create(context.Context, []byte, string, string, uui
 	return fake.item, fake.createErr
 }
 
-func (fake *fakeScheduleAPI) List(_ context.Context, _ uuid.UUID, _ int, _ string, includeArchived bool) (schedule.Page, error) {
-	fake.includeArchived = includeArchived
+func (fake *fakeScheduleAPI) List(_ context.Context, filter schedule.ListFilter) (schedule.Page, error) {
+	fake.includeArchived = filter.IncludeArchived
+	fake.listFilter = filter
 	return schedule.Page{Data: []schedule.Schedule{fake.item}}, nil
 }
 
@@ -137,12 +139,12 @@ func TestAdminListsArchivesAndSupportsVersionedArchiveRestore(t *testing.T) {
 	api := &fakeScheduleAPI{item: schedule.Schedule{ID: scheduleID, TenantID: tenantID, Version: 3}}
 	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: &fakeAdminAuth{}, Schedules: api})
 
-	list := httptest.NewRequest(http.MethodGet, "/api/v1/admin/tenants/"+tenantID.String()+"/schedules?includeArchived=true", nil)
+	list := httptest.NewRequest(http.MethodGet, "/api/v1/admin/tenants/"+tenantID.String()+"/schedules?includeArchived=true&status=ACTIVE&search=morning", nil)
 	list.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "admin-session"})
 	listResponse := httptest.NewRecorder()
 	handler.ServeHTTP(listResponse, list)
-	if listResponse.Code != http.StatusOK || !api.includeArchived {
-		t.Fatalf("list status=%d includeArchived=%v body=%s", listResponse.Code, api.includeArchived, listResponse.Body.String())
+	if listResponse.Code != http.StatusOK || !api.includeArchived || api.listFilter.Status == nil || *api.listFilter.Status != schedule.StatusActive || api.listFilter.Search != "morning" {
+		t.Fatalf("list status=%d filter=%+v body=%s", listResponse.Code, api.listFilter, listResponse.Body.String())
 	}
 
 	for _, operation := range []struct {

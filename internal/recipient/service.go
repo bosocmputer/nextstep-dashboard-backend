@@ -113,6 +113,22 @@ type ScheduleRecipientOptions struct {
 	HasMore  bool                      `json:"hasMore"`
 }
 
+type QueryInput struct {
+	Search          string `json:"search"`
+	Status          Status `json:"status,omitempty"`
+	PermissionState string `json:"permissionState,omitempty"`
+	Page            int    `json:"page"`
+	PageSize        int    `json:"pageSize"`
+}
+
+type QueryResult struct {
+	Data     []Recipient `json:"data"`
+	Page     int         `json:"page"`
+	PageSize int         `json:"pageSize"`
+	Total    int         `json:"total"`
+	HasMore  bool        `json:"hasMore"`
+}
+
 type Page struct {
 	Stored     []StoredRecipient
 	NextCursor string
@@ -212,6 +228,48 @@ func (service *Service) ScheduleRecipientOptions(ctx context.Context, tenantID u
 		Data: filtered[start:end], Selected: selected, Page: input.Page, PageSize: input.PageSize,
 		Total: len(filtered), HasMore: end < len(filtered),
 	}, nil
+}
+
+func (service *Service) Query(ctx context.Context, tenantID uuid.UUID, input QueryInput) (QueryResult, error) {
+	if tenantID == uuid.Nil || input.Page < 0 || input.PageSize < 1 || input.PageSize > 100 || len(strings.TrimSpace(input.Search)) > 160 {
+		return QueryResult{}, ErrInvalidInput
+	}
+	if input.Status != "" && input.Status != StatusPending && input.Status != StatusActive {
+		return QueryResult{}, ErrInvalidInput
+	}
+	if input.PermissionState != "" && input.PermissionState != "WITH_REPORTS" && input.PermissionState != "WITHOUT_REPORTS" {
+		return QueryResult{}, ErrInvalidInput
+	}
+	stored, err := service.store.ListScheduleCandidates(ctx, tenantID, 501)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	if len(stored) > 500 {
+		return QueryResult{}, ErrInvalidInput
+	}
+	needle := strings.ToLower(strings.TrimSpace(input.Search))
+	filtered := make([]Recipient, 0, len(stored))
+	for _, item := range stored {
+		public, err := service.publicRecipient(item)
+		if err != nil {
+			return QueryResult{}, err
+		}
+		if input.Status != "" && public.Status != input.Status {
+			continue
+		}
+		if input.PermissionState == "WITH_REPORTS" && len(public.ReportKeys) == 0 {
+			continue
+		}
+		if input.PermissionState == "WITHOUT_REPORTS" && len(public.ReportKeys) > 0 {
+			continue
+		}
+		if needle == "" || strings.Contains(strings.ToLower(public.DisplayName), needle) {
+			filtered = append(filtered, public)
+		}
+	}
+	start := min(input.Page*input.PageSize, len(filtered))
+	end := min(start+input.PageSize, len(filtered))
+	return QueryResult{Data: filtered[start:end], Page: input.Page, PageSize: input.PageSize, Total: len(filtered), HasMore: end < len(filtered)}, nil
 }
 
 func (service *Service) Get(ctx context.Context, recipientID uuid.UUID) (Recipient, error) {

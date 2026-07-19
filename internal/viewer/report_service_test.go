@@ -63,6 +63,10 @@ func (fake *fakeViewerRunStore) ListRows(context.Context, uuid.UUID, int, int, t
 	return fake.rows, nil
 }
 
+func (fake *fakeViewerRunStore) QueryRows(_ context.Context, _ uuid.UUID, input report.RowsQueryInput, _ time.Time) (report.RowsQueryPage, error) {
+	return report.RowsQueryPage{Rows: fake.rows.Rows, Page: input.Page, PageSize: input.PageSize, Total: len(fake.rows.Rows)}, nil
+}
+
 func (fake *fakeViewerRunStore) GetDashboard(context.Context, uuid.UUID, uuid.UUID) (report.Dashboard, error) {
 	return fake.dashboard, nil
 }
@@ -226,6 +230,17 @@ func TestReportServiceBindsRunReadsAndCancellationToRequestingRecipient(t *testi
 	page, err := service.ListRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, "", 25)
 	if err != nil || len(page.Columns) != 2 || page.Columns[0] != "a" || page.Columns[1] != "z" {
 		t.Fatalf("ListRows() = %+v, %v", page, err)
+	}
+	queryPage, err := service.QueryRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, report.RowsQueryInput{
+		Filters: []report.RowFilter{{ColumnKey: "ic_code", Operator: report.RowFilterContains, Value: "001"}}, Page: 0, PageSize: 25,
+	})
+	if err != nil || queryPage.Total != 1 || len(queryPage.Rows) != 1 {
+		t.Fatalf("QueryRows() = %+v, %v", queryPage, err)
+	}
+	if _, err := service.QueryRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, report.RowsQueryInput{
+		Filters: []report.RowFilter{{ColumnKey: "unknown", Operator: report.RowFilterContains, Value: "x"}}, Page: 0, PageSize: 25,
+	}); !errors.Is(err, ErrReportInputInvalid) {
+		t.Fatalf("QueryRows(unknown column) error = %v", err)
 	}
 	if _, err := service.Cancel(context.Background(), recipientID, tenantID, report.StockBalance, runID); err != nil || !store.cancelled {
 		t.Fatalf("Cancel() error = %v cancelled=%v", err, store.cancelled)

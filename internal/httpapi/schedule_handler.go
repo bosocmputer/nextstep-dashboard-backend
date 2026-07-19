@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/line"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
@@ -16,7 +17,7 @@ import (
 
 type ScheduleAPI interface {
 	Create(context.Context, []byte, string, string, uuid.UUID, schedule.Input) (schedule.Schedule, error)
-	List(context.Context, uuid.UUID, int, string, bool) (schedule.Page, error)
+	List(context.Context, schedule.ListFilter) (schedule.Page, error)
 	Get(context.Context, uuid.UUID, uuid.UUID) (schedule.Schedule, error)
 	Update(context.Context, []byte, string, uuid.UUID, uuid.UUID, schedule.Input, int) (schedule.Schedule, error)
 	Activate(context.Context, []byte, string, uuid.UUID, uuid.UUID) (schedule.Schedule, error)
@@ -77,7 +78,26 @@ func registerScheduleRoutes(router chi.Router, adminAuth AdminAuthenticator, sch
 			}
 			includeArchived = value
 		}
-		page, err := schedules.List(request.Context(), tenantID, pageSize, request.URL.Query().Get("cursor"), includeArchived)
+		var status *schedule.Status
+		if raw := request.URL.Query().Get("status"); raw != "" {
+			value := schedule.Status(raw)
+			switch value {
+			case schedule.StatusDraft, schedule.StatusActive, schedule.StatusPaused, schedule.StatusExpired, schedule.StatusArchived:
+				status = &value
+			default:
+				writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Schedule status is invalid.", false)
+				return
+			}
+		}
+		search := strings.TrimSpace(request.URL.Query().Get("search"))
+		if len(search) > 160 {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Schedule search is too long.", false)
+			return
+		}
+		page, err := schedules.List(request.Context(), schedule.ListFilter{
+			TenantID: tenantID, PageSize: pageSize, Cursor: request.URL.Query().Get("cursor"),
+			IncludeArchived: includeArchived, Status: status, Search: search,
+		})
 		if handleScheduleError(response, request, err) {
 			return
 		}

@@ -64,6 +64,10 @@ func (fake *fakeViewerReportAPI) ListRows(context.Context, uuid.UUID, uuid.UUID,
 	return fake.rows, fake.rowsErr
 }
 
+func (fake *fakeViewerReportAPI) QueryRows(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ report.Key, _ uuid.UUID, input report.RowsQueryInput) (viewer.ReportRowsQuery, error) {
+	return viewer.ReportRowsQuery{RunID: fake.rows.RunID, Columns: fake.rows.Columns, Rows: fake.rows.Rows, Page: input.Page, PageSize: input.PageSize, Total: len(fake.rows.Rows)}, fake.rowsErr
+}
+
 func (fake *fakeViewerReportAPI) GetDashboard(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Dashboard, error) {
 	return fake.dashboard, fake.dashboardErr
 }
@@ -264,6 +268,22 @@ func TestViewerReportRowsMapExpiredDataToGone(t *testing.T) {
 
 	if response.Code != http.StatusGone || !strings.Contains(response.Body.String(), `"code":"REPORT_ROWS_EXPIRED"`) {
 		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestViewerQueriesStoredRowsWithoutStartingSMLWork(t *testing.T) {
+	recipientID, tenantID, runID := uuid.New(), uuid.New(), uuid.New()
+	reportAPI := &fakeViewerReportAPI{rows: viewer.ReportRows{RunID: runID, Columns: []string{"ic_code"}, Rows: []map[string]string{{"ic_code": "00123"}}}}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), ViewerAuth: &fakeViewerAPI{authenticated: viewer.AuthenticatedViewer{RecipientID: recipientID}}, ViewerReports: reportAPI})
+	path := "/api/v1/viewer/tenants/" + tenantID.String() + "/reports/stock_balance/runs/" + runID.String() + "/rows/query"
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"filters":[{"columnKey":"ic_code","operator":"CONTAINS","value":"001"}],"page":0,"pageSize":25}`))
+	request.AddCookie(&http.Cookie{Name: viewerSessionCookie, Value: "viewer-session"})
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", "viewer-csrf")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"total":1`) || !strings.Contains(response.Body.String(), `"ic_code":"00123"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
