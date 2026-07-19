@@ -41,6 +41,11 @@ tags: [backend, security, operations, retention]
 - Never deploy from these knowledge notes or assume a branch/image is live.
 - Verify current image digests, worker heartbeats, queue state, feature flags, and next schedules from the runtime before an operational change.
 - Migration changes require a backup and rollback/compatibility analysis.
+- Admin DataTable queries are read-only, CSRF-protected POST requests with typed
+  filter allowlists, fixed page sizes, a two-second database statement timeout,
+  and count/page reads from one repeatable-read snapshot. Viewer stored-row
+  queries use the same fail-closed pattern with a three-second timeout and never
+  invoke JavaWS, create a Report Run, or send LINE.
 - Release maintenance opens the external window before application mutation,
   records the internal window by an exact UUID, and suppresses PostgreSQL
   command tags so successful inserts cannot be misclassified as failures.

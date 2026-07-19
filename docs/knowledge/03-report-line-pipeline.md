@@ -68,4 +68,6 @@ that an old or test occurrence was a scheduled customer delivery.
 - Viewer report tables can filter and exact-page existing `report_run_rows` by
   catalog-approved text, identifier, date, or number columns. The query reads
   only an authorized succeeded run before row expiry, keeps identifiers exact,
-  supports PostgreSQL scientific numeric strings, and never starts SML work.
+  supports PostgreSQL scientific numeric strings, returns stable row ordinals,
+  and never starts SML work. Date ranges are inclusive in Bangkok business-date
+  semantics and Global Search is limited to catalog-approved columns.

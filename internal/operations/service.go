@@ -75,6 +75,11 @@ func failureSummary(run report.Run) *failure.Evidence {
 	return &returnEvidence
 }
 
+// SummarizeFailure builds a safe, presentation-ready failure summary without
+// exposing raw SML output. Table query endpoints share this exact behavior with
+// the legacy cursor endpoint.
+func SummarizeFailure(run report.Run) *failure.Evidence { return failureSummary(run) }
+
 func (service *Service) ListDeliveries(ctx context.Context, filter DeliveryFilter) (DeliveryPage, error) {
 	page, err := service.store.ListDeliveries(ctx, filter)
 	if err != nil {

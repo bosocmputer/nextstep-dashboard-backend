@@ -58,6 +58,10 @@ Sentinel monitor (independent process)
   parameterized database reads. Recipient name search decrypts only the bounded
   supported tenant set in the service. None enters the report queue or contacts
   customer JavaWS.
+- Admin table-query POSTs use resource-specific typed filter allowlists, exact
+  totals, stable ordering with an ID tie-breaker, and a read-only repeatable-read
+  transaction for count plus page data. They are CSRF-protected, `no-store`,
+  cancelled with the HTTP request, and bounded by a two-second statement timeout.
 
 ## Operational Evidence API
 

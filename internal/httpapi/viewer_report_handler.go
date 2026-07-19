@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -300,12 +301,15 @@ func registerViewerReportRoutes(router chi.Router, viewerAuth ViewerAPI, viewerR
 			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Report row query is invalid.", false)
 			return
 		}
-		page, err := viewerReports.QueryRows(request.Context(), authenticated.RecipientID, tenantID, reportKey, runID, input)
+		queryContext, cancel := context.WithTimeout(request.Context(), 3*time.Second)
+		defer cancel()
+		page, err := viewerReports.QueryRows(queryContext, authenticated.RecipientID, tenantID, reportKey, runID, input)
 		if handleViewerReportError(response, request, err) {
 			return
 		}
 		writeJSON(response, http.StatusOK, map[string]any{
 			"runId": page.RunID, "columns": page.Columns, "data": page.Rows,
+			"rowOrdinals": page.RowOrdinals, "filterCapabilities": page.FilterCapabilities,
 			"page": page.Page, "pageSize": page.PageSize, "total": page.Total,
 		})
 	})

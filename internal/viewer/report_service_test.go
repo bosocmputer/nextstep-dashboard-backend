@@ -3,6 +3,7 @@ package viewer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ func (fake *fakeViewerRunStore) ListRows(context.Context, uuid.UUID, int, int, t
 }
 
 func (fake *fakeViewerRunStore) QueryRows(_ context.Context, _ uuid.UUID, input report.RowsQueryInput, _ time.Time) (report.RowsQueryPage, error) {
-	return report.RowsQueryPage{Rows: fake.rows.Rows, Page: input.Page, PageSize: input.PageSize, Total: len(fake.rows.Rows)}, nil
+	return report.RowsQueryPage{Rows: fake.rows.Rows, RowOrdinals: []int{7}, Page: input.Page, PageSize: input.PageSize, Total: len(fake.rows.Rows)}, nil
 }
 
 func (fake *fakeViewerRunStore) GetDashboard(context.Context, uuid.UUID, uuid.UUID) (report.Dashboard, error) {
@@ -232,15 +233,36 @@ func TestReportServiceBindsRunReadsAndCancellationToRequestingRecipient(t *testi
 		t.Fatalf("ListRows() = %+v, %v", page, err)
 	}
 	queryPage, err := service.QueryRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, report.RowsQueryInput{
-		Filters: []report.RowFilter{{ColumnKey: "ic_code", Operator: report.RowFilterContains, Value: "001"}}, Page: 0, PageSize: 25,
+		GlobalSearch: "001",
+		Filters:      []report.RowFilter{{ColumnKey: "ic_code", Operator: report.RowFilterContains, Value: "001"}}, Page: 0, PageSize: 25,
 	})
-	if err != nil || queryPage.Total != 1 || len(queryPage.Rows) != 1 {
+	if err != nil || queryPage.Total != 1 || len(queryPage.Rows) != 1 || len(queryPage.RowOrdinals) != 1 || queryPage.RowOrdinals[0] != 7 {
 		t.Fatalf("QueryRows() = %+v, %v", queryPage, err)
+	}
+	if len(queryPage.FilterCapabilities) == 0 {
+		t.Fatal("QueryRows() did not return backend filter capabilities")
+	}
+	if _, err := service.QueryRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, report.RowsQueryInput{GlobalSearch: strings.Repeat("ร", 160), Page: 0, PageSize: 25}); err != nil {
+		t.Fatalf("QueryRows(160 Thai characters) error = %v", err)
+	}
+	if _, err := service.QueryRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, report.RowsQueryInput{GlobalSearch: strings.Repeat("ร", 161), Page: 0, PageSize: 25}); !errors.Is(err, ErrReportInputInvalid) {
+		t.Fatalf("QueryRows(161 Thai characters) error = %v, want ErrReportInputInvalid", err)
+	}
+	if _, err := service.QueryRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, report.RowsQueryInput{Page: 0, PageSize: 10}); !errors.Is(err, ErrReportInputInvalid) {
+		t.Fatalf("QueryRows(non-standard page size) error = %v, want ErrReportInputInvalid", err)
 	}
 	if _, err := service.QueryRows(context.Background(), recipientID, tenantID, report.StockBalance, runID, report.RowsQueryInput{
 		Filters: []report.RowFilter{{ColumnKey: "unknown", Operator: report.RowFilterContains, Value: "x"}}, Page: 0, PageSize: 25,
 	}); !errors.Is(err, ErrReportInputInvalid) {
 		t.Fatalf("QueryRows(unknown column) error = %v", err)
+	}
+	dateRange := []report.RowFilter{{ColumnKey: "doc_date", Operator: report.RowFilterBetween, Value: "2026-07-01", ValueTo: "2026-07-19"}}
+	if err := validateReportRowFilters(report.SalesGoodsServices, dateRange); err != nil {
+		t.Fatalf("validateReportRowFilters(date range) error = %v", err)
+	}
+	reversedDateRange := []report.RowFilter{{ColumnKey: "doc_date", Operator: report.RowFilterBetween, Value: "2026-07-19", ValueTo: "2026-07-01"}}
+	if err := validateReportRowFilters(report.SalesGoodsServices, reversedDateRange); !errors.Is(err, ErrReportInputInvalid) {
+		t.Fatalf("validateReportRowFilters(reversed date range) error = %v", err)
 	}
 	if _, err := service.Cancel(context.Background(), recipientID, tenantID, report.StockBalance, runID); err != nil || !store.cancelled {
 		t.Fatalf("Cancel() error = %v cancelled=%v", err, store.cancelled)

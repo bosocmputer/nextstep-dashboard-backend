@@ -2,7 +2,9 @@ package viewer
 
 import (
 	"regexp"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/report"
 )
@@ -38,6 +40,46 @@ var reportRowFilterColumns = map[report.Key]map[string]rowColumnKind{
 	report.CashBankPayments:        rowColumns([]string{"ap_ar_name", "trans_flag_label"}, []string{"doc_no", "ap_ar_code", "trans_flag_code"}, []string{"doc_date"}, []string{"total_amount", "cash_amount", "transfer_amount", "card_amount", "chq_amount", "petty_cash_amount"}),
 }
 
+var reportRowGlobalSearchColumns = map[report.Key][]string{
+	report.SalesGoodsServices:      {"doc_no", "cust_code", "cust_name", "item_code", "item_name"},
+	report.PurchaseGoodsPayables:   {"doc_no", "cust_code", "cust_name", "item_code", "item_name"},
+	report.GrossProfitByProduct:    {"code", "name_1", "unit_name"},
+	report.GrossProfitByARCustomer: {"ar_code", "ar_detail"},
+	report.StockBalance:            {"ic_code", "ic_name", "ic_unit_code"},
+	report.StockReorder:            {"ic_code", "ic_name", "ic_unit_code"},
+	report.ARCustomerMovement:      {"doc_no", "cust_code", "cust_name", "tax_doc_no", "doc_ref"},
+	report.ARDebtReceipt:           {"doc_no", "cust_code", "cust_name"},
+	report.CashBankReceipts:        {"doc_no", "ap_ar_code", "ap_ar_name", "trans_flag_label"},
+	report.CashBankPayments:        {"doc_no", "ap_ar_code", "ap_ar_name", "trans_flag_label"},
+}
+
+func reportRowCapabilities(reportKey report.Key) []ReportRowFilterCapability {
+	columns := reportRowFilterColumns[reportKey]
+	global := make(map[string]struct{}, len(reportRowGlobalSearchColumns[reportKey]))
+	for _, key := range reportRowGlobalSearchColumns[reportKey] {
+		global[key] = struct{}{}
+	}
+	keys := make([]string, 0, len(columns))
+	for key := range columns {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]ReportRowFilterCapability, 0, len(keys))
+	for _, key := range keys {
+		kind := columns[key]
+		operators := []report.RowFilterOperator{report.RowFilterContains, report.RowFilterEquals}
+		if kind == rowColumnDate || kind == rowColumnNumber {
+			operators = []report.RowFilterOperator{report.RowFilterEquals, report.RowFilterGTE, report.RowFilterLTE}
+		}
+		if kind == rowColumnDate {
+			operators = append(operators, report.RowFilterBetween)
+		}
+		_, searchable := global[key]
+		result = append(result, ReportRowFilterCapability{ColumnKey: key, DataType: string(kind), Operators: operators, GlobalSearchable: searchable})
+	}
+	return result
+}
+
 func rowColumns(text, identifiers, dates, numbers []string) map[string]rowColumnKind {
 	result := make(map[string]rowColumnKind, len(text)+len(identifiers)+len(dates)+len(numbers))
 	for _, key := range text {
@@ -65,8 +107,9 @@ func validateReportRowFilters(reportKey report.Key, filters []report.RowFilter) 
 		filter := &filters[index]
 		filter.ColumnKey = strings.TrimSpace(filter.ColumnKey)
 		filter.Value = strings.TrimSpace(filter.Value)
+		filter.ValueTo = strings.TrimSpace(filter.ValueTo)
 		kind, exists := columns[filter.ColumnKey]
-		if !exists || filter.Value == "" || len(filter.Value) > 160 {
+		if !exists || filter.Value == "" || utf8.RuneCountInString(filter.Value) > 160 || utf8.RuneCountInString(filter.ValueTo) > 160 {
 			return ErrReportInputInvalid
 		}
 		if _, duplicate := seen[filter.ColumnKey]; duplicate {
@@ -84,10 +127,17 @@ func validateReportRowFilters(reportKey report.Key, filters []report.RowFilter) 
 				return ErrReportInputInvalid
 			}
 		case rowColumnDate:
-			if filter.Operator != report.RowFilterEquals && filter.Operator != report.RowFilterGTE && filter.Operator != report.RowFilterLTE {
+			if filter.Operator != report.RowFilterEquals && filter.Operator != report.RowFilterGTE && filter.Operator != report.RowFilterLTE && filter.Operator != report.RowFilterBetween {
 				return ErrReportInputInvalid
 			}
 			if !reportDatePattern.MatchString(filter.Value) {
+				return ErrReportInputInvalid
+			}
+			if filter.Operator == report.RowFilterBetween {
+				if !reportDatePattern.MatchString(filter.ValueTo) || filter.ValueTo < filter.Value {
+					return ErrReportInputInvalid
+				}
+			} else if filter.ValueTo != "" {
 				return ErrReportInputInvalid
 			}
 		case rowColumnNumber:

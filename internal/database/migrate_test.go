@@ -26,7 +26,7 @@ func TestEmbeddedMigrationsAreSequential(t *testing.T) {
 			t.Fatalf("migration %q has empty checksum", migration.Name)
 		}
 	}
-	if len(migrations) < 27 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction || !migrations[22].NoTransaction || !migrations[24].NoTransaction || !migrations[26].NoTransaction {
+	if len(migrations) < 28 || !migrations[12].NoTransaction || !migrations[13].NoTransaction || !migrations[16].NoTransaction || !migrations[18].NoTransaction || !migrations[20].NoTransaction || !migrations[22].NoTransaction || !migrations[24].NoTransaction || !migrations[26].NoTransaction || !migrations[27].NoTransaction {
 		t.Fatalf("snapshot indexes must use non-transactional concurrent migrations: %+v", migrations)
 	}
 }

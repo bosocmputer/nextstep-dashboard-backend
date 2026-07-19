@@ -65,7 +65,7 @@ func (fake *fakeViewerReportAPI) ListRows(context.Context, uuid.UUID, uuid.UUID,
 }
 
 func (fake *fakeViewerReportAPI) QueryRows(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ report.Key, _ uuid.UUID, input report.RowsQueryInput) (viewer.ReportRowsQuery, error) {
-	return viewer.ReportRowsQuery{RunID: fake.rows.RunID, Columns: fake.rows.Columns, Rows: fake.rows.Rows, Page: input.Page, PageSize: input.PageSize, Total: len(fake.rows.Rows)}, fake.rowsErr
+	return viewer.ReportRowsQuery{RunID: fake.rows.RunID, Columns: fake.rows.Columns, Rows: fake.rows.Rows, RowOrdinals: []int{9}, Page: input.Page, PageSize: input.PageSize, Total: len(fake.rows.Rows)}, fake.rowsErr
 }
 
 func (fake *fakeViewerReportAPI) GetDashboard(context.Context, uuid.UUID, uuid.UUID, report.Key, uuid.UUID) (report.Dashboard, error) {

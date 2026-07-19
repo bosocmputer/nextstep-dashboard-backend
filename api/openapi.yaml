@@ -163,6 +163,19 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AdminReportCatalog'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/admin/tenants/query:
+    post:
+      tags: [Admin tenants]
+      operationId: queryTenants
+      description: Numbered server-side filtering for the tenant DataTable. This endpoint never contacts SML.
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/TenantsTableQueryInput'}}}
+      responses:
+        '200': {description: Exact tenant page., content: {application/json: {schema: {$ref: '#/components/schemas/TenantsTableQueryResult'}}}}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/tenants/{tenantId}:
     parameters: [{$ref: '#/components/parameters/TenantID'}]
     get:
@@ -575,6 +588,21 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Schedule'}
         '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/admin/tenants/{tenantId}/schedules/query:
+    post:
+      tags: [Admin configuration]
+      operationId: querySchedules
+      description: Numbered server-side filtering for one tenant's schedules.
+      security: [{AdminSession: []}]
+      parameters:
+        - {$ref: '#/components/parameters/TenantID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SchedulesTableQueryInput'}}}
+      responses:
+        '200': {description: Exact schedule page., content: {application/json: {schema: {$ref: '#/components/schemas/SchedulesTableQueryResult'}}}}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/tenants/{tenantId}/schedules/{scheduleId}/restore:
     post:
       tags: [Admin configuration]
@@ -649,6 +677,18 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ReportRunDetail'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/admin/report-runs/query:
+    post:
+      tags: [Admin operations]
+      operationId: queryAdminReportRuns
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ReportRunsTableQueryInput'}}}
+      responses:
+        '200': {description: Exact report-run page., content: {application/json: {schema: {$ref: '#/components/schemas/ReportRunsTableQueryResult'}}}}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/line-quota:
     get:
       tags: [Admin operations]
@@ -700,6 +740,30 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AuditPage'}
+  /api/v1/admin/line-deliveries/query:
+    post:
+      tags: [Admin operations]
+      operationId: queryLineDeliveries
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/DeliveriesTableQueryInput'}}}
+      responses:
+        '200': {description: Exact delivery page., content: {application/json: {schema: {$ref: '#/components/schemas/DeliveriesTableQueryResult'}}}}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/audit-logs/query:
+    post:
+      tags: [Admin operations]
+      operationId: queryAuditLogs
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AuditTableQueryInput'}}}
+      responses:
+        '200': {description: Exact audit-event page., content: {application/json: {schema: {$ref: '#/components/schemas/AuditTableQueryResult'}}}}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/viewer/line/session:
     post:
       tags: [Viewer]
@@ -1121,6 +1185,18 @@ paths:
           content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncidentDetail'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/admin/operational-incidents/query:
+    post:
+      tags: [Admin operations]
+      operationId: queryOperationalIncidents
+      security: [{AdminSession: []}]
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/IncidentsTableQueryInput'}}}
+      responses:
+        '200': {description: Exact operational-incident page., content: {application/json: {schema: {$ref: '#/components/schemas/IncidentsTableQueryResult'}}}}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/operational-incidents/{incidentId}/occurrences:
     get:
       tags: [Admin operations]
@@ -1153,6 +1229,21 @@ paths:
           description: Reminder stopped; the incident remains unresolved.
           content: {application/json: {schema: {$ref: '#/components/schemas/OperationalIncident'}}}
         '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/admin/operational-incidents/{incidentId}/occurrences/query:
+    post:
+      tags: [Admin operations]
+      operationId: queryOperationalIncidentOccurrences
+      security: [{AdminSession: []}]
+      parameters:
+        - {name: incidentId, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/OccurrencesTableQueryInput'}}}
+      responses:
+        '200': {description: Exact root-occurrence page., content: {application/json: {schema: {$ref: '#/components/schemas/OccurrencesTableQueryResult'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
         '422': {$ref: '#/components/responses/ValidationFailed'}
   /api/v1/admin/operational-incidents/{incidentId}/accept-risk:
     post:
@@ -1242,6 +1333,182 @@ components:
       properties:
         nextCursor: {type: string, nullable: true}
         hasMore: {type: boolean}
+    TableQueryPageMeta:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, total, totalPages]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        total: {type: integer, minimum: 0}
+        totalPages: {type: integer, minimum: 0}
+    TableQueryCommonInput:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, filters]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        filters: {type: object}
+    TenantsTableQueryInput:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, filters]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            statuses: {type: array, uniqueItems: true, maxItems: 3, items: {$ref: '#/components/schemas/TenantStatus'}}
+            smlReadiness: {type: array, uniqueItems: true, maxItems: 3, items: {type: string, enum: [UNCONFIGURED, READY, FAILED]}}
+    TenantsTableQueryResult:
+      allOf:
+        - {$ref: '#/components/schemas/TableQueryPageMeta'}
+        - type: object
+          required: [data]
+          properties: {data: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Tenant'}}}
+    SchedulesTableQueryInput:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, filters]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            statuses: {type: array, uniqueItems: true, maxItems: 5, items: {type: string, enum: [DRAFT, ACTIVE, PAUSED, EXPIRED, ARCHIVED]}}
+            includeArchived: {type: boolean}
+    SchedulesTableQueryResult:
+      allOf:
+        - {$ref: '#/components/schemas/TableQueryPageMeta'}
+        - type: object
+          required: [data]
+          properties: {data: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Schedule'}}}
+    ReportRunsTableQueryInput:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, filters]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            tenantId: {type: string, format: uuid}
+            statuses: {type: array, uniqueItems: true, maxItems: 7, items: {$ref: '#/components/schemas/ReportRunStatus'}}
+            reportKeys: {type: array, uniqueItems: true, maxItems: 10, items: {$ref: '#/components/schemas/ReportKey'}}
+            sources: {type: array, uniqueItems: true, maxItems: 3, items: {type: string, enum: [DASHBOARD, SCHEDULE, BACKGROUND]}}
+            dateFrom: {type: string, format: date}
+            dateTo: {type: string, format: date}
+    ReportRunsTableQueryResult:
+      allOf:
+        - {$ref: '#/components/schemas/TableQueryPageMeta'}
+        - type: object
+          required: [data]
+          properties: {data: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/ReportRun'}}}
+    DeliveriesTableQueryInput:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, filters]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            tenantId: {type: string, format: uuid}
+            recipientId: {type: string, format: uuid}
+            statuses: {type: array, uniqueItems: true, maxItems: 6, items: {type: string, enum: [PENDING, SENDING, ACCEPTED, RETRY_WAIT, UNCERTAIN, FAILED_PERMANENT]}}
+            reportKeys: {type: array, uniqueItems: true, maxItems: 10, items: {$ref: '#/components/schemas/ReportKey'}}
+            dateFrom: {type: string, format: date}
+            dateTo: {type: string, format: date}
+    DeliveriesTableQueryResult:
+      allOf:
+        - {$ref: '#/components/schemas/TableQueryPageMeta'}
+        - type: object
+          required: [data]
+          properties: {data: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Delivery'}}}
+    AuditTableQueryInput:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, filters]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            tenantId: {type: string, format: uuid}
+            actorTypes: {type: array, uniqueItems: true, maxItems: 4, items: {type: string, enum: [ADMIN, VIEWER, WORKER, SYSTEM]}}
+            actions: {type: array, uniqueItems: true, maxItems: 8, items: {type: string, pattern: '^[A-Z][A-Z0-9_]*$', maxLength: 100}}
+            results: {type: array, uniqueItems: true, maxItems: 3, items: {type: string, enum: [SUCCESS, DENIED, FAILED]}}
+            dateFrom: {type: string, format: date}
+            dateTo: {type: string, format: date}
+    AuditTableQueryResult:
+      allOf:
+        - {$ref: '#/components/schemas/TableQueryPageMeta'}
+        - type: object
+          required: [data]
+          properties: {data: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/AuditEvent'}}}
+    IncidentsTableQueryInput:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, filters]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            statuses: {type: array, uniqueItems: true, maxItems: 4, items: {$ref: '#/components/schemas/OperationalIncidentStatus'}}
+            severities: {type: array, uniqueItems: true, maxItems: 2, items: {$ref: '#/components/schemas/OperationalIncidentSeverity'}}
+            rootCauses: {type: array, uniqueItems: true, maxItems: 8, items: {type: string, enum: [SML_CONNECTIVITY, REPORT_DATA, LINE_DELIVERY, PLATFORM, CAPACITY]}}
+            activeOnly: {type: boolean}
+    IncidentsTableQueryResult:
+      allOf:
+        - {$ref: '#/components/schemas/TableQueryPageMeta'}
+        - type: object
+          required: [data]
+          properties: {data: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/OperationalIncident'}}}
+    OccurrencesTableQueryInput:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, filters]
+      properties:
+        page: {type: integer, minimum: 0, maximum: 200000}
+        pageSize: {type: integer, enum: [25, 50, 100]}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            tenantId: {type: string, format: uuid}
+            reportKeys: {type: array, uniqueItems: true, maxItems: 10, items: {$ref: '#/components/schemas/ReportKey'}}
+            sourceKinds: {type: array, uniqueItems: true, maxItems: 8, items: {type: string, enum: [NOTIFICATION, DELIVERY, REPORT, WORKER, SML_CIRCUIT, HOST, BACKUP, DATABASE]}}
+            safeErrorCodes: {type: array, uniqueItems: true, maxItems: 8, items: {type: string, pattern: '^[A-Z][A-Z0-9_]*$', maxLength: 100}}
+            dateFrom: {type: string, format: date}
+            dateTo: {type: string, format: date}
+    OccurrencesTableQueryResult:
+      allOf:
+        - {$ref: '#/components/schemas/TableQueryPageMeta'}
+        - type: object
+          required: [data]
+          properties: {data: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/OperationalIncidentOccurrence'}}}
     AdminLoginInput:
       type: object
       additionalProperties: false
@@ -1383,22 +1650,26 @@ components:
     RecipientQueryInput:
       type: object
       additionalProperties: false
-      required: [search, page, pageSize]
+      required: [page, pageSize]
       properties:
         search: {type: string, maxLength: 160}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
         status: {type: string, enum: [PENDING, ACTIVE]}
+        statuses: {type: array, maxItems: 2, uniqueItems: true, items: {type: string, enum: [PENDING, ACTIVE]}}
         permissionState: {type: string, enum: [WITH_REPORTS, WITHOUT_REPORTS]}
+        permissionStates: {type: array, maxItems: 2, uniqueItems: true, items: {type: string, enum: [WITH_REPORTS, WITHOUT_REPORTS]}}
         page: {type: integer, minimum: 0}
-        pageSize: {type: integer, minimum: 1, maximum: 100}
+        pageSize: {type: integer, enum: [25, 50, 100]}
     RecipientQueryResult:
       type: object
       additionalProperties: false
-      required: [data, page, pageSize, total, hasMore]
+      required: [data, page, pageSize, total, totalPages, hasMore]
       properties:
         data: {type: array, items: {$ref: '#/components/schemas/Recipient'}}
         page: {type: integer, minimum: 0}
-        pageSize: {type: integer, minimum: 1, maximum: 100}
+        pageSize: {type: integer, enum: [25, 50, 100]}
         total: {type: integer, minimum: 0, maximum: 500}
+        totalPages: {type: integer, minimum: 0, maximum: 20}
         hasMore: {type: boolean}
     PermissionUpdate:
       type: object
@@ -1437,13 +1708,16 @@ components:
     ScheduleRecipientOptionsInput:
       type: object
       additionalProperties: false
-      required: [reportKeys, selectedRecipientIds, search, page, pageSize]
+      required: [reportKeys, selectedRecipientIds, page, pageSize]
       properties:
         reportKeys: {type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: {$ref: '#/components/schemas/ReportKey'}}
         selectedRecipientIds: {type: array, maxItems: 500, uniqueItems: true, items: {type: string, format: uuid}}
         search: {type: string, maxLength: 160}
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
+        statuses: {type: array, maxItems: 2, uniqueItems: true, items: {type: string, enum: [PENDING, ACTIVE]}}
+        eligibilityStates: {type: array, maxItems: 3, uniqueItems: true, items: {type: string, enum: [ELIGIBLE, NOT_ACTIVE, MISSING_PERMISSIONS]}}
         page: {type: integer, minimum: 0}
-        pageSize: {type: integer, minimum: 1, maximum: 100}
+        pageSize: {type: integer, enum: [25, 50, 100]}
     ScheduleRecipientOption:
       allOf:
         - {$ref: '#/components/schemas/Recipient'}
@@ -1455,13 +1729,14 @@ components:
     ScheduleRecipientOptions:
       type: object
       additionalProperties: false
-      required: [data, selected, page, pageSize, total, hasMore]
+      required: [data, selected, page, pageSize, total, totalPages, hasMore]
       properties:
         data: {type: array, items: {$ref: '#/components/schemas/ScheduleRecipientOption'}}
         selected: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ScheduleRecipientOption'}}
         page: {type: integer, minimum: 0}
         pageSize: {type: integer, minimum: 1, maximum: 100}
         total: {type: integer, minimum: 0}
+        totalPages: {type: integer, minimum: 0, maximum: 20}
         hasMore: {type: boolean}
     ReportKey:
       type: string
@@ -1753,26 +2028,40 @@ components:
       required: [columnKey, operator, value]
       properties:
         columnKey: {type: string, pattern: '^[a-z][a-z0-9_]*$', maxLength: 80}
-        operator: {type: string, enum: [CONTAINS, EQUALS, GTE, LTE]}
+        operator: {type: string, enum: [CONTAINS, EQUALS, GTE, LTE, BETWEEN]}
         value: {type: string, minLength: 1, maxLength: 160}
+        valueTo: {type: string, minLength: 1, maxLength: 160}
     ReportRowQueryInput:
       type: object
       additionalProperties: false
       required: [filters, page, pageSize]
       properties:
+        globalSearch: {type: string, minLength: 2, maxLength: 160}
         filters: {type: array, maxItems: 5, items: {$ref: '#/components/schemas/ReportRowFilter'}}
         page: {type: integer, minimum: 0, maximum: 200000}
-        pageSize: {type: integer, minimum: 1, maximum: 100}
+        pageSize: {type: integer, enum: [25, 50, 100]}
     ReportRowQueryPage:
       type: object
       additionalProperties: false
-      required: [runId, columns, data, page, pageSize, total]
+      required: [runId, columns, data, rowOrdinals, filterCapabilities, page, pageSize, total]
       properties:
         runId: {type: string, format: uuid}
         columns: {type: array, items: {type: string}}
         data: {type: array, maxItems: 100, items: {type: object, additionalProperties: true}}
+        rowOrdinals: {type: array, maxItems: 100, items: {type: integer, minimum: 1}}
+        filterCapabilities:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [columnKey, dataType, operators, globalSearchable]
+            properties:
+              columnKey: {type: string, pattern: '^[a-z][a-z0-9_]*$', maxLength: 80}
+              dataType: {type: string, enum: [TEXT, IDENTIFIER, DATE, NUMBER]}
+              operators: {type: array, uniqueItems: true, items: {type: string, enum: [CONTAINS, EQUALS, GTE, LTE, BETWEEN]}}
+              globalSearchable: {type: boolean}
         page: {type: integer, minimum: 0}
-        pageSize: {type: integer, minimum: 1, maximum: 100}
+        pageSize: {type: integer, enum: [25, 50, 100]}
         total: {type: integer, minimum: 0, maximum: 200000}
     ReportPeriod:
       type: object

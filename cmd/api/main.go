@@ -22,6 +22,7 @@ import (
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/secret"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sentinel"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sml"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/tablequery"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/tenant"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/viewer"
 )
@@ -101,6 +102,7 @@ func main() {
 			FlexPreviews:    flexPreviewService,
 			ScheduleTests:   scheduleTestService,
 			Operations:      operations.NewService(database.NewOperationsStore(pool), recipientService),
+			TableQueries:    tablequery.NewService(database.NewTableQueryStore(pool), recipientService, cfg.LineMessagingAccessToken != "", time.Now),
 			Incidents:       sentinel.NewAdminService(sentinelStore, time.Now),
 			Watchdog:        watchdog,
 			SecureCookies:   cfg.Environment == "production",
