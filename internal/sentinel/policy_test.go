@@ -108,6 +108,128 @@ func TestTelegramMessageContainsOnlySafeOperationalContext(t *testing.T) {
 	}
 }
 
+func TestTelegramMessageIncludesSanitizedTenantAndHistoricalJavaWSURLWhenExplicitlyAllowed(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", IncidentType: "SCHEDULED_REPORT_FAILED", RootCause: RootSMLConnectivity,
+		Severity: SeverityP1, Status: StatusOpen, SafeErrorCode: "SML_UNREACHABLE", AffectedCount: 1, ActiveAffectedCount: 1,
+		SubjectType: SubjectTenant, FirstSeenAt: time.Date(2026, 7, 19, 1, 0, 3, 0, time.UTC),
+	}
+	alert := Alert{Kind: "OPEN", Incident: incident, TenantContexts: []TelegramTenantContext{{
+		TenantName: " ร้าน\nขอนแก่น ", EndpointURL: "http://user:secret@khonkaen.3bbddns.com:11680/path?token=secret#fragment",
+		URLStatus: TelegramURLAtFailure,
+	}}}
+	message, result := telegramMessage(alert, "https://example.test/incidents", true)
+	for _, required := range []string{"ร้าน: ร้าน ขอนแก่น", "Java Web Service Base URL ตอนเกิดเหตุ:", "http://khonkaen.3bbddns.com:11680/path"} {
+		if !strings.Contains(message, required) {
+			t.Fatalf("message %q does not contain %q", message, required)
+		}
+	}
+	for _, forbidden := range []string{"user:secret", "token=secret", "#fragment"} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("message %q contains unsafe value %q", message, forbidden)
+		}
+	}
+	if result != TelegramContextIncluded {
+		t.Fatalf("context result = %q", result)
+	}
+}
+
+func TestTelegramMessageLabelsCurrentOnlyAndChangedConnectionWithoutGuessing(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "SML_NOT_READY", SubjectType: SubjectTenant, AffectedCount: 2, ActiveAffectedCount: 2,
+		FirstSeenAt: time.Date(2026, 7, 19, 1, 0, 0, 0, time.UTC),
+	}
+	alert := Alert{Kind: "OPEN", Incident: incident, TenantContexts: []TelegramTenantContext{
+		{TenantName: "ร้านปัจจุบัน", EndpointURL: "https://current.example.test", URLStatus: TelegramURLCurrentOnly},
+		{TenantName: "ร้านเปลี่ยนค่า", EndpointURL: "http://old.example.test:8092", URLStatus: TelegramURLChangedSinceFailure},
+	}}
+	message, _ := telegramMessage(alert, "https://example.test/incidents", true)
+	for _, required := range []string{"Java Web Service Base URL ปัจจุบัน:", "Java Web Service Base URL ตอนเกิดเหตุ:", "การตั้งค่าถูกเปลี่ยนหลังเกิดเหตุ"} {
+		if !strings.Contains(message, required) {
+			t.Fatalf("message %q does not contain %q", message, required)
+		}
+	}
+}
+
+func TestTelegramMessageBoundsAggregatedTenantContextWithoutCuttingURLs(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "SML_UNREACHABLE", SubjectType: SubjectTenant, AffectedCount: 100, ActiveAffectedCount: 100,
+		FirstSeenAt: time.Date(2026, 7, 19, 1, 0, 0, 0, time.UTC),
+	}
+	contexts := make([]TelegramTenantContext, 0, 5)
+	for index := 1; index <= 5; index++ {
+		contexts = append(contexts, TelegramTenantContext{TenantName: "ร้านทดสอบ", EndpointURL: "http://shop.example.test:8092", URLStatus: TelegramURLAtFailure})
+	}
+	message, result := telegramMessage(Alert{Kind: "OPEN", Incident: incident, TenantContexts: contexts, AdditionalTenantCount: 95}, "https://example.test/incidents", true)
+	if strings.Count(message, "ร้าน: ร้านทดสอบ") != 5 || !strings.Contains(message, "และอีก 95 ร้าน") || len(message) >= 3500 {
+		t.Fatalf("bounded message = %q (len=%d)", message, len(message))
+	}
+	if result != TelegramContextIncluded {
+		t.Fatalf("context result = %q", result)
+	}
+}
+
+func TestTelegramMessageOmitsWholeURLWhenMessageBudgetIsExceeded(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "SML_UNREACHABLE", SubjectType: SubjectTenant, AffectedCount: 2, ActiveAffectedCount: 2,
+		FirstSeenAt: time.Date(2026, 7, 19, 1, 0, 0, 0, time.UTC),
+	}
+	firstURL := "http://first.example.test/" + strings.Repeat("a", 1800)
+	secondURL := "http://second.example.test/" + strings.Repeat("b", 1800)
+	alert := Alert{Kind: "OPEN", Incident: incident, TenantContexts: []TelegramTenantContext{
+		{TenantName: "ร้านแรก", EndpointURL: firstURL, URLStatus: TelegramURLAtFailure},
+		{TenantName: "ร้านสอง", EndpointURL: secondURL, URLStatus: TelegramURLAtFailure},
+	}}
+	message, result := telegramMessage(alert, "https://example.test/incidents", true)
+	if !strings.Contains(message, firstURL) || strings.Contains(message, secondURL) || !strings.Contains(message, "และอีก 1 ร้าน") {
+		t.Fatalf("message did not preserve complete URLs: %q", message)
+	}
+	if result != TelegramContextMessageBudgetExceeded || len(message) >= 3500 {
+		t.Fatalf("result=%q len=%d", result, len(message))
+	}
+}
+
+func TestTelegramMessageOmitsTenantContextUnlessExplicitlyAllowed(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "SML_UNREACHABLE", SubjectType: SubjectTenant, AffectedCount: 1,
+		FirstSeenAt: time.Date(2026, 7, 19, 1, 0, 0, 0, time.UTC),
+	}
+	alert := Alert{Kind: "OPEN", Incident: incident, TenantContexts: []TelegramTenantContext{{TenantName: "ร้านลับ", EndpointURL: "http://secret.example.test", URLStatus: TelegramURLAtFailure}}}
+	message := TelegramMessage(alert, "https://example.test/incidents")
+	if strings.Contains(message, "ร้านลับ") || strings.Contains(message, "secret.example.test") {
+		t.Fatalf("default renderer disclosed tenant context: %q", message)
+	}
+}
+
+func TestTelegramMessageNeverIncludesTenantContextOutsideP1(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP2, Status: StatusOpen,
+		SafeErrorCode: "SML_UNREACHABLE", SubjectType: SubjectTenant, AffectedCount: 1,
+		FirstSeenAt: time.Date(2026, 7, 19, 1, 0, 0, 0, time.UTC),
+	}
+	alert := Alert{Kind: "OPEN", Incident: incident, TenantContexts: []TelegramTenantContext{{TenantName: "ร้านลับ", EndpointURL: "http://secret.example.test", URLStatus: TelegramURLAtFailure}}}
+	message, result := telegramMessage(alert, "https://example.test/incidents", true)
+	if strings.Contains(message, "ร้านลับ") || strings.Contains(message, "secret.example.test") || result != TelegramContextNotTenantScoped {
+		t.Fatalf("non-P1 context result=%q message=%q", result, message)
+	}
+}
+
+func TestTelegramMessageFallsBackSafelyWhenTenantContextQueryFailed(t *testing.T) {
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "SML_UNREACHABLE", SubjectType: SubjectTenant, AffectedCount: 1,
+		FirstSeenAt: time.Date(2026, 7, 19, 1, 0, 0, 0, time.UTC),
+	}
+	message, result := telegramMessage(Alert{Kind: "OPEN", Incident: incident, TenantContextResult: TelegramContextQueryFailed}, "https://example.test/incidents", true)
+	if result != TelegramContextQueryFailed || !strings.Contains(message, "NST-ABC123DEF456") || strings.Contains(message, "Java Web Service Base URL") {
+		t.Fatalf("query failure result=%q message=%q", result, message)
+	}
+}
+
 func TestTelegramMessageRejectsUnsafeErrorCode(t *testing.T) {
 	incident := Incident{
 		AlertRef: "NST-ABC123DEF456", IncidentType: "PLATFORM_FAILURE", RootCause: RootPlatform,

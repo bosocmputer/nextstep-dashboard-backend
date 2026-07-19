@@ -60,23 +60,27 @@ tags: [backend, security, operations, retention]
 - P1 Telegram delivery is disabled in `off`/`observe` modes. `send` requires root-owned token/chat files and must follow the runbook preflight and observation window.
 - Incidents use root-cause/severity families, five-minute episodes, and per-subject lifecycle state. Discrete bursts send at most OPEN plus one UPDATE; continuous probes do not inflate occurrence/version on every heartbeat. Acknowledge stops reminders; only system evidence resolves every active subject. Manual closure is `CLOSED_ACCEPTED` with a reason.
 - The emergency database alert lane stores only a safe reference and timestamps in a protected volume. Host probe and monitor heartbeat files are bounded, schema-checked, and contain no customer data.
-- Admin incident APIs are Admin-only, CSRF-protected for mutations, and `no-store`. Telegram carries only an alert reference and safe operational fields; tenant names are resolved only inside the authenticated Admin detail page.
+- Admin incident APIs are Admin-only, CSRF-protected for mutations, and `no-store`. Telegram tenant context is disabled by default. The `private_chat` mode is enabled only after `getChat` verifies the exact private destination; it may carry a sanitized tenant name and JavaWS Base URL for tenant-scoped P1 alerts. Failed or non-private verification redacts that context without blocking the P1.
 - Incident events copy sanitized failure evidence and LINE/report impact at
   observation time, so the 365-day incident record remains useful after source
   Report or Notification retention. The occurrence resolver may match a
   connection version to a sanitized historical audit URL, or explicitly label a
   current-only fallback. URL userinfo, query, and fragment are removed.
 - The authenticated Incident list includes at most two tenant-name examples per
-  incident from the same bounded SQL query; Telegram and Codex clipboard output
-  never include those names. Incident detail returns at most 200 newest events
+  incident from the same bounded SQL query; Codex clipboard output never
+  includes those names. Telegram loads at most five complete tenant/URL pairs
+  with one bounded best-effort query only when verified private mode is active.
+  Incident detail returns at most 200 newest events
   to keep the response bounded below its payload budget.
 - A linked `REPORT_SET_INCOMPLETE` is downstream impact of its failed report and
   is suppressed as a second P1 alert. If no root report is provable inside the
   aggregation window, the notification failure remains eligible as a standalone
   incident rather than being hidden.
 - Telegram uses Thai local time and different OPEN, UPDATE, and RECOVERY wording.
-  It never carries JavaWS URLs. Acknowledge only stops reminders; recovery still
-  requires system evidence for each subject.
+  In verified private mode, SML P1 alerts prefer the sanitized URL matching the
+  failure connection version; a current-only fallback is labelled explicitly.
+  Acknowledge only stops reminders; recovery still requires system evidence for
+  each subject.
 - Admin JavaWS investigation separates opening a sanitized URL in the operator's
   browser from a guarded Server Dashboard test. The test uses fixed `select 1`,
   shares report admission limits, is single-flight with cooldown, yields to an

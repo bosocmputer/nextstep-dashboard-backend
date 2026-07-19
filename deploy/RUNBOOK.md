@@ -81,6 +81,16 @@ phases:
    `/watchdog`, then change to `send`. P1 only is sent to Telegram; P2 remains in
    Admin. Acknowledge is not recovery, and manual closure is accepted risk.
 
+Tenant context in Telegram is an explicit privacy opt-in. Leave
+`TELEGRAM_TENANT_CONTEXT_MODE=off` until `sentinel-preflight` confirms the
+configured destination is the exact private chat. Then `private_chat` may add a
+sanitized tenant name and JavaWS Base URL to tenant-scoped P1 messages. The URL
+resolver prefers the connection version recorded at failure, removes userinfo,
+query, and fragment, and labels a current-only fallback instead of claiming it
+was used at failure. Group, supergroup, channel, or failed verification keeps
+P1 delivery enabled but redacts tenant context. Do not replay old OPEN alerts;
+the next UPDATE or REMINDER adopts the current policy.
+
 Sentinel reads at most 500 terminal events per cycle and does not call JavaWS.
 If application PostgreSQL fails twice, the file-backed emergency lane can alert
 directly; after two successful checks it records recovery evidence in PostgreSQL

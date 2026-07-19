@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,10 +22,13 @@ var (
 )
 
 type TelegramClient struct {
-	token   string
-	chatID  string
-	baseURL string
-	http    *http.Client
+	token               string
+	chatID              string
+	baseURL             string
+	http                *http.Client
+	tenantContextMode   TelegramTenantContextMode
+	tenantContextStatus TelegramTenantContextStatus
+	contextTotals       [len(telegramContextMetricResults)]atomic.Uint64
 }
 
 func NewTelegramClient(token, chatID, baseURL string, client *http.Client) (*TelegramClient, error) {
@@ -44,13 +48,58 @@ func NewTelegramClient(token, chatID, baseURL string, client *http.Client) (*Tel
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &TelegramClient{token: token, chatID: chatID, baseURL: baseURL, http: client}, nil
+	return &TelegramClient{
+		token: token, chatID: chatID, baseURL: baseURL, http: client,
+		tenantContextMode: TelegramTenantContextOff, tenantContextStatus: TelegramTenantContextDisabled,
+	}, nil
+}
+
+func (client *TelegramClient) ConfigureTenantContext(mode TelegramTenantContextMode) *TelegramClient {
+	client.tenantContextMode = mode
+	if mode == TelegramTenantContextPrivateChat {
+		client.tenantContextStatus = TelegramTenantContextPendingVerification
+	} else {
+		client.tenantContextStatus = TelegramTenantContextDisabled
+	}
+	return client
+}
+
+func (client *TelegramClient) TenantContextStatus() TelegramTenantContextStatus {
+	return client.tenantContextStatus
+}
+
+func (client *TelegramClient) TenantContextAllowed() bool {
+	return client.tenantContextStatus == TelegramTenantContextPrivateVerified
+}
+
+func (client *TelegramClient) TenantContextTotals() map[string]uint64 {
+	totals := make(map[string]uint64, len(telegramContextMetricResults))
+	for index, result := range telegramContextMetricResults {
+		totals[string(result)] = client.contextTotals[index].Load()
+	}
+	return totals
+}
+
+func (client *TelegramClient) recordTenantContextResult(result TelegramContextResult) {
+	for index, allowed := range telegramContextMetricResults {
+		if result == allowed {
+			client.contextTotals[index].Add(1)
+			return
+		}
+	}
 }
 
 func (client *TelegramClient) Send(ctx context.Context, alert Alert, adminIncidentURL string) (string, error) {
+	message, result := telegramMessage(alert, adminIncidentURL, client.TenantContextAllowed())
+	if alert.Incident.SubjectType == SubjectTenant && client.tenantContextMode == TelegramTenantContextPrivateChat && !client.TenantContextAllowed() {
+		result = TelegramContextChatNotPrivate
+	}
+	if client.tenantContextMode != TelegramTenantContextOff {
+		client.recordTenantContextResult(result)
+	}
 	requestBody := map[string]any{
 		"chat_id":                  client.chatID,
-		"text":                     TelegramMessage(alert, adminIncidentURL),
+		"text":                     message,
 		"disable_web_page_preview": true,
 	}
 	var response struct {
@@ -74,19 +123,36 @@ func (client *TelegramClient) Preflight(ctx context.Context) error {
 		OK bool `json:"ok"`
 	}
 	if err := client.call(ctx, "getMe", struct{}{}, &me); err != nil || !me.OK {
+		if client.tenantContextMode == TelegramTenantContextPrivateChat {
+			client.tenantContextStatus = TelegramTenantContextRedactedVerificationFailed
+		}
 		if err != nil {
 			return err
 		}
 		return &SendError{Code: "TELEGRAM_GET_ME_REJECTED", Permanent: true}
 	}
 	var chat struct {
-		OK bool `json:"ok"`
+		OK     bool `json:"ok"`
+		Result struct {
+			ID   int64  `json:"id"`
+			Type string `json:"type"`
+		} `json:"result"`
 	}
 	if err := client.call(ctx, "getChat", map[string]string{"chat_id": client.chatID}, &chat); err != nil || !chat.OK {
+		if client.tenantContextMode == TelegramTenantContextPrivateChat {
+			client.tenantContextStatus = TelegramTenantContextRedactedVerificationFailed
+		}
 		if err != nil {
 			return err
 		}
 		return &SendError{Code: "TELEGRAM_GET_CHAT_REJECTED", Permanent: true}
+	}
+	if client.tenantContextMode == TelegramTenantContextPrivateChat {
+		if chat.Result.Type != "private" || strconv.FormatInt(chat.Result.ID, 10) != client.chatID {
+			client.tenantContextStatus = TelegramTenantContextRedactedChatNotPrivate
+			return &SendError{Code: "TELEGRAM_CONTEXT_CHAT_NOT_PRIVATE", Permanent: true}
+		}
+		client.tenantContextStatus = TelegramTenantContextPrivateVerified
 	}
 	return nil
 }

@@ -11,12 +11,14 @@ import (
 )
 
 type MonitorHeartbeat struct {
-	Version                 int       `json:"version"`
-	CheckedAt               time.Time `json:"checkedAt"`
-	Mode                    Mode      `json:"mode"`
-	DatabaseReachable       bool      `json:"databaseReachable"`
-	LastEvaluationSucceeded bool      `json:"lastEvaluationSucceeded"`
-	EvaluationDurationMs    int64     `json:"evaluationDurationMs"`
+	Version                 int                         `json:"version"`
+	CheckedAt               time.Time                   `json:"checkedAt"`
+	Mode                    Mode                        `json:"mode"`
+	DatabaseReachable       bool                        `json:"databaseReachable"`
+	LastEvaluationSucceeded bool                        `json:"lastEvaluationSucceeded"`
+	EvaluationDurationMs    int64                       `json:"evaluationDurationMs"`
+	TelegramContextStatus   TelegramTenantContextStatus `json:"telegramContextStatus,omitempty"`
+	TelegramContextTotals   map[string]uint64           `json:"sentinelTelegramContextTotal,omitempty"`
 }
 
 func WriteMonitorHeartbeat(runtimeDirectory string, heartbeat MonitorHeartbeat) error {

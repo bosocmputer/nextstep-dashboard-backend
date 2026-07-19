@@ -35,11 +35,19 @@ func main() {
 	adminURL := config.PublicBaseURL.String() + "/admin/operational-incidents"
 	var sender sentinel.Sender
 	var emergency *sentinel.EmergencyLane
+	var telegram *sentinel.TelegramClient
 	if config.Mode == sentinel.ModeSend {
-		telegram, telegramErr := sentinel.NewTelegramClient(config.TelegramToken, config.TelegramChatID, config.TelegramAPIBase, &http.Client{Timeout: 10 * time.Second})
+		telegramClient, telegramErr := sentinel.NewTelegramClient(config.TelegramToken, config.TelegramChatID, config.TelegramAPIBase, &http.Client{Timeout: 10 * time.Second})
 		if telegramErr != nil {
 			logger.Error("Sentinel Telegram configuration rejected", "safeErrorCode", "TELEGRAM_CONFIG_INVALID")
 			os.Exit(1)
+		}
+		telegram = telegramClient.ConfigureTenantContext(config.TelegramTenantContextMode)
+		preflightCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		preflightErr := telegram.Preflight(preflightCtx)
+		cancel()
+		if preflightErr != nil {
+			logger.Warn("Sentinel Telegram tenant context redacted", "safeErrorCode", sentinel.SafeSendErrorCode(preflightErr))
 		}
 		sender = telegram
 		emergency = sentinel.NewEmergencyLane(sentinel.NewEmergencyStateStore(config.StatePath), telegram, adminURL)
@@ -80,10 +88,15 @@ func main() {
 		if !evaluationSucceeded {
 			logger.Warn("Sentinel evaluation incomplete", "safeErrorCode", "SENTINEL_EVALUATION_FAILED", "databaseReachable", databaseReachable)
 		}
-		if err := sentinel.WriteMonitorHeartbeat(config.RuntimeDirectory, sentinel.MonitorHeartbeat{
+		heartbeat := sentinel.MonitorHeartbeat{
 			Version: 1, CheckedAt: time.Now().UTC(), Mode: config.Mode, DatabaseReachable: databaseReachable,
 			LastEvaluationSucceeded: evaluationSucceeded, EvaluationDurationMs: evaluationDuration.Milliseconds(),
-		}); err != nil {
+		}
+		if telegram != nil {
+			heartbeat.TelegramContextStatus = telegram.TenantContextStatus()
+			heartbeat.TelegramContextTotals = telegram.TenantContextTotals()
+		}
+		if err := sentinel.WriteMonitorHeartbeat(config.RuntimeDirectory, heartbeat); err != nil {
 			logger.Warn("Sentinel heartbeat write failed", "safeErrorCode", "SENTINEL_HEARTBEAT_WRITE_FAILED")
 		}
 		select {

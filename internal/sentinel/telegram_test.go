@@ -104,4 +104,59 @@ func TestTelegramPreflightMessageIsFixedAndContainsNoIncidentData(t *testing.T) 
 	}
 }
 
+func TestTelegramTenantContextRequiresVerifiedPrivateChat(t *testing.T) {
+	for chatType, expected := range map[string]TelegramTenantContextStatus{
+		"private": TelegramTenantContextPrivateVerified,
+		"group":   TelegramTenantContextRedactedChatNotPrivate,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			switch {
+			case strings.HasSuffix(request.URL.Path, "/getMe"):
+				_, _ = response.Write([]byte(`{"ok":true}`))
+			case strings.HasSuffix(request.URL.Path, "/getChat"):
+				_, _ = response.Write([]byte(`{"ok":true,"result":{"id":123456789,"type":"` + chatType + `"}}`))
+			default:
+				t.Fatalf("unexpected Telegram path %s", request.URL.Path)
+			}
+		}))
+		client, err := NewTelegramClient(testTelegramToken(), "123456789", server.URL, &http.Client{Timeout: time.Second})
+		if err != nil {
+			server.Close()
+			t.Fatal(err)
+		}
+		client.ConfigureTenantContext(TelegramTenantContextPrivateChat)
+		err = client.Preflight(context.Background())
+		status := client.TenantContextStatus()
+		server.Close()
+		if status != expected {
+			t.Fatalf("chat type %s: status=%q err=%v", chatType, status, err)
+		}
+		if chatType == "private" && err != nil {
+			t.Fatalf("private chat preflight failed: %v", err)
+		}
+		if chatType != "private" && err == nil {
+			t.Fatal("non-private chat enabled tenant context")
+		}
+	}
+}
+
+func TestTelegramTenantContextRedactsWhenPreflightCannotVerifyChat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client, err := NewTelegramClient(testTelegramToken(), "123456789", server.URL, &http.Client{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.ConfigureTenantContext(TelegramTenantContextPrivateChat)
+	if err := client.Preflight(context.Background()); err == nil {
+		t.Fatal("unavailable Telegram API passed preflight")
+	}
+	if client.TenantContextStatus() != TelegramTenantContextRedactedVerificationFailed || client.TenantContextAllowed() {
+		t.Fatalf("status=%q allowed=%v", client.TenantContextStatus(), client.TenantContextAllowed())
+	}
+}
+
 func testTelegramToken() string { return "123456:" + strings.Repeat("x", 32) }

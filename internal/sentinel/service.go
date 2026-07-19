@@ -105,9 +105,12 @@ type IncidentDetail struct {
 }
 
 type Alert struct {
-	ID       uuid.UUID
-	Kind     string
-	Incident Incident
+	ID                    uuid.UUID
+	Kind                  string
+	Incident              Incident
+	TenantContexts        []TelegramTenantContext
+	AdditionalTenantCount int
+	TenantContextResult   TelegramContextResult
 }
 
 type AdminStore interface {
@@ -327,13 +330,18 @@ type MonitorStore interface {
 	AdvanceObservationCursors(context.Context, time.Time) error
 	AdvanceLifecycle(context.Context, []Observation, bool, time.Time, bool) error
 	MaintenanceActive(context.Context, time.Time) (bool, error)
-	ClaimAlert(context.Context, string, time.Duration, time.Time) (Alert, error)
+	ClaimAlert(context.Context, string, time.Duration, time.Time, bool) (Alert, error)
 	CompleteAlert(context.Context, uuid.UUID, string, time.Time) error
 	RetryAlert(context.Context, uuid.UUID, string, string, time.Time, time.Time, bool) error
 }
 
 type Sender interface {
 	Send(context.Context, Alert, string) (string, error)
+}
+
+type tenantContextSender interface {
+	Sender
+	TenantContextAllowed() bool
 }
 
 type Monitor struct {
@@ -407,7 +415,11 @@ func (monitor *Monitor) Process(ctx context.Context) error {
 		return nil
 	}
 	for processed := 0; processed < 10; processed++ {
-		alert, err := monitor.store.ClaimAlert(ctx, monitor.workerID, time.Minute, now)
+		includeTenantContext := false
+		if sender, ok := monitor.sender.(tenantContextSender); ok {
+			includeTenantContext = sender.TenantContextAllowed()
+		}
+		alert, err := monitor.store.ClaimAlert(ctx, monitor.workerID, time.Minute, now, includeTenantContext)
 		if errors.Is(err, ErrNoAlertReady) {
 			return nil
 		}

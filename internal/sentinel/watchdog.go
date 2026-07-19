@@ -40,12 +40,13 @@ type HostProbe struct {
 }
 
 type WatchdogStatus struct {
-	Status           string    `json:"status"`
-	CheckedAt        time.Time `json:"checkedAt"`
-	MonitorFresh     bool      `json:"monitorFresh"`
-	HostProbeFresh   bool      `json:"hostProbeFresh"`
-	SafeErrorCodes   []string  `json:"safeErrorCodes"`
-	SafeWarningCodes []string  `json:"safeWarningCodes,omitempty"`
+	Status                       string            `json:"status"`
+	CheckedAt                    time.Time         `json:"checkedAt"`
+	MonitorFresh                 bool              `json:"monitorFresh"`
+	HostProbeFresh               bool              `json:"hostProbeFresh"`
+	SafeErrorCodes               []string          `json:"safeErrorCodes"`
+	SafeWarningCodes             []string          `json:"safeWarningCodes,omitempty"`
+	SentinelTelegramContextTotal map[string]uint64 `json:"sentinelTelegramContextTotal,omitempty"`
 }
 
 type Watchdog struct {
@@ -67,7 +68,7 @@ func (watchdog *Watchdog) Status() WatchdogStatus {
 	now := watchdog.now().UTC()
 	status := WatchdogStatus{Status: "ok", CheckedAt: now, SafeErrorCodes: make([]string, 0), SafeWarningCodes: make([]string, 0)}
 	var heartbeat MonitorHeartbeat
-	if err := readStrictJSON(filepath.Join(watchdog.runtimeDirectory, "monitor", "monitor-heartbeat.json"), 4096, &heartbeat); err != nil || heartbeat.Version != 1 || heartbeat.EvaluationDurationMs < 0 || heartbeat.EvaluationDurationMs > 30_000 {
+	if err := readStrictJSON(filepath.Join(watchdog.runtimeDirectory, "monitor", "monitor-heartbeat.json"), 4096, &heartbeat); err != nil || heartbeat.Version != 1 || heartbeat.EvaluationDurationMs < 0 || heartbeat.EvaluationDurationMs > 30_000 || !validTelegramContextHeartbeat(heartbeat) {
 		status.SafeErrorCodes = append(status.SafeErrorCodes, "SENTINEL_HEARTBEAT_INVALID")
 	} else {
 		status.MonitorFresh = !heartbeat.CheckedAt.After(now.Add(30*time.Second)) && heartbeat.CheckedAt.After(now.Add(-90*time.Second))
@@ -76,6 +77,13 @@ func (watchdog *Watchdog) Status() WatchdogStatus {
 		}
 		if !heartbeat.DatabaseReachable {
 			status.SafeErrorCodes = append(status.SafeErrorCodes, "DATABASE_UNAVAILABLE")
+		}
+		status.SentinelTelegramContextTotal = heartbeat.TelegramContextTotals
+		switch heartbeat.TelegramContextStatus {
+		case TelegramTenantContextRedactedChatNotPrivate:
+			status.SafeWarningCodes = append(status.SafeWarningCodes, "TELEGRAM_CONTEXT_REDACTED_CHAT_NOT_PRIVATE")
+		case TelegramTenantContextRedactedVerificationFailed:
+			status.SafeWarningCodes = append(status.SafeWarningCodes, "TELEGRAM_CONTEXT_REDACTED_VERIFICATION_FAILED")
 		}
 	}
 	var probe HostProbe
@@ -140,6 +148,29 @@ func (watchdog *Watchdog) Status() WatchdogStatus {
 		status.Status = "degraded"
 	}
 	return status
+}
+
+func validTelegramContextHeartbeat(heartbeat MonitorHeartbeat) bool {
+	switch heartbeat.TelegramContextStatus {
+	case "", TelegramTenantContextDisabled, TelegramTenantContextPendingVerification,
+		TelegramTenantContextPrivateVerified, TelegramTenantContextRedactedChatNotPrivate,
+		TelegramTenantContextRedactedVerificationFailed:
+	default:
+		return false
+	}
+	for result := range heartbeat.TelegramContextTotals {
+		known := false
+		for _, allowed := range telegramContextMetricResults {
+			if result == string(allowed) {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return false
+		}
+	}
+	return true
 }
 
 func validHostProbe(probe HostProbe) bool {
