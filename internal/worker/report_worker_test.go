@@ -2,8 +2,12 @@ package worker
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -390,8 +394,11 @@ func TestReportWorkerStopsChunksAndOpensCircuitWhenRemoteStateIsUnknown(t *testi
 }
 
 func TestFailureEvidenceDistinguishesIncompleteResponseFromUnknownRemoteState(t *testing.T) {
+	status := 200
+	soap, base64OK, zipOK := true, true, false
 	result := failureFromSafeError(&sml.SafeError{
-		Code: "SML_RESPONSE_READ_FAILED", Phase: sml.ResponseStarted, Retryable: false,
+		Code: "SML_ZIP_FORMAT_INVALID", Phase: sml.ResponseStarted, Retryable: false,
+		ProtocolEvidence: &sml.ProtocolEvidence{RequestRef: "NXR-ABCDEFGHIJKLMNOP", RequestCount: 1, HTTPStatus: &status, SOAPValid: &soap, Base64Valid: &base64OK, ZIPSignatureValid: &zipOK, TenantConcurrentQueries: 1, HostConcurrentQueries: 1},
 	})
 	if result.TransportPhase != failure.PhaseResponseStarted || result.RemoteStateUnknown {
 		t.Fatalf("response-started failure = %+v", result)
@@ -400,6 +407,9 @@ func TestFailureEvidenceDistinguishesIncompleteResponseFromUnknownRemoteState(t 
 	evidence := buildFailureEvidence(report.Run{Attempt: 1}, *result, now.Add(-time.Second), now)
 	if evidence.ConnectionVersion != nil {
 		t.Fatalf("unconfigured connection version = %+v", evidence.ConnectionVersion)
+	}
+	if evidence.Version != 2 || evidence.ProtocolEvidence == nil || evidence.ProtocolEvidence.RequestRef != "NXR-ABCDEFGHIJKLMNOP" || evidence.ProtocolEvidence.ZIPSignatureValid == nil || *evidence.ProtocolEvidence.ZIPSignatureValid {
+		t.Fatalf("protocol evidence = %+v", evidence.ProtocolEvidence)
 	}
 }
 
@@ -526,6 +536,45 @@ func TestReportWorkerFailsMalformedOutputAndSurfacesEmptyQueue(t *testing.T) {
 	emptyWorker := NewReportWorker(&fakeRunStore{claimErr: report.ErrNoQueuedRun}, nil, nil, "worker-a", func() time.Time { return now })
 	if err := emptyWorker.ProcessOne(context.Background()); !errors.Is(err, report.ErrNoQueuedRun) {
 		t.Fatalf("empty queue error = %v", err)
+	}
+}
+
+func TestReportWorkerKeepsSuccessfulJavaWSProtocolEvidenceWhenReportBuildFails(t *testing.T) {
+	now := time.Date(2026, 7, 21, 8, 0, 0, 0, time.UTC)
+	resultXML := []byte(`<ResultSet><Row><total_amount>bad</total_amount></Row></ResultSet>`)
+	zippedResult, err := sml.CompressPayload(resultXML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/xml")
+		_, _ = response.Write([]byte(`<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><response><return>` + base64.StdEncoding.EncodeToString(zippedResult) + `</return></response></soap:Body></soap:Envelope>`))
+	}))
+	defer server.Close()
+
+	store := &fakeRunStore{run: report.Run{
+		ID: uuid.New(), TenantID: uuid.New(), ReportKey: report.CashBankPayments,
+		Source: report.SourceSchedule, ResultKind: report.ResultSummary, Status: report.StatusClaimed, Attempt: 1,
+		Period: report.Period{Preset: report.Custom, DateFrom: "2026-07-21", DateTo: "2026-07-21"},
+	}}
+	client := sml.NewClient(sml.EndpointPolicy{AllowedPrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}}, 2*time.Second, 1024*1024, 100)
+	worker := NewReportWorker(store, connectionProviderFunc(func(context.Context, uuid.UUID) (sml.Connection, error) {
+		return sml.Connection{EndpointURL: server.URL, ConfigFileName: "SMLConfigDATA.xml", DatabaseName: "demo"}, nil
+	}), client, "worker-a", func() time.Time { return now })
+
+	if err := worker.ProcessOne(context.Background()); err != nil {
+		t.Fatalf("ProcessOne() error = %v", err)
+	}
+	evidence := store.failureEvidence
+	if store.failedCode != "REPORT_OUTPUT_INVALID" || evidence == nil || evidence.Stage != failure.StageBuildReport {
+		t.Fatalf("failure evidence = %+v", evidence)
+	}
+	protocol := evidence.ProtocolEvidence
+	if evidence.Version != 2 || protocol == nil || protocol.RequestCount != 1 || protocol.RetryCount != 0 || protocol.HTTPStatus == nil || *protocol.HTTPStatus != http.StatusOK {
+		t.Fatalf("protocol evidence = %+v", protocol)
+	}
+	if protocol.SOAPValid == nil || !*protocol.SOAPValid || protocol.Base64Valid == nil || !*protocol.Base64Valid || protocol.ZIPSignatureValid == nil || !*protocol.ZIPSignatureValid {
+		t.Fatalf("successful JavaWS protocol evidence = %+v", protocol)
 	}
 }
 

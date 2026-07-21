@@ -3,8 +3,10 @@ package sml
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -24,13 +26,25 @@ type Connection struct {
 }
 
 type SafeError struct {
-	Code      string
-	Retryable bool
-	Phase     TransportPhase
+	Code             string
+	Retryable        bool
+	Phase            TransportPhase
+	ProtocolEvidence *ProtocolEvidence
 }
 
 func (err *SafeError) Error() string {
 	return err.Code
+}
+
+func protocolSafeError(recorder *ProtocolRecorder, code string, retryable bool, phase TransportPhase) *SafeError {
+	error := &SafeError{Code: code, Retryable: retryable, Phase: phase}
+	if recorder != nil {
+		evidence := recorder.Snapshot()
+		if evidence.RequestRef != "" {
+			error.ProtocolEvidence = &evidence
+		}
+	}
+	return error
 }
 
 type TransportPhase string
@@ -58,16 +72,24 @@ func NewClient(policy EndpointPolicy, timeout time.Duration, maximumResponseByte
 }
 
 func (client *Client) Query(ctx context.Context, connection Connection, sql string) ([]map[string]string, error) {
+	recorder := protocolRecorder(ctx)
+	if recorder == nil {
+		var err error
+		recorder, ctx, err = NewProtocolRecorder(ctx)
+		if err != nil {
+			return nil, &SafeError{Code: "SML_REQUEST_INVALID", Retryable: false}
+		}
+	}
 	if connection.ConfigFileName == "" || connection.DatabaseName == "" || sql == "" {
-		return nil, &SafeError{Code: "SML_CONFIGURATION_INVALID", Retryable: false}
+		return nil, protocolSafeError(recorder, "SML_CONFIGURATION_INVALID", false, "")
 	}
 	resolved, err := client.policy.Resolve(ctx, connection.EndpointURL)
 	if err != nil {
-		return nil, &SafeError{Code: "SML_ENDPOINT_DENIED", Retryable: false}
+		return nil, protocolSafeError(recorder, "SML_ENDPOINT_DENIED", false, "")
 	}
 	compressed, err := CompressPayload([]byte(sql))
 	if err != nil {
-		return nil, &SafeError{Code: "SML_QUERY_ENCODING_FAILED", Retryable: false}
+		return nil, protocolSafeError(recorder, "SML_QUERY_ENCODING_FAILED", false, "")
 	}
 	envelope := BuildQueryEnvelope("NEXTSTEP", connection.ConfigFileName, connection.DatabaseName, base64.StdEncoding.EncodeToString(compressed))
 
@@ -75,17 +97,26 @@ func (client *Client) Query(ctx context.Context, connection Connection, sql stri
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, resolved.URL.String(), bytes.NewBufferString(envelope))
 	if err != nil {
-		return nil, &SafeError{Code: "SML_REQUEST_INVALID", Retryable: false}
+		return nil, protocolSafeError(recorder, "SML_REQUEST_INVALID", false, "")
 	}
 	request.Header.Set("Content-Type", "text/xml; charset=utf-8")
 	request.Header.Set("SOAPAction", "")
+	request.Header.Set(nextstepRequestRefHeader, recorder.Snapshot().RequestRef)
 	if connection.Username != "" || connection.Password != "" {
 		request.SetBasicAuth(connection.Username, connection.Password)
 	}
 	wroteRequest, responseStarted := false, false
 	trace := &httptrace.ClientTrace{
-		WroteRequest:         func(httptrace.WroteRequestInfo) { wroteRequest = true },
-		GotFirstResponseByte: func() { responseStarted = true },
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			if !wroteRequest {
+				wroteRequest = true
+				recorder.requestSent(time.Now())
+			}
+		},
+		GotFirstResponseByte: func() {
+			responseStarted = true
+			recorder.firstResponseByte(time.Now())
+		},
 	}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
 
@@ -101,40 +132,66 @@ func (client *Client) Query(ctx context.Context, connection Connection, sql stri
 			phase = ResponseStarted
 		}
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			return nil, &SafeError{Code: "SML_TIMEOUT", Retryable: phase == BeforeRequestSent, Phase: phase}
+			return nil, protocolSafeError(recorder, "SML_TIMEOUT", phase == BeforeRequestSent, phase)
 		}
-		return nil, &SafeError{Code: "SML_UNREACHABLE", Retryable: phase == BeforeRequestSent, Phase: phase}
+		return nil, protocolSafeError(recorder, "SML_UNREACHABLE", phase == BeforeRequestSent, phase)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, client.maximumResponseBytes+1))
 	if err != nil {
-		return nil, &SafeError{Code: "SML_RESPONSE_READ_FAILED", Retryable: false, Phase: ResponseStarted}
+		return nil, protocolSafeError(recorder, "SML_RESPONSE_READ_FAILED", false, ResponseStarted)
 	}
+	completedAt := time.Now().UTC()
+	responseBytes := int64(len(body))
+	status := response.StatusCode
+	digest := sha256.Sum256(body)
+	recorder.mutate(func(evidence *ProtocolEvidence) {
+		evidence.ResponseCompletedAt = &completedAt
+		evidence.HTTPStatus = &status
+		evidence.ResponseContentType = normalizeContentType(response.Header.Get("Content-Type"))
+		evidence.ResponseBodyBytes = &responseBytes
+		evidence.ResponseSHA256 = hex.EncodeToString(digest[:])
+	})
 	if int64(len(body)) > client.maximumResponseBytes {
-		return nil, &SafeError{Code: "SML_RESPONSE_TOO_LARGE", Retryable: false}
+		return nil, protocolSafeError(recorder, "SML_RESPONSE_TOO_LARGE", false, ResponseStarted)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		retryable := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
-		return nil, &SafeError{Code: "SML_HTTP_" + strconv.Itoa(response.StatusCode), Retryable: retryable}
+		return nil, protocolSafeError(recorder, "SML_HTTP_"+strconv.Itoa(response.StatusCode), retryable, ResponseStarted)
 	}
 	encodedReturn, err := ExtractSOAPReturn(body)
 	if err != nil {
-		return nil, &SafeError{Code: "SML_SOAP_INVALID", Retryable: false}
+		valid := false
+		recorder.mutate(func(evidence *ProtocolEvidence) { evidence.SOAPValid = &valid })
+		return nil, protocolSafeError(recorder, "SML_SOAP_INVALID", false, ResponseStarted)
 	}
+	soapValid, soapCharacters := true, len(encodedReturn)
+	recorder.mutate(func(evidence *ProtocolEvidence) {
+		evidence.SOAPValid = &soapValid
+		evidence.SOAPReturnCharacters = &soapCharacters
+	})
 	zippedResult, err := base64.StdEncoding.DecodeString(encodedReturn)
 	if err != nil {
-		return nil, &SafeError{Code: "SML_RETURN_NOT_BASE64", Retryable: false}
+		valid := false
+		recorder.mutate(func(evidence *ProtocolEvidence) { evidence.Base64Valid = &valid })
+		return nil, protocolSafeError(recorder, "SML_RETURN_NOT_BASE64", false, ResponseStarted)
 	}
+	base64Valid, zipValid, decodedBytes := true, hasZIPSignature(zippedResult), int64(len(zippedResult))
+	recorder.mutate(func(evidence *ProtocolEvidence) {
+		evidence.Base64Valid = &base64Valid
+		evidence.DecodedPayloadBytes = &decodedBytes
+		evidence.ZIPSignatureValid = &zipValid
+	})
 	xmlPayload, err := DecompressPayload(zippedResult, client.maximumResponseBytes*4)
 	if err != nil {
 		// The HTTP body is already complete. A ZIP decoding failure does not
 		// mean the remote query may still be running, so it must not open the
 		// tenant uncertainty circuit used for transport timeouts.
-		return nil, &SafeError{Code: zipSafeErrorCode(err), Retryable: false}
+		return nil, protocolSafeError(recorder, zipSafeErrorCode(err), false, ResponseStarted)
 	}
 	rows, err := ParseRows(xmlPayload, client.maximumRows)
 	if err != nil {
-		return nil, &SafeError{Code: "SML_RESULT_INVALID", Retryable: false}
+		return nil, protocolSafeError(recorder, "SML_RESULT_INVALID", false, ResponseStarted)
 	}
 	return rows, nil
 }

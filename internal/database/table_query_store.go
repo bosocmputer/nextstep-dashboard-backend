@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -280,7 +281,7 @@ func (store *TableQueryStore) QueryOccurrences(ctx context.Context, incidentID u
 		if !exists {
 			return sentinel.ErrNotFound
 		}
-		rows, queryErr := tx.Query(ctx, `select event.id,coalesce(event.tenant_id,'00000000-0000-0000-0000-000000000000'::uuid),coalesce(tenant.name,''),coalesce(event.report_key,''),coalesce(event.source_kind,''),coalesce(event.safe_error_code,''),event.observed_at,event.failure_evidence_version,event.failure_level,event.failure_category,event.failure_stage,event.failure_transport_phase,event.failure_occurred_at,event.failure_duration_ms,event.failure_attempt,event.failure_retryable,event.failure_remote_state_unknown,event.connection_version,event.reports_total,event.reports_succeeded,event.reports_failed,event.reports_cancelled,event.notification_outcome,coalesce(history.after_json->>'endpointUrl',''),coalesce(current.endpoint_url,''),current.version,test.cooldown_until from operational_incident_events event left join tenants tenant on tenant.id=event.tenant_id left join tenant_sml_connections current on current.tenant_id=event.tenant_id left join lateral(select audit.after_json from audit_logs audit where audit.tenant_id=event.tenant_id and audit.action='SML_CONNECTION_REPLACED' and event.connection_version is not null and audit.after_json->>'version'=event.connection_version::text order by audit.created_at desc limit 1)history on true left join sml_connection_tests test on test.tenant_id=event.tenant_id where `+where+` order by event.observed_at desc,event.id desc offset $9 limit $10`, append(args, input.Page*input.PageSize, input.PageSize)...)
+		rows, queryErr := tx.Query(ctx, `select event.id,coalesce(event.tenant_id,'00000000-0000-0000-0000-000000000000'::uuid),coalesce(tenant.name,''),coalesce(event.report_key,''),coalesce(event.source_kind,''),coalesce(event.safe_error_code,''),event.observed_at,event.failure_evidence_version,event.failure_protocol_evidence,event.failure_level,event.failure_category,event.failure_stage,event.failure_transport_phase,event.failure_occurred_at,event.failure_duration_ms,event.failure_attempt,event.failure_retryable,event.failure_remote_state_unknown,event.connection_version,event.reports_total,event.reports_succeeded,event.reports_failed,event.reports_cancelled,event.notification_outcome,coalesce(history.after_json->>'endpointUrl',''),coalesce(current.endpoint_url,''),current.version,test.cooldown_until from operational_incident_events event left join tenants tenant on tenant.id=event.tenant_id left join tenant_sml_connections current on current.tenant_id=event.tenant_id left join lateral(select audit.after_json from audit_logs audit where audit.tenant_id=event.tenant_id and audit.action='SML_CONNECTION_REPLACED' and event.connection_version is not null and audit.after_json->>'version'=event.connection_version::text order by audit.created_at desc limit 1)history on true left join sml_connection_tests test on test.tenant_id=event.tenant_id where `+where+` order by event.observed_at desc,event.id desc offset $9 limit $10`, append(args, input.Page*input.PageSize, input.PageSize)...)
 		if queryErr != nil {
 			return queryErr
 		}
@@ -308,7 +309,8 @@ func scanTableOccurrence(row interface{ Scan(...any) error }) (sentinel.Incident
 	var outcome *string
 	var historicalURL, currentURL string
 	var cooldown *time.Time
-	err := row.Scan(&item.ID, &item.TenantID, &item.TenantName, &item.ReportKey, &item.SourceKind, &item.SafeErrorCode, &item.ObservedAt, &evidenceVersion, &level, &category, &stage, &transport, &occurredAt, &duration, &attempt, &retryable, &remoteUnknown, &connectionVersion, &total, &succeeded, &failed, &cancelled, &outcome, &historicalURL, &currentURL, &currentVersion, &cooldown)
+	var protocolJSON []byte
+	err := row.Scan(&item.ID, &item.TenantID, &item.TenantName, &item.ReportKey, &item.SourceKind, &item.SafeErrorCode, &item.ObservedAt, &evidenceVersion, &protocolJSON, &level, &category, &stage, &transport, &occurredAt, &duration, &attempt, &retryable, &remoteUnknown, &connectionVersion, &total, &succeeded, &failed, &cancelled, &outcome, &historicalURL, &currentURL, &currentVersion, &cooldown)
 	if err != nil {
 		return item, err
 	}
@@ -319,6 +321,13 @@ func scanTableOccurrence(row interface{ Scan(...any) error }) (sentinel.Incident
 		}
 		if transport != nil {
 			e.TransportPhase = failure.TransportPhase(*transport)
+		}
+		if len(protocolJSON) > 0 {
+			var protocol failure.JavaWSProtocolEvidence
+			if err := json.Unmarshal(protocolJSON, &protocol); err != nil {
+				return item, fmt.Errorf("decode table occurrence protocol evidence: %w", err)
+			}
+			e.ProtocolEvidence = &protocol
 		}
 		item.FailureEvidence = &e
 	}

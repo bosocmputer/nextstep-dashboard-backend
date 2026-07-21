@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,7 +36,7 @@ func (store *SentinelStore) ListIncidentOccurrences(ctx context.Context, inciden
 		       event.failure_evidence_version, event.failure_level, event.failure_category, event.failure_stage,
 		       event.failure_transport_phase, event.failure_occurred_at, event.failure_duration_ms,
 		       event.failure_attempt, event.failure_retryable, event.failure_remote_state_unknown,
-		       event.connection_version, event.reports_total, event.reports_succeeded, event.reports_failed,
+		       event.connection_version, event.failure_protocol_evidence, event.reports_total, event.reports_succeeded, event.reports_failed,
 		       event.reports_cancelled, event.notification_outcome,
 		       coalesce(history.after_json->>'endpointUrl', ''), coalesce(current.endpoint_url, ''), current.version,
 		       test.cooldown_until
@@ -70,9 +71,10 @@ func (store *SentinelStore) ListIncidentOccurrences(ctx context.Context, inciden
 		var outcome *string
 		var historicalURL, currentURL string
 		var cooldown *time.Time
+		var protocolJSON []byte
 		if err := rows.Scan(&item.ID, &item.TenantID, &item.TenantName, &item.ReportKey, &item.SourceKind,
 			&item.SafeErrorCode, &item.ObservedAt, &evidenceVersion, &level, &category, &stage, &transport,
-			&occurredAt, &duration, &attempt, &retryable, &remoteUnknown, &connectionVersion,
+			&occurredAt, &duration, &attempt, &retryable, &remoteUnknown, &connectionVersion, &protocolJSON,
 			&total, &succeeded, &failed, &cancelled, &outcome, &historicalURL, &currentURL, &currentVersion, &cooldown); err != nil {
 			return sentinel.OccurrencePage{}, fmt.Errorf("scan operational incident occurrence: %w", err)
 		}
@@ -83,6 +85,13 @@ func (store *SentinelStore) ListIncidentOccurrences(ctx context.Context, inciden
 			}
 			if transport != nil {
 				evidence.TransportPhase = failure.TransportPhase(*transport)
+			}
+			if len(protocolJSON) > 0 {
+				var protocol failure.JavaWSProtocolEvidence
+				if err := json.Unmarshal(protocolJSON, &protocol); err != nil {
+					return sentinel.OccurrencePage{}, fmt.Errorf("decode occurrence protocol evidence: %w", err)
+				}
+				evidence.ProtocolEvidence = &protocol
 			}
 			item.FailureEvidence = &evidence
 		}

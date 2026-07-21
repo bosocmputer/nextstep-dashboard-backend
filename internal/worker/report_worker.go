@@ -42,6 +42,10 @@ type SourceConsistencyStore interface {
 	SetSourceConsistency(context.Context, uuid.UUID, string, report.SourceConsistency, time.Time) error
 }
 
+type QueryConcurrencyEvidenceStore interface {
+	QueryConcurrencyEvidence(context.Context, uuid.UUID, time.Time) (int, int, error)
+}
+
 type ConnectionProvider interface {
 	Open(context.Context, uuid.UUID) (sml.Connection, error)
 }
@@ -70,6 +74,7 @@ type executionFailure struct {
 	Retryable          bool
 	RemoteStateUnknown bool
 	PreRequestFailure  bool
+	ProtocolEvidence   *failure.JavaWSProtocolEvidence
 }
 
 func NewReportWorker(store ReportRunStore, connections ConnectionProvider, client ReportQueryClient, workerID string, now func() time.Time) *ReportWorker {
@@ -117,7 +122,30 @@ func (worker *ReportWorker) ProcessOne(ctx context.Context) error {
 	leaseErrors := make(chan error, 1)
 	go worker.keepLease(executionCtx, run.ID, stopExecution, leaseErrors)
 
-	summary, failure := worker.execute(executionCtx, run)
+	recorder, evidenceCtx, recorderErr := sml.NewProtocolRecorder(executionCtx)
+	var summary report.SummaryResult
+	var executionErr *executionFailure
+	if recorderErr != nil {
+		executionErr = &executionFailure{Code: "SML_REQUEST_INVALID", Stage: failure.StageSendRequest}
+	} else {
+		if evidenceStore, ok := worker.store.(QueryConcurrencyEvidenceStore); ok {
+			if tenantConcurrent, hostConcurrent, evidenceErr := evidenceStore.QueryConcurrencyEvidence(evidenceCtx, run.ID, worker.now().UTC()); evidenceErr == nil {
+				recorder.SetConcurrency(tenantConcurrent, hostConcurrent)
+			}
+		}
+		summary, executionErr = worker.execute(evidenceCtx, run)
+		if executionErr != nil && executionErr.ProtocolEvidence == nil {
+			protocol := recorder.Snapshot()
+			// A generated reference or admission count alone is not transport
+			// evidence. Attach protocol metadata only after the HTTP request was
+			// actually written, including when JavaWS succeeded and a later
+			// Nextstep report-build stage failed.
+			if protocol.RequestCount > 0 {
+				converted := convertProtocolEvidence(protocol)
+				executionErr.ProtocolEvidence = &converted
+			}
+		}
+	}
 	stopExecution()
 	select {
 	case leaseErr := <-leaseErrors:
@@ -127,24 +155,24 @@ func (worker *ReportWorker) ProcessOne(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if failure != nil {
+	if executionErr != nil {
 		now = worker.now().UTC()
-		evidence := buildFailureEvidence(run, *failure, startedAt, now)
-		if failure.RemoteStateUnknown {
+		evidence := buildFailureEvidence(run, *executionErr, startedAt, now)
+		if executionErr.RemoteStateUnknown {
 			// The remote PostgreSQL query may still be running after JavaWS has
 			// timed out. Failing the run and opening the tenant cooldown must be a
 			// single transaction so a crash cannot leave either invariant half-set.
 			return worker.store.FailRemoteUnknown(ctx, run.ID, worker.workerID, evidence, now, now.Add(10*time.Minute))
 		}
-		if failure.PreRequestFailure {
+		if executionErr.PreRequestFailure {
 			if run.Source == report.SourceDashboard && run.Attempt < 2 {
-				return worker.store.RetryPreRequestFailure(ctx, run.ID, worker.workerID, failure.Code, now.Add(30*time.Second), now)
+				return worker.store.RetryPreRequestFailure(ctx, run.ID, worker.workerID, executionErr.Code, now.Add(30*time.Second), now)
 			}
 			return worker.store.FailPreRequestFailure(ctx, run.ID, worker.workerID, evidence, now)
 		}
-		if failure.Retryable && failure.Code != "SML_TIMEOUT" && run.Source != report.SourceBackground && run.Attempt < maximumReportAttempts {
+		if executionErr.Retryable && executionErr.Code != "SML_TIMEOUT" && run.Source != report.SourceBackground && run.Attempt < maximumReportAttempts {
 			backoff := 30 * time.Second * time.Duration(1<<(run.Attempt-1))
-			return worker.store.Retry(ctx, run.ID, worker.workerID, failure.Code, now.Add(backoff), now)
+			return worker.store.Retry(ctx, run.ID, worker.workerID, executionErr.Code, now.Add(backoff), now)
 		}
 		return worker.store.Fail(ctx, run.ID, worker.workerID, evidence, now)
 	}
@@ -486,12 +514,30 @@ func (worker *ReportWorker) executePlan(ctx context.Context, run report.Run, def
 func failureFromSafeError(safeError *sml.SafeError) *executionFailure {
 	preRequest := safeError.Retryable && safeError.Phase == sml.BeforeRequestSent &&
 		(safeError.Code == "SML_TIMEOUT" || safeError.Code == "SML_UNREACHABLE")
-	return &executionFailure{
+	result := &executionFailure{
 		Code: safeError.Code, Retryable: safeError.Retryable,
 		Stage:              failure.EvidenceForCode(safeError.Code).Stage,
 		TransportPhase:     failure.TransportPhase(safeError.Phase),
 		RemoteStateUnknown: safeError.Phase == sml.RequestSentResultUnknown,
 		PreRequestFailure:  preRequest,
+	}
+	if safeError.ProtocolEvidence != nil {
+		converted := convertProtocolEvidence(*safeError.ProtocolEvidence)
+		result.ProtocolEvidence = &converted
+	}
+	return result
+}
+
+func convertProtocolEvidence(evidence sml.ProtocolEvidence) failure.JavaWSProtocolEvidence {
+	return failure.JavaWSProtocolEvidence{
+		RequestRef: evidence.RequestRef, RequestCount: evidence.RequestCount, RetryCount: evidence.RetryCount,
+		RequestSentAt: evidence.RequestSentAt, FirstResponseByteAt: evidence.FirstResponseByteAt,
+		ResponseCompletedAt: evidence.ResponseCompletedAt, HTTPStatus: evidence.HTTPStatus,
+		ResponseContentType: evidence.ResponseContentType, ResponseBodyBytes: evidence.ResponseBodyBytes,
+		SOAPValid: evidence.SOAPValid, SOAPReturnCharacters: evidence.SOAPReturnCharacters,
+		Base64Valid: evidence.Base64Valid, DecodedPayloadBytes: evidence.DecodedPayloadBytes,
+		ZIPSignatureValid: evidence.ZIPSignatureValid, ResponseSHA256: evidence.ResponseSHA256,
+		TenantConcurrentQueries: evidence.TenantConcurrentQueries, HostConcurrentQueries: evidence.HostConcurrentQueries,
 	}
 }
 
@@ -511,6 +557,7 @@ func buildFailureEvidence(run report.Run, execution executionFailure, startedAt,
 	evidence.Attempt = &attempt
 	evidence.Retryable = execution.Retryable
 	evidence.RemoteStateUnknown = execution.RemoteStateUnknown
+	evidence.ProtocolEvidence = execution.ProtocolEvidence
 	if run.DataSourceVersion > 0 {
 		connectionVersion := run.DataSourceVersion
 		evidence.ConnectionVersion = &connectionVersion

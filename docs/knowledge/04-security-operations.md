@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-19
+last_verified: 2026-07-21
 source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/sml/config_service.go, internal/database/sml_test_coordinator.go, internal/retention/worker.go, internal/sentinel/service.go, internal/database/sentinel_store.go, internal/database/sentinel_subject_store.go, internal/failure/catalog.go, deploy/RUNBOOK.md]
 tags: [backend, security, operations, retention]
 ---
@@ -61,6 +61,11 @@ tags: [backend, security, operations, retention]
 - Incidents use root-cause/severity families, five-minute episodes, and per-subject lifecycle state. Discrete bursts send at most OPEN plus one UPDATE; continuous probes do not inflate occurrence/version on every heartbeat. Acknowledge stops reminders; only system evidence resolves every active subject. Manual closure is `CLOSED_ACCEPTED` with a reason.
 - The emergency database alert lane stores only a safe reference and timestamps in a protected volume. Host probe and monitor heartbeat files are bounded, schema-checked, and contain no customer data.
 - Admin incident APIs are Admin-only, CSRF-protected for mutations, and `no-store`. Telegram tenant context is disabled by default. The `private_chat` mode is enabled only after `getChat` verifies the exact private destination; it may carry a sanitized tenant name and JavaWS Base URL for tenant-scoped P1 alerts. Failed or non-private verification redacts that context without blocking the P1.
+- The Admin-only occurrence diagnosis endpoint is read-only and uses at most
+  three fixed PostgreSQL queries. It never contacts JavaWS. Customer copy may
+  contain the sanitized tenant name/Base URL and an opaque request reference;
+  Codex copy must exclude those customer-identifying fields. Neither copy may
+  contain SQL, raw responses, hashes, credentials, rows, or KPI values.
 - Incident events copy sanitized failure evidence and LINE/report impact at
   observation time, so the 365-day incident record remains useful after source
   Report or Notification retention. The occurrence resolver may match a

@@ -15,6 +15,7 @@ type IncidentAPI interface {
 	List(context.Context, sentinel.IncidentFilter) (sentinel.IncidentPage, error)
 	Get(context.Context, uuid.UUID) (sentinel.IncidentDetail, error)
 	Occurrences(context.Context, uuid.UUID, sentinel.OccurrenceFilter) (sentinel.OccurrencePage, error)
+	Diagnosis(context.Context, uuid.UUID, uuid.UUID) (sentinel.IncidentDiagnosis, error)
 	Acknowledge(context.Context, uuid.UUID, int) (sentinel.Incident, error)
 	AcceptRisk(context.Context, uuid.UUID, int, string) (sentinel.Incident, error)
 }
@@ -79,6 +80,26 @@ func registerIncidentRoutes(router chi.Router, adminAuth AdminAuthenticator, inc
 			return
 		}
 		writeJSON(response, http.StatusOK, map[string]any{"data": page.Data, "page": operationsPage(page.NextCursor, page.HasMore)})
+	})
+
+	router.Get("/api/v1/admin/operational-incidents/{incidentId}/occurrences/{occurrenceId}/diagnosis", func(response http.ResponseWriter, request *http.Request) {
+		if _, ok := operationalAdmin(response, request, adminAuth, false); !ok {
+			return
+		}
+		incidentID, ok := parseIncidentID(response, request)
+		if !ok {
+			return
+		}
+		occurrenceID, err := uuid.Parse(chi.URLParam(request, "occurrenceId"))
+		if err != nil {
+			writeProblem(response, request, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Occurrence ID is invalid.", false)
+			return
+		}
+		diagnosis, err := incidents.Diagnosis(request.Context(), incidentID, occurrenceID)
+		if handleIncidentError(response, request, err) {
+			return
+		}
+		writeJSON(response, http.StatusOK, diagnosis)
 	})
 
 	router.Get("/api/v1/admin/operational-incidents/{incidentId}", func(response http.ResponseWriter, request *http.Request) {

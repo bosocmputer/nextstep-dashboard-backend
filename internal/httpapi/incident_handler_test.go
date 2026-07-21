@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/auth"
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/bosocmputer/nextstep-dashboard-backend/internal/sentinel"
 	"github.com/google/uuid"
 )
@@ -30,6 +31,10 @@ func (fake *fakeIncidentAPI) Get(context.Context, uuid.UUID) (sentinel.IncidentD
 func (fake *fakeIncidentAPI) Occurrences(context.Context, uuid.UUID, sentinel.OccurrenceFilter) (sentinel.OccurrencePage, error) {
 	fake.calls++
 	return sentinel.OccurrencePage{}, nil
+}
+func (fake *fakeIncidentAPI) Diagnosis(context.Context, uuid.UUID, uuid.UUID) (sentinel.IncidentDiagnosis, error) {
+	fake.calls++
+	return sentinel.IncidentDiagnosis{Assessment: failure.AdminFailureAssessment{SummaryTH: "เชื่อมต่อ Java Web Service สำเร็จ แต่ข้อมูลตอบกลับไม่ใช่ ZIP"}}, nil
 }
 func (fake *fakeIncidentAPI) Acknowledge(context.Context, uuid.UUID, int) (sentinel.Incident, error) {
 	fake.calls++
@@ -80,6 +85,22 @@ func TestOperationalIncidentMutationRejectsMissingCSRF(t *testing.T) {
 	}
 	if api.calls != 0 {
 		t.Fatalf("incident mutation called %d times without valid CSRF", api.calls)
+	}
+}
+
+func TestOperationalIncidentDiagnosisRequiresAdminAndReturnsNoStore(t *testing.T) {
+	incidentID, occurrenceID := uuid.New(), uuid.New()
+	api := &fakeIncidentAPI{}
+	handler := NewHandler(Dependencies{Readiness: readinessFunc(func(context.Context) error { return nil }), AdminAuth: &fakeAdminAuth{}, Incidents: api})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/operational-incidents/"+incidentID.String()+"/occurrences/"+occurrenceID.String()+"/diagnosis", nil)
+	request.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: "admin-session"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "ข้อมูลตอบกลับไม่ใช่ ZIP") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" || api.calls != 1 {
+		t.Fatalf("headers=%v calls=%d", response.Header(), api.calls)
 	}
 }
 
