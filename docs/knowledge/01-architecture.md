@@ -83,6 +83,11 @@ Sentinel monitor (independent process)
 - Incident occurrences are a separately paginated Admin-only endpoint. It may
   return a sanitized JavaWS URL reference for investigation, but Incident list,
   Telegram, metrics, logs, and Codex clipboard never contain that URL.
+- The per-occurrence diagnosis endpoint combines persisted Evidence V2 with at
+  most two matching-run lookups for prior/subsequent success and a bounded
+  duration baseline. It maps the confirmed failure stage to an investigation
+  owner and may create a separate Admin-only customer message; opening it never
+  contacts JavaWS, retries a report, or changes incident state.
 - These endpoints are Admin-only, `no-store`, and never return SQL, raw response,
   credentials, KPI values, or delivery/invitation references.
 
