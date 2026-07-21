@@ -185,31 +185,50 @@ func OccurrenceCorrelationKey(occurrenceID uuid.UUID) string {
 }
 
 type Incident struct {
-	ID                  uuid.UUID            `json:"id"`
-	AlertRef            string               `json:"alertRef"`
-	IncidentType        string               `json:"incidentType"`
-	RootCause           RootCause            `json:"rootCause"`
-	Severity            Severity             `json:"severity"`
-	Status              Status               `json:"status"`
-	SafeErrorCode       string               `json:"safeErrorCode,omitempty"`
-	OccurrenceCount     int                  `json:"occurrenceCount"`
-	AffectedCount       int                  `json:"affectedCount"`
-	TenantExamples      []string             `json:"tenantExamples,omitempty"`
-	FirstSeenAt         time.Time            `json:"firstSeenAt"`
-	LastSeenAt          time.Time            `json:"lastSeenAt"`
-	AcknowledgedAt      *time.Time           `json:"acknowledgedAt,omitempty"`
-	ResolvedAt          *time.Time           `json:"resolvedAt,omitempty"`
-	AcceptedAt          *time.Time           `json:"acceptedAt,omitempty"`
-	AcceptedReason      string               `json:"acceptedReason,omitempty"`
-	Version             int                  `json:"version"`
-	Presentation        failure.Presentation `json:"presentation"`
-	IsDownstream        bool                 `json:"isDownstream"`
-	CausedByAlertRef    string               `json:"causedByAlertRef,omitempty"`
-	ObservationMode     ObservationMode      `json:"observationMode"`
-	SubjectType         SubjectType          `json:"subjectType"`
-	ActiveAffectedCount int                  `json:"activeAffectedCount"`
-	CauseBreakdown      []CauseBreakdown     `json:"causeBreakdown,omitempty"`
-	Measurement         *Measurement         `json:"measurement,omitempty"`
+	ID                  uuid.UUID                  `json:"id"`
+	AlertRef            string                     `json:"alertRef"`
+	IncidentType        string                     `json:"incidentType"`
+	RootCause           RootCause                  `json:"rootCause"`
+	Severity            Severity                   `json:"severity"`
+	Status              Status                     `json:"status"`
+	SafeErrorCode       string                     `json:"safeErrorCode,omitempty"`
+	OccurrenceCount     int                        `json:"occurrenceCount"`
+	AffectedCount       int                        `json:"affectedCount"`
+	TenantExamples      []string                   `json:"tenantExamples,omitempty"`
+	FirstSeenAt         time.Time                  `json:"firstSeenAt"`
+	LastSeenAt          time.Time                  `json:"lastSeenAt"`
+	AcknowledgedAt      *time.Time                 `json:"acknowledgedAt,omitempty"`
+	ResolvedAt          *time.Time                 `json:"resolvedAt,omitempty"`
+	AcceptedAt          *time.Time                 `json:"acceptedAt,omitempty"`
+	AcceptedReason      string                     `json:"acceptedReason,omitempty"`
+	Version             int                        `json:"version"`
+	Presentation        failure.Presentation       `json:"presentation"`
+	IsDownstream        bool                       `json:"isDownstream"`
+	CausedByAlertRef    string                     `json:"causedByAlertRef,omitempty"`
+	ObservationMode     ObservationMode            `json:"observationMode"`
+	SubjectType         SubjectType                `json:"subjectType"`
+	ActiveAffectedCount int                        `json:"activeAffectedCount"`
+	CauseBreakdown      []CauseBreakdown           `json:"causeBreakdown,omitempty"`
+	Measurement         *Measurement               `json:"measurement,omitempty"`
+	StatusPresentation  IncidentStatusPresentation `json:"statusPresentation"`
+}
+
+type IncidentLifecycleState string
+
+const (
+	LifecycleConnectionFailed   IncidentLifecycleState = "CONNECTION_FAILED"
+	LifecycleConnectionRestored IncidentLifecycleState = "CONNECTION_RESTORED"
+	LifecycleActiveProblem      IncidentLifecycleState = "ACTIVE_PROBLEM"
+	LifecycleResolved           IncidentLifecycleState = "RESOLVED"
+	LifecycleAcceptedRisk       IncidentLifecycleState = "ACCEPTED_RISK"
+)
+
+type IncidentStatusPresentation struct {
+	State           IncidentLifecycleState `json:"state"`
+	HeadlineTH      string                 `json:"headlineTh"`
+	StatusSummaryTH string                 `json:"statusSummaryTh"`
+	VerifiedAt      *time.Time             `json:"verifiedAt,omitempty"`
+	ActionRequired  bool                   `json:"actionRequired"`
 }
 
 type CauseBreakdown struct {
@@ -305,6 +324,9 @@ func telegramMessage(alert Alert, adminBaseURL string, includeTenantContext bool
 	if incident.ID != uuid.Nil {
 		adminURL += "/" + incident.ID.String()
 	}
+	if incident.RootCause == RootSMLConnectivity {
+		return telegramSMLMessage(alert, adminURL, includeTenantContext)
+	}
 	heading := "Nextstep Sentinel " + string(incident.Severity)
 	switch alert.Kind {
 	case "UPDATE":
@@ -369,6 +391,52 @@ func telegramMessage(alert Alert, adminBaseURL string, includeTenantContext bool
 	return message, result
 }
 
+func telegramSMLMessage(alert Alert, adminURL string, includeTenantContext bool) (string, TelegramContextResult) {
+	incident := alert.Incident
+	heading := "🔴 เชื่อมต่อ Java Web Service ไม่สำเร็จ"
+	switch alert.Kind {
+	case "UPDATE":
+		heading = "🔴 ยังเชื่อมต่อ Java Web Service ไม่ได้ · พบร้านเพิ่ม"
+	case "REMINDER":
+		heading = "🟠 ยังเชื่อมต่อ Java Web Service ไม่ได้"
+	case "RECOVERY":
+		heading = "✅ เชื่อมต่อ Java Web Service ได้แล้ว"
+	}
+
+	contextBudget := 3499 - len(heading) - 800
+	contextBlock, result := telegramTenantContextBlock(alert, includeTenantContext, contextBudget)
+	parts := []string{heading}
+	if contextBlock != "" {
+		parts = append(parts, contextBlock)
+	}
+	if alert.Kind == "RECOVERY" {
+		verifiedAt := incident.ResolvedAt
+		if verifiedAt == nil && !incident.LastSeenAt.IsZero() {
+			verifiedAt = &incident.LastSeenAt
+		}
+		if verifiedAt != nil {
+			parts = append(parts, "ตรวจสอบล่าสุด: "+formatTelegramThaiTime(*verifiedAt))
+		}
+		parts = append(parts, "อ้างอิง: "+incident.AlertRef)
+	} else {
+		parts = append(parts,
+			"ตรวจพบเมื่อ: "+formatTelegramThaiTime(incident.FirstSeenAt),
+			"ผลกระทบ: "+telegramImpact(incident.SafeErrorCode, incidentPresentation(incident)),
+			"อ้างอิง: "+incident.AlertRef,
+			"ตรวจสอบ: "+adminURL,
+		)
+	}
+	message := strings.Join(parts, "\n\n")
+	if len(message) > 3499 {
+		message = truncateUTF8Bytes(message, 3499)
+	}
+	return message, result
+}
+
+func formatTelegramThaiTime(value time.Time) string {
+	return value.In(time.FixedZone("Asia/Bangkok", 7*60*60)).Format("02/01/2006 15:04:05") + " น. เวลาไทย"
+}
+
 func telegramTenantContextBlock(alert Alert, include bool, budget int) (string, TelegramContextResult) {
 	if alert.Incident.SubjectType != SubjectTenant || alert.Incident.Severity != SeverityP1 {
 		return "", TelegramContextNotTenantScoped
@@ -386,7 +454,7 @@ func telegramTenantContextBlock(alert Alert, include bool, budget int) (string, 
 	omitted := alert.AdditionalTenantCount
 	budgetOmitted := false
 	urlUnavailable := false
-	includeURL := alert.Incident.RootCause == RootSMLConnectivity && alert.Kind != "RECOVERY"
+	includeURL := alert.Incident.RootCause == RootSMLConnectivity
 	for index, tenantContext := range alert.TenantContexts {
 		if index >= 5 {
 			omitted++
@@ -473,6 +541,38 @@ func incidentPresentation(incident Incident) failure.Presentation {
 		evidence.Category, evidence.Stage = failure.CategoryPlatform, failure.StagePlatformCheck
 	}
 	return failure.PresentationFor(evidence)
+}
+
+func incidentStatusPresentation(incident Incident) IncidentStatusPresentation {
+	if incident.Status == StatusClosedAccepted {
+		return IncidentStatusPresentation{
+			State: LifecycleAcceptedRisk, HeadlineTH: "Admin ปิดการติดตามเหตุนี้",
+			StatusSummaryTH: "ปิดโดยยอมรับความเสี่ยง ไม่ได้ยืนยันว่าปัญหาหายแล้ว", ActionRequired: false,
+		}
+	}
+	if incident.RootCause == RootSMLConnectivity {
+		if incident.Status == StatusResolved {
+			return IncidentStatusPresentation{
+				State: LifecycleConnectionRestored, HeadlineTH: "เชื่อมต่อ Java Web Service ได้แล้ว",
+				StatusSummaryTH: "ไม่ต้องดำเนินการ", VerifiedAt: incident.ResolvedAt, ActionRequired: false,
+			}
+		}
+		return IncidentStatusPresentation{
+			State: LifecycleConnectionFailed, HeadlineTH: "เชื่อมต่อ Java Web Service ไม่สำเร็จ",
+			StatusSummaryTH: "ควรตรวจสอบ Java Web Service, Network และ Server ของลูกค้า", ActionRequired: true,
+		}
+	}
+	if incident.Status == StatusResolved {
+		return IncidentStatusPresentation{
+			State: LifecycleResolved, HeadlineTH: "ระบบกลับมาทำงานปกติแล้ว",
+			StatusSummaryTH: "ไม่ต้องดำเนินการ", VerifiedAt: incident.ResolvedAt, ActionRequired: false,
+		}
+	}
+	presentation := incidentPresentation(incident)
+	return IncidentStatusPresentation{
+		State: LifecycleActiveProblem, HeadlineTH: presentation.TitleTH,
+		StatusSummaryTH: "ควรเปิดรายละเอียดและตรวจสอบ", ActionRequired: true,
+	}
 }
 
 func telegramImpact(code string, presentation failure.Presentation) string {

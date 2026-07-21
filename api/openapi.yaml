@@ -2406,6 +2406,19 @@ components:
     OperationalIncidentSubjectType:
       type: string
       enum: [TENANT, HOST_RESOURCE, BACKUP_POLICY, DATABASE, CONTAINER, LINE_PROVIDER]
+    OperationalIncidentLifecycleState:
+      type: string
+      enum: [CONNECTION_FAILED, CONNECTION_RESTORED, ACTIVE_PROBLEM, RESOLVED, ACCEPTED_RISK]
+    OperationalIncidentStatusPresentation:
+      type: object
+      additionalProperties: false
+      required: [state, headlineTh, statusSummaryTh, actionRequired]
+      properties:
+        state: {$ref: '#/components/schemas/OperationalIncidentLifecycleState'}
+        headlineTh: {type: string, maxLength: 160}
+        statusSummaryTh: {type: string, maxLength: 240}
+        verifiedAt: {type: string, format: date-time}
+        actionRequired: {type: boolean}
     OperationalMeasurement:
       type: object
       additionalProperties: false
@@ -2435,7 +2448,7 @@ components:
     OperationalIncident:
       type: object
       additionalProperties: false
-      required: [id, alertRef, incidentType, rootCause, severity, status, occurrenceCount, affectedCount, activeAffectedCount, observationMode, subjectType, firstSeenAt, lastSeenAt, version, presentation, isDownstream]
+      required: [id, alertRef, incidentType, rootCause, severity, status, occurrenceCount, affectedCount, activeAffectedCount, observationMode, subjectType, firstSeenAt, lastSeenAt, version, presentation, statusPresentation, isDownstream]
       properties:
         id: {type: string, format: uuid}
         alertRef: {type: string, pattern: '^NST-[A-Z0-9]{12}$'}
@@ -2460,6 +2473,7 @@ components:
         acceptedReason: {type: string, minLength: 12, maxLength: 500}
         version: {type: integer, minimum: 1}
         presentation: {$ref: '#/components/schemas/FailurePresentation'}
+        statusPresentation: {$ref: '#/components/schemas/OperationalIncidentStatusPresentation'}
         isDownstream: {type: boolean}
         causedByAlertRef: {type: string, pattern: '^NST-[A-Z0-9]{12}$'}
         events: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/OperationalIncidentEvent'}}
