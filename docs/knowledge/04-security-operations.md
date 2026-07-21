@@ -88,6 +88,10 @@ tags: [backend, security, operations, retention]
   include the sanitized URL matching the failure connection version; a
   current-only fallback is labelled explicitly. Acknowledge only stops
   reminders; recovery still requires system evidence for each subject.
+- Non-SML Telegram alerts use the confirmed failure stage to name the affected
+  Nextstep/LINE/platform area and the team that should investigate. Evidence V1
+  may identify a confirmed stage, but only Evidence V2 with an exact baseline
+  may make a statement about whether abnormal Nextstep load was observed.
 - Admin JavaWS investigation separates opening a sanitized URL in the operator's
   browser from a guarded Server Dashboard test. The test uses fixed `select 1`,
   shares report admission limits, is single-flight with cooldown, yields to an

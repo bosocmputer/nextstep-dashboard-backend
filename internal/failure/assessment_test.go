@@ -38,6 +38,14 @@ func TestAssessFailureDoesNotClaimNormalLoadWithoutEnoughEvidence(t *testing.T) 
 	}
 }
 
+func TestAssessConfirmedV1KeepsKnownStageOwnerButDoesNotClaimLoad(t *testing.T) {
+	evidence := Complete(Evidence{Version: 1, Level: LevelConfirmed, Category: CategoryReportProcessing, Stage: StageBuildReport, OccurredAt: time.Now(), SafeErrorCode: "REPORT_OUTPUT_INVALID"})
+	assessment := Assess(evidence, Baseline{})
+	if assessment.InvestigationOwner != OwnerNextstepTeam || assessment.ProblemArea != ProblemNextstepReportBuild || assessment.LoadSignal != LoadInsufficientEvidence {
+		t.Fatalf("confirmed v1 assessment = %+v", assessment)
+	}
+}
+
 func TestAssessFailureMapsNextstepStagesToConcreteThaiAreas(t *testing.T) {
 	tests := []struct {
 		stage Stage

@@ -303,6 +303,20 @@ func TestTelegramInvalidZIPShowsOnlyBoundedProtocolFacts(t *testing.T) {
 	}
 }
 
+func TestTelegramNamesConcreteNextstepStageAndOwner(t *testing.T) {
+	incident := Incident{
+		ID: uuid.New(), AlertRef: "NST-ABC123DEF456", IncidentType: "SCHEDULED_REPORT_FAILED",
+		RootCause: RootReportData, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "REPORT_OUTPUT_INVALID", AffectedCount: 1, ActiveAffectedCount: 1,
+		FirstSeenAt:    time.Date(2026, 7, 21, 1, 0, 0, 0, time.UTC),
+		CauseBreakdown: []CauseBreakdown{{Category: failure.CategoryReportProcessing, Stage: failure.StageBuildReport, AffectedCount: 1, ActiveAffectedCount: 1}},
+	}
+	message, _ := telegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://dashboard.nextstep-soft.com/admin/operational-incidents", false)
+	if !strings.Contains(message, "ส่วนที่เกิดปัญหา: ระบบสร้างรายงานของ Nextstep") || !strings.Contains(message, "ผู้ตรวจสอบ: ทีมดูแล Nextstep") || strings.Contains(message, "ประมวลผลภายใน") {
+		t.Fatalf("telegram message = %q", message)
+	}
+}
+
 func TestTelegramJavaWSLifecycleUsesConnectionStateLanguage(t *testing.T) {
 	resolvedAt := time.Date(2026, 7, 20, 10, 0, 25, 0, time.UTC)
 	incident := Incident{

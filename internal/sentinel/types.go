@@ -372,6 +372,9 @@ func telegramMessage(alert Alert, adminBaseURL string, includeTenantContext bool
 			heading, incident.AlertRef, len(incident.CauseBreakdown), strings.Join(causeLines, "\n"))
 	} else {
 		header = fmt.Sprintf("%s\nอ้างอิง: %s\nสาเหตุ: %s", heading, incident.AlertRef, presentation.TitleTH)
+		if assessment, ok := telegramFailureAssessment(alert); ok {
+			header += "\nส่วนที่เกิดปัญหา: " + assessment.ProblemAreaTH + "\nผู้ตรวจสอบ: " + assessment.OwnerTH
+		}
 	}
 	tail := fmt.Sprintf("ผลกระทบ: %s\nส่วนที่ได้รับผล: %d\nพบครั้งแรก: %s น. เวลาไทย", impact, affectedCount, thaiTime)
 	if incident.SafeErrorCode != "MULTIPLE_SAFE_ERRORS" {
@@ -389,6 +392,18 @@ func telegramMessage(alert Alert, adminBaseURL string, includeTenantContext bool
 		message = truncateUTF8Bytes(message, 3499)
 	}
 	return message, result
+}
+
+func telegramFailureAssessment(alert Alert) (failure.AdminFailureAssessment, bool) {
+	if len(alert.Incident.CauseBreakdown) == 0 {
+		return failure.AdminFailureAssessment{}, false
+	}
+	cause := alert.Incident.CauseBreakdown[0]
+	evidence := failure.EvidenceForCode(alert.Incident.SafeErrorCode)
+	evidence.Category, evidence.Stage, evidence.TransportPhase = cause.Category, cause.Stage, cause.TransportPhase
+	evidence.ProtocolEvidence = alert.ProtocolEvidence
+	evidence = failure.Complete(evidence)
+	return failure.Assess(evidence, failure.Baseline{}), true
 }
 
 func telegramSMLMessage(alert Alert, adminURL string, includeTenantContext bool) (string, TelegramContextResult) {

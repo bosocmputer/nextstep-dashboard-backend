@@ -73,7 +73,7 @@ func Assess(evidence Evidence, baseline Baseline) AdminFailureAssessment {
 	assessment := assessmentForStage(evidence)
 	assessment.LoadSignal = LoadInsufficientEvidence
 	assessment.LoadSignalTH = "หลักฐานยังไม่เพียงพอสำหรับประเมินภาระจาก Nextstep"
-	if evidence.Level == LevelLegacyPartial || evidence.Version < 2 {
+	if evidence.Level == LevelLegacyPartial {
 		assessment.InvestigationOwner = OwnerJointInvestigation
 		assessment.OwnerTH = "ทีม Nextstep และผู้ดูแลระบบที่เกี่ยวข้อง"
 		return assessment
