@@ -573,33 +573,34 @@ func upsertOperationalSubjects(ctx context.Context, tx pgx.Tx, assignments []obs
 }
 
 type persistedOperationalEvent struct {
-	IncidentID          uuid.UUID  `json:"incident_id"`
-	EventKind           string     `json:"event_kind"`
-	SourceKind          string     `json:"source_kind"`
-	SourceID            uuid.UUID  `json:"source_id"`
-	TenantID            string     `json:"tenant_id"`
-	SafeErrorCode       string     `json:"safe_error_code"`
-	ObservedAt          time.Time  `json:"observed_at"`
-	CorrelationKey      string     `json:"correlation_key"`
-	Downstream          bool       `json:"downstream"`
-	EvidenceVersion     *int       `json:"failure_evidence_version"`
-	EvidenceLevel       string     `json:"failure_level"`
-	EvidenceCategory    string     `json:"failure_category"`
-	EvidenceStage       string     `json:"failure_stage"`
-	EvidenceTransport   string     `json:"failure_transport_phase"`
-	EvidenceOccurredAt  *time.Time `json:"failure_occurred_at"`
-	EvidenceDurationMS  *int64     `json:"failure_duration_ms"`
-	EvidenceAttempt     *int       `json:"failure_attempt"`
-	EvidenceRetryable   *bool      `json:"failure_retryable"`
-	RemoteStateUnknown  *bool      `json:"failure_remote_state_unknown"`
-	ConnectionVersion   *int       `json:"connection_version"`
-	ReportKey           string     `json:"report_key"`
-	TriggerKind         string     `json:"trigger_kind"`
-	ReportsTotal        *int       `json:"reports_total"`
-	ReportsSucceeded    *int       `json:"reports_succeeded"`
-	ReportsFailed       *int       `json:"reports_failed"`
-	ReportsCancelled    *int       `json:"reports_cancelled"`
-	NotificationOutcome string     `json:"notification_outcome"`
+	IncidentID          uuid.UUID       `json:"incident_id"`
+	EventKind           string          `json:"event_kind"`
+	SourceKind          string          `json:"source_kind"`
+	SourceID            uuid.UUID       `json:"source_id"`
+	TenantID            string          `json:"tenant_id"`
+	SafeErrorCode       string          `json:"safe_error_code"`
+	ObservedAt          time.Time       `json:"observed_at"`
+	CorrelationKey      string          `json:"correlation_key"`
+	Downstream          bool            `json:"downstream"`
+	EvidenceVersion     *int            `json:"failure_evidence_version"`
+	EvidenceLevel       string          `json:"failure_level"`
+	EvidenceCategory    string          `json:"failure_category"`
+	EvidenceStage       string          `json:"failure_stage"`
+	EvidenceTransport   string          `json:"failure_transport_phase"`
+	EvidenceOccurredAt  *time.Time      `json:"failure_occurred_at"`
+	EvidenceDurationMS  *int64          `json:"failure_duration_ms"`
+	EvidenceAttempt     *int            `json:"failure_attempt"`
+	EvidenceRetryable   *bool           `json:"failure_retryable"`
+	RemoteStateUnknown  *bool           `json:"failure_remote_state_unknown"`
+	ConnectionVersion   *int            `json:"connection_version"`
+	ProtocolEvidence    json.RawMessage `json:"failure_protocol_evidence,omitempty"`
+	ReportKey           string          `json:"report_key"`
+	TriggerKind         string          `json:"trigger_kind"`
+	ReportsTotal        *int            `json:"reports_total"`
+	ReportsSucceeded    *int            `json:"reports_succeeded"`
+	ReportsFailed       *int            `json:"reports_failed"`
+	ReportsCancelled    *int            `json:"reports_cancelled"`
+	NotificationOutcome string          `json:"notification_outcome"`
 }
 
 func insertOperationalEvents(ctx context.Context, tx pgx.Tx, assignments []observationAssignment) error {
@@ -628,6 +629,13 @@ func insertOperationalEvents(ctx context.Context, tx pgx.Tx, assignments []obser
 			event.EvidenceTransport, event.EvidenceOccurredAt, event.EvidenceDurationMS, event.EvidenceAttempt = string(evidence.TransportPhase), &evidence.OccurredAt, evidence.DurationMS, evidence.Attempt
 			retryable, remote := evidence.Retryable, evidence.RemoteStateUnknown
 			event.EvidenceRetryable, event.RemoteStateUnknown, event.ConnectionVersion = &retryable, &remote, evidence.ConnectionVersion
+			if evidence.ProtocolEvidence != nil {
+				encoded, err := json.Marshal(evidence.ProtocolEvidence)
+				if err != nil || len(encoded) > 4096 {
+					return fmt.Errorf("encode operational protocol evidence")
+				}
+				event.ProtocolEvidence = encoded
+			}
 		}
 		if impact := observation.Impact; impact != nil {
 			total, succeeded, failed, cancelled := impact.ReportsTotal, impact.ReportsSucceeded, impact.ReportsFailed, impact.ReportsCancelled
@@ -648,7 +656,7 @@ func insertOperationalEvents(ctx context.Context, tx pgx.Tx, assignments []obser
 		  incident_id, event_kind, source_kind, source_id, tenant_id, safe_error_code, observed_at,
 		  correlation_key, downstream, failure_evidence_version, failure_level, failure_category,
 		  failure_stage, failure_transport_phase, failure_occurred_at, failure_duration_ms,
-		  failure_attempt, failure_retryable, failure_remote_state_unknown, connection_version,
+		  failure_attempt, failure_retryable, failure_remote_state_unknown, connection_version, failure_protocol_evidence,
 		  report_key, trigger_kind, reports_total, reports_succeeded, reports_failed,
 		  reports_cancelled, notification_outcome
 		)
@@ -658,7 +666,7 @@ func insertOperationalEvents(ctx context.Context, tx pgx.Tx, assignments []obser
 		       nullif(input.failure_level, ''), nullif(input.failure_category, ''), nullif(input.failure_stage, ''),
 		       nullif(input.failure_transport_phase, ''), input.failure_occurred_at, input.failure_duration_ms,
 		       input.failure_attempt, input.failure_retryable, input.failure_remote_state_unknown,
-		       input.connection_version, nullif(input.report_key, ''), nullif(input.trigger_kind, ''),
+		       input.connection_version, input.failure_protocol_evidence, nullif(input.report_key, ''), nullif(input.trigger_kind, ''),
 		       input.reports_total, input.reports_succeeded, input.reports_failed, input.reports_cancelled,
 		       nullif(input.notification_outcome, '')
 		from jsonb_to_recordset($1::jsonb) as input(
@@ -667,7 +675,7 @@ func insertOperationalEvents(ctx context.Context, tx pgx.Tx, assignments []obser
 		  failure_evidence_version integer, failure_level text, failure_category text, failure_stage text,
 		  failure_transport_phase text, failure_occurred_at timestamptz, failure_duration_ms bigint,
 		  failure_attempt integer, failure_retryable boolean, failure_remote_state_unknown boolean,
-		  connection_version integer, report_key text, trigger_kind text, reports_total integer,
+		  connection_version integer, failure_protocol_evidence jsonb, report_key text, trigger_kind text, reports_total integer,
 		  reports_succeeded integer, reports_failed integer, reports_cancelled integer, notification_outcome text
 		)
 		on conflict do nothing`, payload)

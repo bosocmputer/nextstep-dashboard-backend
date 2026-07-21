@@ -64,21 +64,22 @@ const (
 )
 
 type Evidence struct {
-	Version            int            `json:"version"`
-	Level              EvidenceLevel  `json:"level"`
-	Category           Category       `json:"category"`
-	Stage              Stage          `json:"stage"`
-	TransportPhase     TransportPhase `json:"transportPhase,omitempty"`
-	OccurredAt         time.Time      `json:"occurredAt"`
-	StartedAt          *time.Time     `json:"startedAt,omitempty"`
-	FinishedAt         *time.Time     `json:"finishedAt,omitempty"`
-	DurationMS         *int64         `json:"durationMs,omitempty"`
-	Attempt            *int           `json:"attempt,omitempty"`
-	Retryable          bool           `json:"retryable"`
-	RemoteStateUnknown bool           `json:"remoteStateUnknown"`
-	ConnectionVersion  *int           `json:"connectionVersion,omitempty"`
-	SafeErrorCode      string         `json:"safeErrorCode"`
-	Presentation       Presentation   `json:"presentation"`
+	Version            int                     `json:"version"`
+	Level              EvidenceLevel           `json:"level"`
+	Category           Category                `json:"category"`
+	Stage              Stage                   `json:"stage"`
+	TransportPhase     TransportPhase          `json:"transportPhase,omitempty"`
+	OccurredAt         time.Time               `json:"occurredAt"`
+	StartedAt          *time.Time              `json:"startedAt,omitempty"`
+	FinishedAt         *time.Time              `json:"finishedAt,omitempty"`
+	DurationMS         *int64                  `json:"durationMs,omitempty"`
+	Attempt            *int                    `json:"attempt,omitempty"`
+	Retryable          bool                    `json:"retryable"`
+	RemoteStateUnknown bool                    `json:"remoteStateUnknown"`
+	ConnectionVersion  *int                    `json:"connectionVersion,omitempty"`
+	ProtocolEvidence   *JavaWSProtocolEvidence `json:"protocolEvidence,omitempty"`
+	SafeErrorCode      string                  `json:"safeErrorCode"`
+	Presentation       Presentation            `json:"presentation"`
 }
 
 type Impact struct {
@@ -142,6 +143,9 @@ func Complete(evidence Evidence) Evidence {
 	}
 	if evidence.Version == 0 && evidence.Level == LevelConfirmed {
 		evidence.Version = 1
+	}
+	if evidence.ProtocolEvidence != nil && evidence.Level == LevelConfirmed && evidence.Version < 2 {
+		evidence.Version = 2
 	}
 	if evidence.Category == "" || evidence.Stage == "" {
 		category, stage := classify(evidence.SafeErrorCode)

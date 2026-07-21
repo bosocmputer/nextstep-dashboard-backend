@@ -372,6 +372,9 @@ func telegramMessage(alert Alert, adminBaseURL string, includeTenantContext bool
 			heading, incident.AlertRef, len(incident.CauseBreakdown), strings.Join(causeLines, "\n"))
 	} else {
 		header = fmt.Sprintf("%s\nอ้างอิง: %s\nสาเหตุ: %s", heading, incident.AlertRef, presentation.TitleTH)
+		if assessment, ok := telegramFailureAssessment(alert); ok {
+			header += "\nส่วนที่เกิดปัญหา: " + assessment.ProblemAreaTH + "\nผู้ตรวจสอบ: " + assessment.OwnerTH
+		}
 	}
 	tail := fmt.Sprintf("ผลกระทบ: %s\nส่วนที่ได้รับผล: %d\nพบครั้งแรก: %s น. เวลาไทย", impact, affectedCount, thaiTime)
 	if incident.SafeErrorCode != "MULTIPLE_SAFE_ERRORS" {
@@ -391,9 +394,24 @@ func telegramMessage(alert Alert, adminBaseURL string, includeTenantContext bool
 	return message, result
 }
 
+func telegramFailureAssessment(alert Alert) (failure.AdminFailureAssessment, bool) {
+	if len(alert.Incident.CauseBreakdown) == 0 {
+		return failure.AdminFailureAssessment{}, false
+	}
+	cause := alert.Incident.CauseBreakdown[0]
+	evidence := failure.EvidenceForCode(alert.Incident.SafeErrorCode)
+	evidence.Category, evidence.Stage, evidence.TransportPhase = cause.Category, cause.Stage, cause.TransportPhase
+	evidence.ProtocolEvidence = alert.ProtocolEvidence
+	evidence = failure.Complete(evidence)
+	return failure.Assess(evidence, failure.Baseline{}), true
+}
+
 func telegramSMLMessage(alert Alert, adminURL string, includeTenantContext bool) (string, TelegramContextResult) {
 	incident := alert.Incident
 	heading := "🔴 เชื่อมต่อ Java Web Service ไม่สำเร็จ"
+	if incident.SafeErrorCode == "SML_ZIP_FORMAT_INVALID" || incident.SafeErrorCode == "SML_ZIP_EMPTY" || incident.SafeErrorCode == "SML_ZIP_READ_FAILED" || incident.SafeErrorCode == "SML_ZIP_INVALID" {
+		heading = "🔴 คำตอบจาก Java Web Service ไม่สมบูรณ์"
+	}
 	switch alert.Kind {
 	case "UPDATE":
 		heading = "🔴 ยังเชื่อมต่อ Java Web Service ไม่ได้ · พบร้านเพิ่ม"
@@ -408,6 +426,11 @@ func telegramSMLMessage(alert Alert, adminURL string, includeTenantContext bool)
 	parts := []string{heading}
 	if contextBlock != "" {
 		parts = append(parts, contextBlock)
+	}
+	if alert.Kind != "RECOVERY" {
+		if protocolSummary := telegramProtocolSummary(alert.ProtocolEvidence, incident.SafeErrorCode); protocolSummary != "" {
+			parts = append(parts, protocolSummary)
+		}
 	}
 	if alert.Kind == "RECOVERY" {
 		verifiedAt := incident.ResolvedAt
@@ -431,6 +454,25 @@ func telegramSMLMessage(alert Alert, adminURL string, includeTenantContext bool)
 		message = truncateUTF8Bytes(message, 3499)
 	}
 	return message, result
+}
+
+func telegramProtocolSummary(evidence *failure.JavaWSProtocolEvidence, safeCode string) string {
+	if evidence == nil || evidence.RequestRef == "" || evidence.RequestCount < 1 {
+		return ""
+	}
+	lines := make([]string, 0, 3)
+	if evidence.HTTPStatus != nil && *evidence.HTTPStatus >= 200 && *evidence.HTTPStatus < 300 {
+		lines = append(lines, "การเชื่อมต่อ: สำเร็จ")
+	}
+	retry := fmt.Sprintf("Retry %d ครั้ง", evidence.RetryCount)
+	if evidence.RetryCount == 0 {
+		retry = "ไม่มี Retry"
+	}
+	lines = append(lines, fmt.Sprintf("คำขอ: %d ครั้ง · %s", evidence.RequestCount, retry))
+	if safeCode == "SML_ZIP_FORMAT_INVALID" && evidence.HTTPStatus != nil && evidence.SOAPValid != nil && *evidence.SOAPValid && evidence.Base64Valid != nil && *evidence.Base64Valid && evidence.ZIPSignatureValid != nil && !*evidence.ZIPSignatureValid {
+		lines = append(lines, fmt.Sprintf("คำตอบ: HTTP %d แต่ข้อมูลไม่ใช่ ZIP", *evidence.HTTPStatus))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func formatTelegramThaiTime(value time.Time) string {

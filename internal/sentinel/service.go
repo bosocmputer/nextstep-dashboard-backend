@@ -111,14 +111,30 @@ type Alert struct {
 	TenantContexts        []TelegramTenantContext
 	AdditionalTenantCount int
 	TenantContextResult   TelegramContextResult
+	ProtocolEvidence      *failure.JavaWSProtocolEvidence
 }
 
 type AdminStore interface {
 	ListIncidents(context.Context, IncidentFilter) (IncidentPage, error)
 	GetIncident(context.Context, uuid.UUID) (IncidentDetail, error)
 	ListIncidentOccurrences(context.Context, uuid.UUID, OccurrenceFilter) (OccurrencePage, error)
+	GetOccurrenceDiagnosis(context.Context, uuid.UUID, uuid.UUID) (DiagnosisRecord, error)
 	AcknowledgeIncident(context.Context, uuid.UUID, int, time.Time) (Incident, error)
 	AcceptIncidentRisk(context.Context, uuid.UUID, int, string, time.Time) (Incident, error)
+}
+
+func (service *AdminService) Diagnosis(ctx context.Context, incidentID, occurrenceID uuid.UUID) (IncidentDiagnosis, error) {
+	if incidentID == uuid.Nil || occurrenceID == uuid.Nil {
+		return IncidentDiagnosis{}, ErrInvalidInput
+	}
+	record, err := service.store.GetOccurrenceDiagnosis(ctx, incidentID, occurrenceID)
+	if err != nil {
+		return IncidentDiagnosis{}, err
+	}
+	if record.ConnectionReference != nil {
+		record.ConnectionReference = sanitizeConnectionReference(*record.ConnectionReference)
+	}
+	return presentDiagnosis(record), nil
 }
 
 func (service *AdminService) Occurrences(ctx context.Context, id uuid.UUID, filter OccurrenceFilter) (OccurrencePage, error) {

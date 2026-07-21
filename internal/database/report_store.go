@@ -460,6 +460,36 @@ func (store *ReportStore) Claim(ctx context.Context, workerID string, lease time
 	return claimed, nil
 }
 
+// QueryConcurrencyEvidence captures the admission state already enforced by Claim.
+// Failure to collect this optional diagnostic metadata must never fail report work.
+func (store *ReportStore) QueryConcurrencyEvidence(ctx context.Context, runID uuid.UUID, now time.Time) (int, int, error) {
+	var tenantConcurrent, hostConcurrent int
+	err := store.pool.QueryRow(ctx, `
+		select
+		  (select count(*)::integer from report_runs active
+		   where active.tenant_id = current_run.tenant_id and active.status in ('CLAIMED', 'RUNNING')),
+		  (select count(*)::integer from (
+		     select host_run.id::text
+		     from report_runs host_run
+		     join tenant_sml_connections host_connection on host_connection.tenant_id = host_run.tenant_id
+		     where host_run.status in ('CLAIMED', 'RUNNING')
+		       and host_connection.endpoint_host_key = current_connection.endpoint_host_key
+		     union all
+		     select test.lease_id::text
+		     from sml_connection_tests test
+		     join tenant_sml_connections test_connection on test_connection.tenant_id = test.tenant_id
+		     where test.status = 'RUNNING' and test.lease_expires_at > $2
+		       and test_connection.endpoint_host_key = current_connection.endpoint_host_key
+		   ) host_work)
+		from report_runs current_run
+		join tenant_sml_connections current_connection on current_connection.tenant_id = current_run.tenant_id
+		where current_run.id = $1`, runID, now).Scan(&tenantConcurrent, &hostConcurrent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("capture report query concurrency evidence: %w", err)
+	}
+	return tenantConcurrent, hostConcurrent, nil
+}
+
 // RecoverExpiredLeases is deliberately separate from Claim. Recovery must
 // commit even when every queued run is blocked by the newly-opened cooldown;
 // coupling both operations caused expired RUNNING rows to be rolled back every
@@ -653,6 +683,10 @@ func (store *ReportStore) RetryPreRequestFailure(ctx context.Context, runID uuid
 
 func (store *ReportStore) FailPreRequestFailure(ctx context.Context, runID uuid.UUID, workerID string, evidence failure.Evidence, now time.Time) error {
 	evidence = normalizeFailureEvidence(evidence, now)
+	protocolJSON, err := failureProtocolJSON(evidence)
+	if err != nil {
+		return err
+	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin fail pre-request report failure: %w", err)
@@ -668,12 +702,12 @@ func (store *ReportStore) FailPreRequestFailure(ctx context.Context, runID uuid.
 		    failure_evidence_version = $6, failure_category = $7, failure_stage = $8,
 		    failure_transport_phase = nullif($9, ''), failure_occurred_at = $10,
 		    failure_duration_ms = $11, failure_attempt = $12, failure_retryable = $13,
-		    failure_remote_state_unknown = $14
+		    failure_remote_state_unknown = $14, failure_protocol_evidence = $15::jsonb
 		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
 		  and lease_expires_at >= $5
 		returning tenant_id, source`, runID, workerID, evidence.SafeErrorCode, failure.SafeMessage(evidence.SafeErrorCode), now,
 		evidence.Version, evidence.Category, evidence.Stage, evidence.TransportPhase, evidence.OccurredAt,
-		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown).Scan(&tenantID, &source)
+		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown, protocolJSON).Scan(&tenantID, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return report.ErrRunLeaseLost
 	}
@@ -706,6 +740,20 @@ func normalizeFailureEvidence(evidence failure.Evidence, now time.Time) failure.
 		evidence.FinishedAt = &finishedAt
 	}
 	return failure.Complete(evidence)
+}
+
+func failureProtocolJSON(evidence failure.Evidence) (any, error) {
+	if evidence.ProtocolEvidence == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(evidence.ProtocolEvidence)
+	if err != nil {
+		return nil, fmt.Errorf("encode failure protocol evidence: %w", err)
+	}
+	if len(encoded) > 4096 {
+		return nil, fmt.Errorf("failure protocol evidence exceeds storage limit")
+	}
+	return string(encoded), nil
 }
 
 func recordHostPreRequestFailureTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, now time.Time) error {
@@ -1458,6 +1506,10 @@ func (store *ReportStore) GetDashboardRefresh(ctx context.Context, recipientID, 
 
 func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID string, evidence failure.Evidence, now time.Time) error {
 	evidence = normalizeFailureEvidence(evidence, now)
+	protocolJSON, err := failureProtocolJSON(evidence)
+	if err != nil {
+		return err
+	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin fail report run: %w", err)
@@ -1472,12 +1524,12 @@ func (store *ReportStore) Fail(ctx context.Context, runID uuid.UUID, workerID st
 		    failure_evidence_version = $6, failure_category = $7, failure_stage = $8,
 		    failure_transport_phase = nullif($9, ''), failure_occurred_at = $10,
 		    failure_duration_ms = $11, failure_attempt = $12, failure_retryable = $13,
-		    failure_remote_state_unknown = $14
+		    failure_remote_state_unknown = $14, failure_protocol_evidence = $15::jsonb
 		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
 		  and lease_expires_at >= $5
 		returning tenant_id, source`, runID, workerID, evidence.SafeErrorCode, failure.SafeMessage(evidence.SafeErrorCode), now,
 		evidence.Version, evidence.Category, evidence.Stage, evidence.TransportPhase, evidence.OccurredAt,
-		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown).Scan(&tenantID, &source)
+		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown, protocolJSON).Scan(&tenantID, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return report.ErrRunLeaseLost
 	}
@@ -1524,6 +1576,10 @@ func (store *ReportStore) FailRemoteUnknown(ctx context.Context, runID uuid.UUID
 		return fmt.Errorf("uncertainty circuit expiry must be in the future")
 	}
 	evidence = normalizeFailureEvidence(evidence, now)
+	protocolJSON, err := failureProtocolJSON(evidence)
+	if err != nil {
+		return err
+	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin fail uncertain report run: %w", err)
@@ -1539,12 +1595,12 @@ func (store *ReportStore) FailRemoteUnknown(ctx context.Context, runID uuid.UUID
 		    failure_evidence_version = $6, failure_category = $7, failure_stage = $8,
 		    failure_transport_phase = nullif($9, ''), failure_occurred_at = $10,
 		    failure_duration_ms = $11, failure_attempt = $12, failure_retryable = $13,
-		    failure_remote_state_unknown = $14
+		    failure_remote_state_unknown = $14, failure_protocol_evidence = $15::jsonb
 		where id = $1 and claimed_by = $2 and status in ('CLAIMED', 'RUNNING')
 		  and lease_expires_at >= $5
 		returning tenant_id, source`, runID, workerID, evidence.SafeErrorCode, failure.SafeMessage(evidence.SafeErrorCode), now,
 		evidence.Version, evidence.Category, evidence.Stage, evidence.TransportPhase, evidence.OccurredAt,
-		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown).Scan(&tenantID, &source)
+		evidence.DurationMS, evidence.Attempt, evidence.Retryable, evidence.RemoteStateUnknown, protocolJSON).Scan(&tenantID, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return report.ErrRunLeaseLost
 	}
@@ -1856,7 +1912,7 @@ coalesce(query_plan_fingerprint, '') as query_plan_fingerprint, execution_strate
 source_started_at, source_finished_at, progress_completed_chunks, progress_total_chunks,
 failure_evidence_version, failure_category, failure_stage, failure_transport_phase,
 failure_occurred_at, failure_duration_ms, failure_attempt, failure_retryable,
-failure_remote_state_unknown`
+failure_remote_state_unknown, failure_protocol_evidence`
 
 func scanReportRun(row rowScanner, now time.Time) (report.Run, error) {
 	return scanReportRunWithExtras(row, now)
@@ -1871,6 +1927,7 @@ func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ..
 	var evidenceDurationMS *int64
 	var evidenceAttempt *int
 	var evidenceRetryable, evidenceRemoteStateUnknown *bool
+	var protocolJSON []byte
 	destinations := []any{
 		&run.ID, &run.TenantID, &run.ReportKey, &run.Source, &run.ResultKind, &run.Priority, &run.ExecutionKey, &run.IdempotencyKey,
 		&run.Status, &run.Period.Preset, &run.Period.DateFrom, &run.Period.DateTo,
@@ -1885,7 +1942,7 @@ func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ..
 		&run.SourceStartedAt, &run.SourceFinishedAt, &run.ProgressCompletedChunks, &run.ProgressTotalChunks,
 		&evidenceVersion, &evidenceCategory, &evidenceStage, &evidenceTransportPhase,
 		&evidenceOccurredAt, &evidenceDurationMS, &evidenceAttempt, &evidenceRetryable,
-		&evidenceRemoteStateUnknown,
+		&evidenceRemoteStateUnknown, &protocolJSON,
 	}
 	destinations = append(destinations, extraDestinations...)
 	err := row.Scan(destinations...)
@@ -1918,6 +1975,13 @@ func scanReportRunWithExtras(row rowScanner, now time.Time, extraDestinations ..
 		if run.DataSourceVersion > 0 {
 			connectionVersion := run.DataSourceVersion
 			evidence.ConnectionVersion = &connectionVersion
+		}
+		if len(protocolJSON) > 0 {
+			var protocol failure.JavaWSProtocolEvidence
+			if err := json.Unmarshal(protocolJSON, &protocol); err != nil {
+				return report.Run{}, fmt.Errorf("decode failure protocol evidence: %w", err)
+			}
+			evidence.ProtocolEvidence = &protocol
 		}
 		evidence = failure.Complete(evidence)
 		run.FailureEvidence = &evidence

@@ -15,6 +15,60 @@ import (
 	"time"
 )
 
+func TestClientCapturesBoundedProtocolEvidenceForInvalidZIPWithoutRetry(t *testing.T) {
+	var requestRef string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requestRef = request.Header.Get(nextstepRequestRefHeader)
+		response.Header().Set("Content-Type", "Text/XML; Charset=UTF-8")
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte(`<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><response><return>` + base64.StdEncoding.EncodeToString([]byte("not-a-zip")) + `</return></response></soap:Body></soap:Envelope>`))
+	}))
+	defer server.Close()
+
+	recorder, ctx, err := NewProtocolRecorder(context.Background())
+	if err != nil {
+		t.Fatalf("NewProtocolRecorder() error = %v", err)
+	}
+	client := NewClient(EndpointPolicy{AllowedPrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}}, 2*time.Second, 1024*1024, 100)
+	_, queryErr := client.Query(ctx, Connection{EndpointURL: server.URL, ConfigFileName: "SMLConfigDATA.xml", DatabaseName: "demo"}, "select 1")
+	var safeError *SafeError
+	if !errors.As(queryErr, &safeError) || safeError.Code != "SML_ZIP_FORMAT_INVALID" {
+		t.Fatalf("Query() error = %v", queryErr)
+	}
+	evidence := recorder.Snapshot()
+	if requestRef == "" || requestRef != evidence.RequestRef || !strings.HasPrefix(requestRef, "NXR-") {
+		t.Fatalf("request reference header=%q evidence=%q", requestRef, evidence.RequestRef)
+	}
+	if evidence.RequestCount != 1 || evidence.RetryCount != 0 || evidence.HTTPStatus == nil || *evidence.HTTPStatus != http.StatusOK {
+		t.Fatalf("request evidence = %+v", evidence)
+	}
+	if evidence.ResponseContentType != "text/xml; charset=utf-8" || evidence.ResponseBodyBytes == nil || *evidence.ResponseBodyBytes == 0 {
+		t.Fatalf("response metadata = %+v", evidence)
+	}
+	if evidence.SOAPValid == nil || !*evidence.SOAPValid || evidence.Base64Valid == nil || !*evidence.Base64Valid || evidence.ZIPSignatureValid == nil || *evidence.ZIPSignatureValid {
+		t.Fatalf("protocol validation evidence = %+v", evidence)
+	}
+	if evidence.DecodedPayloadBytes == nil || *evidence.DecodedPayloadBytes != int64(len("not-a-zip")) || evidence.ResponseSHA256 == "" || len(evidence.ResponseSHA256) != 64 {
+		t.Fatalf("bounded response evidence = %+v", evidence)
+	}
+	if evidence.RequestSentAt == nil || evidence.FirstResponseByteAt == nil || evidence.ResponseCompletedAt == nil {
+		t.Fatalf("protocol timestamps = %+v", evidence)
+	}
+}
+
+func TestProtocolRecorderDoesNotMisclassifyDistinctQueryStepsAsRetries(t *testing.T) {
+	recorder, _, err := NewProtocolRecorder(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder.requestSent(time.Now())
+	recorder.requestSent(time.Now())
+	evidence := recorder.Snapshot()
+	if evidence.RequestCount != 2 || evidence.RetryCount != 0 {
+		t.Fatalf("protocol counts = requests %d retries %d, want 2 distinct requests and no retries", evidence.RequestCount, evidence.RetryCount)
+	}
+}
+
 func TestDecompressPayloadClassifiesSafeZIPFailures(t *testing.T) {
 	emptyBuffer := new(bytes.Buffer)
 	emptyWriter := zip.NewWriter(emptyBuffer)

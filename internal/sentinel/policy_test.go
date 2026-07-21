@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bosocmputer/nextstep-dashboard-backend/internal/failure"
 	"github.com/google/uuid"
 )
 
@@ -275,6 +276,44 @@ func TestTelegramMixedSMLCauseKeepsCompactConnectionState(t *testing.T) {
 	}
 	if len(message) >= 3500 {
 		t.Fatalf("mixed message exposed implementation code or exceeded budget: %q", message)
+	}
+}
+
+func TestTelegramInvalidZIPShowsOnlyBoundedProtocolFacts(t *testing.T) {
+	status := 200
+	soap, base64OK, zipOK := true, true, false
+	incident := Incident{
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "SML_ZIP_FORMAT_INVALID", FirstSeenAt: time.Date(2026, 7, 21, 1, 0, 0, 0, time.UTC),
+		AffectedCount: 1, ActiveAffectedCount: 1, SubjectType: SubjectTenant,
+	}
+	message := TelegramMessage(Alert{Kind: "OPEN", Incident: incident, ProtocolEvidence: &failure.JavaWSProtocolEvidence{
+		RequestRef: "NXR-ABCDEFGHIJKLMNOP", RequestCount: 1, RetryCount: 0, HTTPStatus: &status,
+		SOAPValid: &soap, Base64Valid: &base64OK, ZIPSignatureValid: &zipOK,
+	}}, "https://example.test/incidents")
+	for _, expected := range []string{"คำตอบจาก Java Web Service ไม่สมบูรณ์", "การเชื่อมต่อ: สำเร็จ", "คำขอ: 1 ครั้ง · ไม่มี Retry", "คำตอบ: HTTP 200 แต่ข้อมูลไม่ใช่ ZIP"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("message %q does not contain %q", message, expected)
+		}
+	}
+	for _, forbidden := range []string{"NXR-ABCDEFGHIJKLMNOP", "responseSha256", "SOAPValid"} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("message %q leaks %q", message, forbidden)
+		}
+	}
+}
+
+func TestTelegramNamesConcreteNextstepStageAndOwner(t *testing.T) {
+	incident := Incident{
+		ID: uuid.New(), AlertRef: "NST-ABC123DEF456", IncidentType: "SCHEDULED_REPORT_FAILED",
+		RootCause: RootReportData, Severity: SeverityP1, Status: StatusOpen,
+		SafeErrorCode: "REPORT_OUTPUT_INVALID", AffectedCount: 1, ActiveAffectedCount: 1,
+		FirstSeenAt:    time.Date(2026, 7, 21, 1, 0, 0, 0, time.UTC),
+		CauseBreakdown: []CauseBreakdown{{Category: failure.CategoryReportProcessing, Stage: failure.StageBuildReport, AffectedCount: 1, ActiveAffectedCount: 1}},
+	}
+	message, _ := telegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://dashboard.nextstep-soft.com/admin/operational-incidents", false)
+	if !strings.Contains(message, "ส่วนที่เกิดปัญหา: ระบบสร้างรายงานของ Nextstep") || !strings.Contains(message, "ผู้ตรวจสอบ: ทีมดูแล Nextstep") || strings.Contains(message, "ประมวลผลภายใน") {
+		t.Fatalf("telegram message = %q", message)
 	}
 }
 

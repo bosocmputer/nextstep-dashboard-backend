@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-19
+last_verified: 2026-07-21
 source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/database/schedule_execution_store.go, internal/notification/worker.go, internal/delivery/worker.go, internal/failure/catalog.go]
 tags: [backend, reports, queue, line]
 ---
@@ -58,6 +58,16 @@ that an old or test occurrence was a scheduled customer delivery.
 - The shared failure catalog is the source for Thai Admin/Telegram wording and
   next checks. Unknown codes use a generic Thai fallback and never raw error
   text.
+- Evidence version 2 attaches an opaque `NXR-...` request reference to the
+  JavaWS HTTP request and persists only bounded protocol metadata: request and
+  retry counts, transport timestamps, HTTP/content metadata, SOAP/Base64/ZIP
+  validation, response byte counts/hash, and observed admission concurrency.
+  It never persists SQL, SOAP/response bodies, rows, or KPI values.
+- Admin attribution distinguishes a customer JavaWS/network response from
+  Nextstep report build, storage, queue, notification, LINE, database, and
+  capacity stages. A claim that no abnormal Nextstep load signal was found
+  requires at least five exact successful samples for the same tenant, report,
+  projection, query fingerprint, connection version, and resolved period.
 
 ## Viewer Snapshot Flow
 

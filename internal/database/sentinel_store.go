@@ -94,7 +94,7 @@ func (store *SentinelStore) ScanObservations(ctx context.Context, now time.Time,
 			order by delivery.updated_at, delivery.id limit $3`, scan: scanDeliveryObservation},
 		{key: "report_terminal", query: `
 			select run.id, run.tenant_id, run.status, coalesce(run.safe_error_code, ''), run.updated_at,
-			       run.report_key, run.failure_evidence_version, run.failure_category, run.failure_stage,
+			       run.report_key, run.failure_evidence_version, run.failure_protocol_evidence, run.failure_category, run.failure_stage,
 			       run.failure_transport_phase, run.failure_occurred_at, run.failure_duration_ms,
 			       run.failure_attempt, run.failure_retryable, run.failure_remote_state_unknown,
 			       run.data_source_version, linked.notification_run_id,
@@ -226,6 +226,7 @@ func scanReportObservation(rows pgx.Rows) (*sentinel.Observation, error) {
 	var status, safeCode, reportKey string
 	var observedAt time.Time
 	var evidenceVersion, attempt, connectionVersion *int
+	var protocolJSON []byte
 	var durationMS *int64
 	var category, stage, transportPhase *string
 	var evidenceOccurredAt *time.Time
@@ -235,7 +236,7 @@ func scanReportObservation(rows pgx.Rows) (*sentinel.Observation, error) {
 	var total, succeeded, failed, cancelled int
 	var notificationOutcome failure.NotificationOutcome
 	if err := rows.Scan(&sourceID, &tenantID, &status, &safeCode, &observedAt, &reportKey,
-		&evidenceVersion, &category, &stage, &transportPhase, &evidenceOccurredAt, &durationMS,
+		&evidenceVersion, &protocolJSON, &category, &stage, &transportPhase, &evidenceOccurredAt, &durationMS,
 		&attempt, &retryable, &remoteStateUnknown, &connectionVersion, &notificationRunID, &trigger,
 		&total, &succeeded, &failed, &cancelled, &notificationOutcome); err != nil {
 		return nil, err
@@ -256,6 +257,13 @@ func scanReportObservation(rows pgx.Rows) (*sentinel.Observation, error) {
 		evidence.OccurredAt = *evidenceOccurredAt
 		evidence.Retryable = *retryable
 		evidence.RemoteStateUnknown = *remoteStateUnknown
+		if len(protocolJSON) > 0 {
+			var protocol failure.JavaWSProtocolEvidence
+			if err := json.Unmarshal(protocolJSON, &protocol); err != nil {
+				return nil, fmt.Errorf("decode report protocol evidence: %w", err)
+			}
+			evidence.ProtocolEvidence = &protocol
+		}
 		if transportPhase != nil {
 			evidence.TransportPhase = failure.TransportPhase(*transportPhase)
 		}
@@ -1027,7 +1035,7 @@ func (store *SentinelStore) GetIncident(ctx context.Context, id uuid.UUID) (sent
 		       event.failure_evidence_version, event.failure_level, event.failure_category, event.failure_stage,
 		       event.failure_transport_phase, event.failure_occurred_at, event.failure_duration_ms,
 		       event.failure_attempt, event.failure_retryable, event.failure_remote_state_unknown,
-		       event.connection_version, coalesce(event.report_key, ''), coalesce(event.trigger_kind, ''),
+		       event.connection_version, event.failure_protocol_evidence, coalesce(event.report_key, ''), coalesce(event.trigger_kind, ''),
 		       event.reports_total, event.reports_succeeded, event.reports_failed, event.reports_cancelled,
 		       event.notification_outcome, event.downstream, coalesce(cause.alert_ref, ''),
 		       case when event.connection_version is null then false
@@ -1050,12 +1058,13 @@ func (store *SentinelStore) GetIncident(ctx context.Context, id uuid.UUID) (sent
 		var evidenceOccurredAt *time.Time
 		var durationMS *int64
 		var attempt, connectionVersion *int
+		var protocolJSON []byte
 		var retryable, remoteStateUnknown *bool
 		var reportsTotal, reportsSucceeded, reportsFailed, reportsCancelled *int
 		var notificationOutcome *string
 		if err := rows.Scan(&event.ID, &event.EventKind, &event.SourceKind, &event.SafeErrorCode, &event.TenantName, &event.ObservedAt,
 			&evidenceVersion, &evidenceLevel, &category, &stage, &transportPhase, &evidenceOccurredAt,
-			&durationMS, &attempt, &retryable, &remoteStateUnknown, &connectionVersion,
+			&durationMS, &attempt, &retryable, &remoteStateUnknown, &connectionVersion, &protocolJSON,
 			&event.ReportKey, &event.TriggerKind, &reportsTotal, &reportsSucceeded, &reportsFailed,
 			&reportsCancelled, &notificationOutcome, &event.IsDownstream, &event.CausedByAlertRef,
 			&event.ConnectionChangedSinceFailure); err != nil {
@@ -1073,6 +1082,13 @@ func (store *SentinelStore) GetIncident(ctx context.Context, id uuid.UUID) (sent
 			}
 			if transportPhase != nil {
 				evidence.TransportPhase = failure.TransportPhase(*transportPhase)
+			}
+			if len(protocolJSON) > 0 {
+				var protocol failure.JavaWSProtocolEvidence
+				if err := json.Unmarshal(protocolJSON, &protocol); err != nil {
+					return sentinel.IncidentDetail{}, fmt.Errorf("decode incident protocol evidence: %w", err)
+				}
+				evidence.ProtocolEvidence = &protocol
 			}
 			evidence = failure.Complete(evidence)
 			event.FailureEvidence = &evidence
@@ -1246,6 +1262,25 @@ func (store *SentinelStore) ClaimAlert(ctx context.Context, workerID string, lea
 		return sentinel.Alert{}, err
 	}
 	breakdownRows.Close()
+	if alert.Incident.AffectedCount == 1 {
+		var protocolJSON []byte
+		err := tx.QueryRow(ctx, `
+			select failure_protocol_evidence
+			from operational_incident_events
+			where incident_id = $1 and not downstream and failure_evidence_version = 2
+			  and failure_protocol_evidence is not null
+			order by observed_at desc, id desc limit 1`, alert.Incident.ID).Scan(&protocolJSON)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return sentinel.Alert{}, fmt.Errorf("load alert protocol evidence: %w", err)
+		}
+		if len(protocolJSON) > 0 {
+			var protocol failure.JavaWSProtocolEvidence
+			if err := json.Unmarshal(protocolJSON, &protocol); err != nil {
+				return sentinel.Alert{}, fmt.Errorf("decode alert protocol evidence: %w", err)
+			}
+			alert.ProtocolEvidence = &protocol
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		update operational_alert_outbox set status = 'SENDING', claimed_by = $2, claimed_at = $3,
 		lease_expires_at = $4, attempt = attempt + 1, updated_at = $3 where id = $1`, alert.ID, workerID, now, now.Add(lease)); err != nil {
