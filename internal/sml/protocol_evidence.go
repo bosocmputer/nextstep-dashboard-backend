@@ -67,7 +67,6 @@ func protocolRecorder(ctx context.Context) *ProtocolRecorder {
 func (recorder *ProtocolRecorder) requestSent(at time.Time) {
 	recorder.mutate(func(evidence *ProtocolEvidence) {
 		evidence.RequestCount++
-		evidence.RetryCount = max(0, evidence.RequestCount-1)
 		at = at.UTC()
 		evidence.RequestSentAt = &at
 	})

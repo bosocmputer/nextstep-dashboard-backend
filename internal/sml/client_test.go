@@ -56,6 +56,19 @@ func TestClientCapturesBoundedProtocolEvidenceForInvalidZIPWithoutRetry(t *testi
 	}
 }
 
+func TestProtocolRecorderDoesNotMisclassifyDistinctQueryStepsAsRetries(t *testing.T) {
+	recorder, _, err := NewProtocolRecorder(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder.requestSent(time.Now())
+	recorder.requestSent(time.Now())
+	evidence := recorder.Snapshot()
+	if evidence.RequestCount != 2 || evidence.RetryCount != 0 {
+		t.Fatalf("protocol counts = requests %d retries %d, want 2 distinct requests and no retries", evidence.RequestCount, evidence.RetryCount)
+	}
+}
+
 func TestDecompressPayloadClassifiesSafeZIPFailures(t *testing.T) {
 	emptyBuffer := new(bytes.Buffer)
 	emptyWriter := zip.NewWriter(emptyBuffer)
