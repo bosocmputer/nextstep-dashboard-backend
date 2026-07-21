@@ -76,11 +76,13 @@ tags: [backend, security, operations, retention]
   is suppressed as a second P1 alert. If no root report is provable inside the
   aggregation window, the notification failure remains eligible as a standalone
   incident rather than being hidden.
-- Telegram uses Thai local time and different OPEN, UPDATE, and RECOVERY wording.
-  In verified private mode, SML P1 alerts prefer the sanitized URL matching the
-  failure connection version; a current-only fallback is labelled explicitly.
-  Acknowledge only stops reminders; recovery still requires system evidence for
-  each subject.
+- Telegram uses Thai local time and lifecycle-specific wording. SML P1 messages
+  state only whether JavaWS is unavailable or reachable again; RECOVERY omits
+  the earlier cause/impact repetition and uses the evidence-backed resolved
+  timestamp. In verified private mode, OPEN, REMINDER, UPDATE, and RECOVERY may
+  include the sanitized URL matching the failure connection version; a
+  current-only fallback is labelled explicitly. Acknowledge only stops
+  reminders; recovery still requires system evidence for each subject.
 - Admin JavaWS investigation separates opening a sanitized URL in the operator's
   browser from a guarded Server Dashboard test. The test uses fixed `select 1`,
   shares report admission limits, is single-flight with cooldown, yields to an

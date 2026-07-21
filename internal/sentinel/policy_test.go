@@ -96,7 +96,7 @@ func TestTelegramMessageContainsOnlySafeOperationalContext(t *testing.T) {
 		FirstSeenAt: time.Date(2026, 7, 16, 1, 0, 0, 0, time.UTC), LastSeenAt: time.Date(2026, 7, 16, 1, 0, 30, 0, time.UTC),
 	}
 	message := TelegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://dashboard.nextstep-soft.com/admin/operational-incidents")
-	for _, required := range []string{"NST-ABC123DEF456", "ติดต่อ Java Web Service", "100", "เวลาไทย", "https://dashboard.nextstep-soft.com/admin/operational-incidents"} {
+	for _, required := range []string{"NST-ABC123DEF456", "เชื่อมต่อ Java Web Service ไม่สำเร็จ", "เวลาไทย", "https://dashboard.nextstep-soft.com/admin/operational-incidents"} {
 		if !strings.Contains(message, required) {
 			t.Fatalf("message %q does not contain %q", message, required)
 		}
@@ -249,12 +249,12 @@ func TestAggregatedSMLIncidentKeepsThaiJavaWSCause(t *testing.T) {
 		OccurrenceCount: 2, AffectedCount: 2,
 	}
 	message := TelegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://example.test/incidents")
-	if !strings.Contains(message, "ติดต่อ Java Web Service") || strings.Contains(message, "ระบบไม่สามารถดำเนินงานนี้ได้") {
+	if !strings.Contains(message, "เชื่อมต่อ Java Web Service ไม่สำเร็จ") || strings.Contains(message, "ระบบไม่สามารถดำเนินงานนี้ได้") {
 		t.Fatalf("aggregated SML message lost its root cause: %q", message)
 	}
 }
 
-func TestTelegramMixedSMLCauseUsesThaiBreakdownWithoutRawMultipleCode(t *testing.T) {
+func TestTelegramMixedSMLCauseKeepsCompactConnectionState(t *testing.T) {
 	incident := Incident{
 		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1, Status: StatusOpen,
 		SafeErrorCode: "MULTIPLE_SAFE_ERRORS", FirstSeenAt: time.Date(2026, 7, 16, 1, 0, 0, 0, time.UTC),
@@ -265,26 +265,73 @@ func TestTelegramMixedSMLCauseUsesThaiBreakdownWithoutRawMultipleCode(t *testing
 		},
 	}
 	message := TelegramMessage(Alert{Kind: "OPEN", Incident: incident}, "https://example.test/incidents")
-	for _, required := range []string{"พบปัญหา Java Web Service 2 รูปแบบ", "ก่อนส่งคำขอ: 1 ร้าน", "ไม่ได้รับคำตอบภายในเวลา: 1 ร้าน"} {
-		if !strings.Contains(message, required) {
-			t.Fatalf("message %q does not contain %q", message, required)
+	if !strings.HasPrefix(message, "🔴 เชื่อมต่อ Java Web Service ไม่สำเร็จ") {
+		t.Fatalf("message did not keep the compact connection state: %q", message)
+	}
+	for _, redundant := range []string{"พบปัญหา Java Web Service 2 รูปแบบ", "ก่อนส่งคำขอ", "ไม่ได้รับคำตอบภายในเวลา", "MULTIPLE_SAFE_ERRORS"} {
+		if strings.Contains(message, redundant) {
+			t.Fatalf("message %q contains redundant detail %q", message, redundant)
 		}
 	}
-	if strings.Contains(message, "MULTIPLE_SAFE_ERRORS") || len(message) >= 3500 {
+	if len(message) >= 3500 {
 		t.Fatalf("mixed message exposed implementation code or exceeded budget: %q", message)
 	}
 }
 
-func TestTelegramLifecycleUsesDistinctThaiHeadings(t *testing.T) {
+func TestTelegramJavaWSLifecycleUsesConnectionStateLanguage(t *testing.T) {
+	resolvedAt := time.Date(2026, 7, 20, 10, 0, 25, 0, time.UTC)
 	incident := Incident{
-		AlertRef: "NST-ABC123DEF456", Severity: SeverityP1, Status: StatusOpen,
-		SafeErrorCode: "SML_UNREACHABLE", FirstSeenAt: time.Date(2026, 7, 16, 11, 0, 0, 0, time.UTC),
+		AlertRef: "NST-ABC123DEF456", RootCause: RootSMLConnectivity, Severity: SeverityP1,
+		Status: StatusResolved, SafeErrorCode: "SML_UNREACHABLE", SubjectType: SubjectTenant,
+		FirstSeenAt: time.Date(2026, 7, 19, 10, 0, 3, 0, time.UTC), ResolvedAt: &resolvedAt,
 		OccurrenceCount: 1, AffectedCount: 1,
 	}
-	reminder := TelegramMessage(Alert{Kind: "REMINDER", Incident: incident}, "https://example.test/incidents")
-	recovery := TelegramMessage(Alert{Kind: "RECOVERY", Incident: incident}, "https://example.test/incidents")
-	if !strings.HasPrefix(reminder, "แจ้งเตือนซ้ำ · ปัญหายังไม่หาย") || !strings.Contains(recovery, "ยืนยันว่าระบบฟื้นตัวแล้ว") || reminder == recovery {
-		t.Fatalf("reminder=%q recovery=%q", reminder, recovery)
+	context := TelegramTenantContext{
+		TenantName: "ร้านนครการเกษตร", EndpointURL: "http://nkkankaset.example.test:8080/SMLJavaWebService/DotNetFrameWork",
+		URLStatus: TelegramURLAtFailure,
+	}
+	reminderIncident := incident
+	reminderIncident.Status = StatusOpen
+	reminderIncident.ResolvedAt = nil
+	reminder, _ := telegramMessage(Alert{Kind: "REMINDER", Incident: reminderIncident, TenantContexts: []TelegramTenantContext{context}}, "https://example.test/incidents", true)
+	recovery, result := telegramMessage(Alert{Kind: "RECOVERY", Incident: incident, TenantContexts: []TelegramTenantContext{context}}, "https://example.test/incidents", true)
+
+	if !strings.HasPrefix(reminder, "🟠 ยังเชื่อมต่อ Java Web Service ไม่ได้") {
+		t.Fatalf("reminder=%q", reminder)
+	}
+	for _, required := range []string{
+		"✅ เชื่อมต่อ Java Web Service ได้แล้ว",
+		"ร้าน: ร้านนครการเกษตร",
+		"Java Web Service Base URL ตอนเกิดเหตุ:",
+		"http://nkkankaset.example.test:8080/SMLJavaWebService/DotNetFrameWork",
+		"ตรวจสอบล่าสุด: 20/07/2026 17:00:25 น. เวลาไทย",
+		"อ้างอิง: NST-ABC123DEF456",
+	} {
+		if !strings.Contains(recovery, required) {
+			t.Fatalf("recovery %q does not contain %q", recovery, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"ยืนยันว่าระบบฟื้นตัวแล้ว", "สาเหตุ:", "ผลกระทบ:", "ส่วนที่ได้รับผล:",
+		"พบครั้งแรก:", "ข้อมูลเทคนิค:", "ตรวจสอบ: https://",
+	} {
+		if strings.Contains(recovery, forbidden) {
+			t.Fatalf("recovery %q contains redundant text %q", recovery, forbidden)
+		}
+	}
+	if result != TelegramContextIncluded {
+		t.Fatalf("recovery context result = %q", result)
+	}
+}
+
+func TestIncidentStatusPresentationUsesResolvedJavaWSState(t *testing.T) {
+	resolvedAt := time.Date(2026, 7, 20, 10, 0, 25, 0, time.UTC)
+	presentation := incidentStatusPresentation(Incident{
+		RootCause: RootSMLConnectivity, Status: StatusResolved, ResolvedAt: &resolvedAt,
+	})
+	if presentation.State != LifecycleConnectionRestored || presentation.HeadlineTH != "เชื่อมต่อ Java Web Service ได้แล้ว" ||
+		presentation.StatusSummaryTH != "ไม่ต้องดำเนินการ" || presentation.ActionRequired || presentation.VerifiedAt == nil || !presentation.VerifiedAt.Equal(resolvedAt) {
+		t.Fatalf("presentation = %+v", presentation)
 	}
 }
 

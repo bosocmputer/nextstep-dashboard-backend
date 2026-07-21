@@ -218,6 +218,7 @@ func (service *AdminService) List(ctx context.Context, filter IncidentFilter) (I
 	}
 	for index := range page.Data {
 		page.Data[index].Presentation = incidentPresentation(page.Data[index])
+		page.Data[index].StatusPresentation = incidentStatusPresentation(page.Data[index])
 	}
 	return page, nil
 }
@@ -226,6 +227,7 @@ func (service *AdminService) List(ctx context.Context, filter IncidentFilter) (I
 // endpoint to additive numbered table-query results.
 func PresentIncident(item Incident) Incident {
 	item.Presentation = incidentPresentation(item)
+	item.StatusPresentation = incidentStatusPresentation(item)
 	return item
 }
 
@@ -245,6 +247,7 @@ func (service *AdminService) Get(ctx context.Context, id uuid.UUID) (IncidentDet
 		return IncidentDetail{}, err
 	}
 	detail.Presentation = incidentPresentation(detail.Incident)
+	detail.StatusPresentation = incidentStatusPresentation(detail.Incident)
 	for index := range detail.CauseBreakdown {
 		entry := &detail.CauseBreakdown[index]
 		entry.InvestigationScope = investigationScope(entry.Category)
@@ -303,6 +306,7 @@ func (service *AdminService) Acknowledge(ctx context.Context, id uuid.UUID, vers
 	incident, err := service.store.AcknowledgeIncident(ctx, id, version, service.now().UTC())
 	if err == nil {
 		incident.Presentation = incidentPresentation(incident)
+		incident.StatusPresentation = incidentStatusPresentation(incident)
 	}
 	return incident, err
 }
@@ -315,6 +319,7 @@ func (service *AdminService) AcceptRisk(ctx context.Context, id uuid.UUID, versi
 	incident, err := service.store.AcceptIncidentRisk(ctx, id, version, reason, service.now().UTC())
 	if err == nil {
 		incident.Presentation = incidentPresentation(incident)
+		incident.StatusPresentation = incidentStatusPresentation(incident)
 	}
 	return incident, err
 }

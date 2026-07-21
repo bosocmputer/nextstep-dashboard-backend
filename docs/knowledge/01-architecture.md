@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-19
+last_verified: 2026-07-21
 source_of_truth: [cmd/api/main.go, cmd/worker/main.go, cmd/sentinel/main.go, internal/database/pool.go, internal/httpapi/operations_handler.go, internal/httpapi/incident_handler.go, internal/database/sentinel_subject_store.go, internal/failure/catalog.go, deploy/compose.production.yml]
 tags: [backend, architecture, multitenant]
 ---
@@ -70,6 +70,10 @@ Sentinel monitor (independent process)
 - Admin Incident list/detail reads bounded incident evidence retained separately
   from Report Run rows. Thai presentation comes from the shared failure catalog,
   while technical codes remain additive contract fields.
+- The incident API also returns an evidence-backed lifecycle presentation with
+  the current Thai headline, operator summary, verified timestamp, and whether
+  Admin action is required. Clients must not infer recovery from an acknowledge
+  action or from a successful manual JavaWS test.
 - Sentinel separates an incident family, a five-minute episode, and per-subject
   state. Discrete failures can aggregate a burst without merging later episodes;
   continuous conditions persist bounded updates and recover each subject before
