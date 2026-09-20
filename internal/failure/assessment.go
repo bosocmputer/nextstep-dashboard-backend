@@ -8,6 +8,17 @@ import (
 type ProblemArea string
 type InvestigationOwner string
 type LoadSignal string
+type ResultValidationCode string
+
+const (
+	ResultValidationParserConfigurationInvalid ResultValidationCode = "PARSER_CONFIGURATION_INVALID"
+	ResultValidationXMLMalformed               ResultValidationCode = "XML_MALFORMED"
+	ResultValidationResultSetMissing           ResultValidationCode = "RESULT_SET_MISSING"
+	ResultValidationRowLimitExceeded           ResultValidationCode = "ROW_LIMIT_EXCEEDED"
+	ResultValidationRowMalformed               ResultValidationCode = "ROW_MALFORMED"
+	ResultValidationFieldMalformed             ResultValidationCode = "FIELD_MALFORMED"
+	ResultValidationFieldValueTooLarge         ResultValidationCode = "FIELD_VALUE_TOO_LARGE"
+)
 
 const (
 	ProblemCustomerNetwork       ProblemArea = "CUSTOMER_NETWORK"
@@ -33,23 +44,28 @@ const (
 )
 
 type JavaWSProtocolEvidence struct {
-	RequestRef              string     `json:"requestRef"`
-	RequestCount            int        `json:"requestCount"`
-	RetryCount              int        `json:"retryCount"`
-	RequestSentAt           *time.Time `json:"requestSentAt,omitempty"`
-	FirstResponseByteAt     *time.Time `json:"firstResponseByteAt,omitempty"`
-	ResponseCompletedAt     *time.Time `json:"responseCompletedAt,omitempty"`
-	HTTPStatus              *int       `json:"httpStatus,omitempty"`
-	ResponseContentType     string     `json:"responseContentType,omitempty"`
-	ResponseBodyBytes       *int64     `json:"responseBodyBytes,omitempty"`
-	SOAPValid               *bool      `json:"soapValid,omitempty"`
-	SOAPReturnCharacters    *int       `json:"soapReturnCharacters,omitempty"`
-	Base64Valid             *bool      `json:"base64Valid,omitempty"`
-	DecodedPayloadBytes     *int64     `json:"decodedPayloadBytes,omitempty"`
-	ZIPSignatureValid       *bool      `json:"zipSignatureValid,omitempty"`
-	ResponseSHA256          string     `json:"responseSha256,omitempty"`
-	TenantConcurrentQueries int        `json:"tenantConcurrentQueries"`
-	HostConcurrentQueries   int        `json:"hostConcurrentQueries"`
+	RequestRef                  string               `json:"requestRef"`
+	RequestCount                int                  `json:"requestCount"`
+	RetryCount                  int                  `json:"retryCount"`
+	RequestSentAt               *time.Time           `json:"requestSentAt,omitempty"`
+	FirstResponseByteAt         *time.Time           `json:"firstResponseByteAt,omitempty"`
+	ResponseCompletedAt         *time.Time           `json:"responseCompletedAt,omitempty"`
+	HTTPStatus                  *int                 `json:"httpStatus,omitempty"`
+	ResponseContentType         string               `json:"responseContentType,omitempty"`
+	ResponseBodyBytes           *int64               `json:"responseBodyBytes,omitempty"`
+	SOAPValid                   *bool                `json:"soapValid,omitempty"`
+	SOAPReturnCharacters        *int                 `json:"soapReturnCharacters,omitempty"`
+	Base64Valid                 *bool                `json:"base64Valid,omitempty"`
+	DecodedPayloadBytes         *int64               `json:"decodedPayloadBytes,omitempty"`
+	ZIPSignatureValid           *bool                `json:"zipSignatureValid,omitempty"`
+	ResultXMLBytes              *int64               `json:"resultXmlBytes,omitempty"`
+	ResultValidationCode        ResultValidationCode `json:"resultValidationCode,omitempty"`
+	ResultValidationOffsetBytes *int64               `json:"resultValidationOffsetBytes,omitempty"`
+	ResultRowsDecoded           *int                 `json:"resultRowsDecoded,omitempty"`
+	ResultSetSeen               *bool                `json:"resultSetSeen,omitempty"`
+	ResponseSHA256              string               `json:"responseSha256,omitempty"`
+	TenantConcurrentQueries     int                  `json:"tenantConcurrentQueries"`
+	HostConcurrentQueries       int                  `json:"hostConcurrentQueries"`
 }
 
 type Baseline struct {

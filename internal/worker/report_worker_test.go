@@ -413,6 +413,32 @@ func TestFailureEvidenceDistinguishesIncompleteResponseFromUnknownRemoteState(t 
 	}
 }
 
+func TestFailureEvidencePromotesDetailedResultValidationToVersionThree(t *testing.T) {
+	status := 200
+	soap, base64OK, zipOK, resultSetSeen := true, true, true, true
+	xmlBytes, offset := int64(512), int64(311)
+	rowsDecoded := 6
+	result := failureFromSafeError(&sml.SafeError{
+		Code: "SML_RESULT_INVALID", Phase: sml.ResponseStarted,
+		ProtocolEvidence: &sml.ProtocolEvidence{
+			RequestRef: "NXR-ABCDEFGHIJKLMNOP", RequestCount: 1, HTTPStatus: &status,
+			SOAPValid: &soap, Base64Valid: &base64OK, ZIPSignatureValid: &zipOK,
+			ResultXMLBytes: &xmlBytes, ResultValidationCode: sml.ResultValidationXMLMalformed,
+			ResultValidationOffsetBytes: &offset, ResultRowsDecoded: &rowsDecoded, ResultSetSeen: &resultSetSeen,
+			TenantConcurrentQueries: 1, HostConcurrentQueries: 1,
+		},
+	})
+	now := time.Date(2026, 9, 20, 6, 0, 0, 0, time.UTC)
+	evidence := buildFailureEvidence(report.Run{Attempt: 1}, *result, now.Add(-time.Second), now)
+	if evidence.Version != 3 || evidence.ProtocolEvidence == nil {
+		t.Fatalf("failure evidence = %+v", evidence)
+	}
+	protocol := evidence.ProtocolEvidence
+	if protocol.ResultValidationCode != failure.ResultValidationXMLMalformed || protocol.ResultValidationOffsetBytes == nil || *protocol.ResultValidationOffsetBytes != offset || protocol.ResultRowsDecoded == nil || *protocol.ResultRowsDecoded != rowsDecoded {
+		t.Fatalf("result validation evidence = %+v", protocol)
+	}
+}
+
 func TestReportWorkerKeepsCurrentDashboardWhenComparisonQueryFails(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	store := &fakeRunStore{run: report.Run{

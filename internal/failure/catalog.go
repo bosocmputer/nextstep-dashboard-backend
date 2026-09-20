@@ -147,6 +147,9 @@ func Complete(evidence Evidence) Evidence {
 	if evidence.ProtocolEvidence != nil && evidence.Level == LevelConfirmed && evidence.Version < 2 {
 		evidence.Version = 2
 	}
+	if evidence.ProtocolEvidence != nil && evidence.ProtocolEvidence.ResultValidationCode != "" && evidence.Level == LevelConfirmed && evidence.Version < 3 {
+		evidence.Version = 3
+	}
 	if evidence.Category == "" || evidence.Stage == "" {
 		category, stage := classify(evidence.SafeErrorCode)
 		if evidence.Category == "" {

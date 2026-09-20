@@ -189,8 +189,20 @@ func (client *Client) Query(ctx context.Context, connection Connection, sql stri
 		// tenant uncertainty circuit used for transport timeouts.
 		return nil, protocolSafeError(recorder, zipSafeErrorCode(err), false, ResponseStarted)
 	}
+	resultXMLBytes := int64(len(xmlPayload))
+	recorder.mutate(func(evidence *ProtocolEvidence) { evidence.ResultXMLBytes = &resultXMLBytes })
 	rows, err := ParseRows(xmlPayload, client.maximumRows)
 	if err != nil {
+		var validationError *ResultValidationError
+		if errors.As(err, &validationError) {
+			offset, rowsDecoded, resultSetSeen := validationError.OffsetBytes, validationError.RowsDecoded, validationError.ResultSetSeen
+			recorder.mutate(func(evidence *ProtocolEvidence) {
+				evidence.ResultValidationCode = validationError.Code
+				evidence.ResultValidationOffsetBytes = &offset
+				evidence.ResultRowsDecoded = &rowsDecoded
+				evidence.ResultSetSeen = &resultSetSeen
+			})
+		}
 		return nil, protocolSafeError(recorder, "SML_RESULT_INVALID", false, ResponseStarted)
 	}
 	return rows, nil

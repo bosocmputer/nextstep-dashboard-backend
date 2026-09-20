@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-21
+last_verified: 2026-09-20
 source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/database/schedule_execution_store.go, internal/notification/worker.go, internal/delivery/worker.go, internal/failure/catalog.go]
 tags: [backend, reports, queue, line]
 ---
@@ -29,6 +29,19 @@ Due schedule
 ```
 
 `Work.Partial` causes `REPORT_SET_INCOMPLETE` before recipient selection or rendering. No LINE delivery or outbox payload is created from an incomplete report set. `ALL_REPORTS_FAILED` and `NO_ELIGIBLE_RECIPIENTS` remain distinct failure causes.
+
+## Safe JavaWS Result Diagnostics
+
+Failure Evidence V3 extends the bounded JavaWS protocol metadata for
+`SML_RESULT_INVALID`. It records the decompressed XML byte count, a fixed parser
+classification, the approximate parser byte offset, complete rows decoded, and
+whether `ResultSet` was observed. This evidence is persisted with the report run
+and may be shown to authenticated Admins without contacting JavaWS again.
+
+The diagnostic must never retain SQL, XML or SOAP bodies, row/field names,
+field values, KPI values, credentials, tokens, or customer identifiers. Existing
+V1/V2 evidence remains readable; only failures with the complete parser
+diagnostic are promoted to V3.
 
 Notification occurrences are classified at materialization time: due schedules
 write `SCHEDULED`, manual test sends write `TEST`, and historical rows remain

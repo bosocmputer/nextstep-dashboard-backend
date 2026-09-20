@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Nextstep Dashboard API
-  version: 1.1.0
+  version: 1.2.0
   description: >-
     Contract for the multi-tenant SML dashboard, production administration,
     distributed report execution, LINE delivery, and LIFF viewer. Mutation
@@ -1972,6 +1972,14 @@ components:
         base64Valid: {type: boolean}
         decodedPayloadBytes: {type: integer, minimum: 0}
         zipSignatureValid: {type: boolean}
+        resultXmlBytes: {type: integer, minimum: 0, description: Size of the decompressed result XML; the XML content is never retained.}
+        resultValidationCode:
+          type: string
+          enum: [PARSER_CONFIGURATION_INVALID, XML_MALFORMED, RESULT_SET_MISSING, ROW_LIMIT_EXCEEDED, ROW_MALFORMED, FIELD_MALFORMED, FIELD_VALUE_TOO_LARGE]
+          description: Safe parser failure classification without field names or values.
+        resultValidationOffsetBytes: {type: integer, minimum: 0, description: Approximate byte offset reached by the XML parser.}
+        resultRowsDecoded: {type: integer, minimum: 0, description: Number of complete rows decoded before failure.}
+        resultSetSeen: {type: boolean, description: Whether a ResultSet element was observed before failure.}
         responseSha256: {type: string, pattern: '^[0-9a-f]{64}$'}
         tenantConcurrentQueries: {type: integer, minimum: 0, maximum: 100}
         hostConcurrentQueries: {type: integer, minimum: 0, maximum: 100}

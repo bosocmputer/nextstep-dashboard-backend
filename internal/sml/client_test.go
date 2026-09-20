@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -322,10 +323,72 @@ func TestClientQueriesPinnedEndpointWithBoundedResponse(t *testing.T) {
 }
 
 func TestParseRowsRejectsRowLimitAndMalformedResponse(t *testing.T) {
-	if _, err := ParseRows([]byte(`<ResultSet><Row><id>1</id></Row><Row><id>2</id></Row></ResultSet>`), 1); err == nil {
-		t.Fatal("row limit was not enforced")
+	tests := []struct {
+		name              string
+		payload           string
+		maximumRows       int
+		wantCode          ResultValidationCode
+		wantRowsDecoded   int
+		wantResultSetSeen bool
+	}{
+		{name: "invalid parser limit", payload: `<ResultSet />`, maximumRows: 0, wantCode: ResultValidationParserConfigurationInvalid},
+		{name: "malformed XML", payload: `<ResultSet><Row><id>1</id></Row>`, maximumRows: 10, wantCode: ResultValidationXMLMalformed, wantRowsDecoded: 1, wantResultSetSeen: true},
+		{name: "missing ResultSet", payload: `<Response />`, maximumRows: 10, wantCode: ResultValidationResultSetMissing},
+		{name: "row limit", payload: `<ResultSet><Row><id>1</id></Row><Row><id>2</id></Row></ResultSet>`, maximumRows: 1, wantCode: ResultValidationRowLimitExceeded, wantRowsDecoded: 1, wantResultSetSeen: true},
+		{name: "malformed row", payload: `<ResultSet><Row></ResultSet>`, maximumRows: 10, wantCode: ResultValidationRowMalformed, wantResultSetSeen: true},
+		{name: "malformed field", payload: `<ResultSet><Row><id>1</Row></ResultSet>`, maximumRows: 10, wantCode: ResultValidationFieldMalformed, wantResultSetSeen: true},
+		{name: "field too large", payload: `<ResultSet><Row><value>` + strings.Repeat("x", 1024*1024+1) + `</value></Row></ResultSet>`, maximumRows: 10, wantCode: ResultValidationFieldValueTooLarge, wantResultSetSeen: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ParseRows([]byte(test.payload), test.maximumRows)
+			var validationError *ResultValidationError
+			if !errors.As(err, &validationError) {
+				t.Fatalf("ParseRows() error = %v, want ResultValidationError", err)
+			}
+			if validationError.Code != test.wantCode || validationError.RowsDecoded != test.wantRowsDecoded || validationError.ResultSetSeen != test.wantResultSetSeen {
+				t.Fatalf("ParseRows() diagnostic = %+v", validationError)
+			}
+			if validationError.OffsetBytes < 0 || validationError.OffsetBytes > int64(len(test.payload)) {
+				t.Fatalf("ParseRows() offset = %d, payload bytes = %d", validationError.OffsetBytes, len(test.payload))
+			}
+		})
 	}
 	if _, err := ExtractSOAPReturn([]byte(`<soap><Fault><faultstring>database password leaked</faultstring></Fault></soap>`)); err == nil || strings.Contains(err.Error(), "password leaked") {
 		t.Fatalf("SOAP fault was not safely redacted: %v", err)
+	}
+}
+
+func TestClientCapturesSafeResultValidationEvidence(t *testing.T) {
+	resultXML := []byte(`<ResultSet><Row><id>1</id></Row>`)
+	zippedResult, err := CompressPayload(resultXML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/xml")
+		_, _ = response.Write([]byte(`<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><response><return>` + base64.StdEncoding.EncodeToString(zippedResult) + `</return></response></soap:Body></soap:Envelope>`))
+	}))
+	defer server.Close()
+
+	recorder, ctx, err := NewProtocolRecorder(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(EndpointPolicy{AllowedPrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}}, 2*time.Second, 1024*1024, 100)
+	_, queryErr := client.Query(ctx, Connection{EndpointURL: server.URL, ConfigFileName: "SMLConfigDATA.xml", DatabaseName: "demo"}, "select 1")
+	var safeError *SafeError
+	if !errors.As(queryErr, &safeError) || safeError.Code != "SML_RESULT_INVALID" {
+		t.Fatalf("Query() error = %v", queryErr)
+	}
+	evidence := recorder.Snapshot()
+	if evidence.ResultValidationCode != ResultValidationXMLMalformed || evidence.ResultXMLBytes == nil || *evidence.ResultXMLBytes != int64(len(resultXML)) {
+		t.Fatalf("result validation evidence = %+v", evidence)
+	}
+	if evidence.ResultValidationOffsetBytes == nil || evidence.ResultRowsDecoded == nil || *evidence.ResultRowsDecoded != 1 || evidence.ResultSetSeen == nil || !*evidence.ResultSetSeen {
+		t.Fatalf("bounded parser diagnostic = %+v", evidence)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", evidence), "<ResultSet>") || strings.Contains(fmt.Sprintf("%+v", evidence), "<id>") {
+		t.Fatalf("protocol evidence leaked raw XML: %+v", evidence)
 	}
 }

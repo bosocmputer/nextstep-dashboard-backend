@@ -20,6 +20,39 @@ var (
 	ErrZIPReadFailed    = errors.New("JavaWS ZIP entry could not be read")
 )
 
+type ResultValidationCode string
+
+const (
+	ResultValidationParserConfigurationInvalid ResultValidationCode = "PARSER_CONFIGURATION_INVALID"
+	ResultValidationXMLMalformed               ResultValidationCode = "XML_MALFORMED"
+	ResultValidationResultSetMissing           ResultValidationCode = "RESULT_SET_MISSING"
+	ResultValidationRowLimitExceeded           ResultValidationCode = "ROW_LIMIT_EXCEEDED"
+	ResultValidationRowMalformed               ResultValidationCode = "ROW_MALFORMED"
+	ResultValidationFieldMalformed             ResultValidationCode = "FIELD_MALFORMED"
+	ResultValidationFieldValueTooLarge         ResultValidationCode = "FIELD_VALUE_TOO_LARGE"
+)
+
+// ResultValidationError contains only bounded parser metadata. It intentionally
+// excludes the response body, field names, and field values.
+type ResultValidationError struct {
+	Code          ResultValidationCode
+	OffsetBytes   int64
+	RowsDecoded   int
+	ResultSetSeen bool
+	cause         error
+}
+
+func (err *ResultValidationError) Error() string { return err.cause.Error() }
+func (err *ResultValidationError) Unwrap() error { return err.cause }
+
+func resultValidationError(code ResultValidationCode, decoder *xml.Decoder, rowsDecoded int, resultSetSeen bool, cause error) *ResultValidationError {
+	offset := int64(0)
+	if decoder != nil {
+		offset = decoder.InputOffset()
+	}
+	return &ResultValidationError{Code: code, OffsetBytes: offset, RowsDecoded: rowsDecoded, ResultSetSeen: resultSetSeen, cause: cause}
+}
+
 func CompressPayload(payload []byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := zip.NewWriter(&buffer)
@@ -111,7 +144,7 @@ func ExtractSOAPReturn(payload []byte) (string, error) {
 
 func ParseRows(payload []byte, maximumRows int) ([]map[string]string, error) {
 	if maximumRows < 1 {
-		return nil, errors.New("JavaWS row limit is invalid")
+		return nil, resultValidationError(ResultValidationParserConfigurationInvalid, nil, 0, false, errors.New("JavaWS row limit is invalid"))
 	}
 	decoder := xml.NewDecoder(bytes.NewReader(payload))
 	rows := make([]map[string]string, 0)
@@ -122,7 +155,7 @@ func ParseRows(payload []byte, maximumRows int) ([]map[string]string, error) {
 			break
 		}
 		if err != nil {
-			return nil, errors.New("JavaWS XML response could not be parsed")
+			return nil, resultValidationError(ResultValidationXMLMalformed, decoder, len(rows), seenResultSet, errors.New("JavaWS XML response could not be parsed"))
 		}
 		start, ok := token.(xml.StartElement)
 		if !ok {
@@ -136,17 +169,22 @@ func ParseRows(payload []byte, maximumRows int) ([]map[string]string, error) {
 				continue
 			}
 			if len(rows) >= maximumRows {
-				return nil, fmt.Errorf("JavaWS row count exceeds limit %d", maximumRows)
+				return nil, resultValidationError(ResultValidationRowLimitExceeded, decoder, len(rows), seenResultSet, fmt.Errorf("JavaWS row count exceeds limit %d", maximumRows))
 			}
 			row, err := decodeRow(decoder, start)
 			if err != nil {
+				var validationError *ResultValidationError
+				if errors.As(err, &validationError) {
+					validationError.RowsDecoded = len(rows)
+					validationError.ResultSetSeen = seenResultSet
+				}
 				return nil, err
 			}
 			rows = append(rows, row)
 		}
 	}
 	if !seenResultSet {
-		return nil, errors.New("JavaWS XML response did not include ResultSet")
+		return nil, resultValidationError(ResultValidationResultSetMissing, decoder, len(rows), false, errors.New("JavaWS XML response did not include ResultSet"))
 	}
 	return rows, nil
 }
@@ -156,16 +194,16 @@ func decodeRow(decoder *xml.Decoder, rowStart xml.StartElement) (map[string]stri
 	for {
 		token, err := decoder.Token()
 		if err != nil {
-			return nil, errors.New("JavaWS row could not be parsed")
+			return nil, resultValidationError(ResultValidationRowMalformed, decoder, 0, false, errors.New("JavaWS row could not be parsed"))
 		}
 		switch typed := token.(type) {
 		case xml.StartElement:
 			var value string
 			if err := decoder.DecodeElement(&value, &typed); err != nil {
-				return nil, errors.New("JavaWS row field could not be parsed")
+				return nil, resultValidationError(ResultValidationFieldMalformed, decoder, 0, false, errors.New("JavaWS row field could not be parsed"))
 			}
 			if len(value) > 1024*1024 {
-				return nil, errors.New("JavaWS row field exceeds the value limit")
+				return nil, resultValidationError(ResultValidationFieldValueTooLarge, decoder, 0, false, errors.New("JavaWS row field exceeds the value limit"))
 			}
 			row[typed.Name.Local] = value
 		case xml.EndElement:

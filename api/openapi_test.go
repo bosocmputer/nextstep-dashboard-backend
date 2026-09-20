@@ -15,8 +15,8 @@ func TestOpenAPIContractIsValidAndContainsCriticalFlows(t *testing.T) {
 	if err := document.Validate(context.Background()); err != nil {
 		t.Fatalf("validate OpenAPI document: %v", err)
 	}
-	if document.Info.Version != "1.1.0" {
-		t.Fatalf("contract version = %q, want 1.1.0", document.Info.Version)
+	if document.Info.Version != "1.2.0" {
+		t.Fatalf("contract version = %q, want 1.2.0", document.Info.Version)
 	}
 
 	criticalOperations := map[string]string{
