@@ -537,6 +537,10 @@ func convertProtocolEvidence(evidence sml.ProtocolEvidence) failure.JavaWSProtoc
 		SOAPValid: evidence.SOAPValid, SOAPReturnCharacters: evidence.SOAPReturnCharacters,
 		Base64Valid: evidence.Base64Valid, DecodedPayloadBytes: evidence.DecodedPayloadBytes,
 		ZIPSignatureValid: evidence.ZIPSignatureValid, ResponseSHA256: evidence.ResponseSHA256,
+		ResultXMLBytes:              evidence.ResultXMLBytes,
+		ResultValidationCode:        failure.ResultValidationCode(evidence.ResultValidationCode),
+		ResultValidationOffsetBytes: evidence.ResultValidationOffsetBytes,
+		ResultRowsDecoded:           evidence.ResultRowsDecoded, ResultSetSeen: evidence.ResultSetSeen,
 		TenantConcurrentQueries: evidence.TenantConcurrentQueries, HostConcurrentQueries: evidence.HostConcurrentQueries,
 	}
 }
