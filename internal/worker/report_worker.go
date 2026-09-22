@@ -16,6 +16,7 @@ const (
 	reportLeaseDuration     = 3 * time.Minute
 	reportHeartbeatInterval = time.Minute
 	maximumReportAttempts   = 3
+	chunkExecutionTimeout   = 10 * time.Minute
 )
 
 type ReportRunStore interface {
@@ -189,17 +190,14 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	if !ok {
 		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CONTRACT_INVALID", Stage: failure.StageBuildReport}
 	}
-	usesSummaryBudget := run.Source == report.SourceSchedule || run.Source == report.SourceBackground || run.ResultKind == report.ResultSummary
-	totalTimeout := definition.DetailTotalTimeout
-	if usesSummaryBudget {
-		totalTimeout = definition.SummaryTotalTimeout
+	projection := run.ResultKind
+	if projection == "" { // Compatibility for pre-projection runs already queued during rollout.
+		projection = report.ResultDetail
 	}
-	if totalTimeout <= 0 {
-		totalTimeout = definition.DetailTimeout
-		if usesSummaryBudget {
-			totalTimeout = definition.SummaryTimeout
-		}
+	if projection == report.ResultSummary && !worker.summaryQueriesEnabled {
+		projection = report.ResultDetail
 	}
+	totalTimeout := worker.executionTimeout(run, definition, projection)
 	executionCtx, cancelExecution := context.WithTimeout(ctx, totalTimeout)
 	defer cancelExecution()
 	connection, err := worker.connections.Open(executionCtx, run.TenantID)
@@ -212,13 +210,6 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 			return report.SummaryResult{}, &executionFailure{Code: "SML_NOT_CONFIGURED", Stage: failure.StageLoadConnection}
 		}
 		return report.SummaryResult{}, &executionFailure{Code: "SML_CONNECTION_LOAD_FAILED", Stage: failure.StageLoadConnection, Retryable: true}
-	}
-	projection := run.ResultKind
-	if projection == "" { // Compatibility for pre-projection runs already queued during rollout.
-		projection = report.ResultDetail
-	}
-	if projection == report.ResultSummary && !worker.summaryQueriesEnabled {
-		projection = report.ResultDetail
 	}
 	if worker.shouldUseChunks(run, definition, projection) {
 		return worker.executeChunked(executionCtx, run, definition, connection, projection)
@@ -294,6 +285,24 @@ func (worker *ReportWorker) execute(ctx context.Context, run report.Run) (report
 	return summary, nil
 }
 
+func (worker *ReportWorker) executionTimeout(run report.Run, definition report.Definition, projection report.ResultKind) time.Duration {
+	usesSummaryBudget := run.Source == report.SourceSchedule || run.Source == report.SourceBackground || run.ResultKind == report.ResultSummary
+	totalTimeout := definition.DetailTotalTimeout
+	if usesSummaryBudget {
+		totalTimeout = definition.SummaryTotalTimeout
+	}
+	if totalTimeout <= 0 {
+		totalTimeout = definition.DetailTimeout
+		if usesSummaryBudget {
+			totalTimeout = definition.SummaryTimeout
+		}
+	}
+	if worker.shouldUseChunks(run, definition, projection) && totalTimeout < chunkExecutionTimeout {
+		return chunkExecutionTimeout
+	}
+	return totalTimeout
+}
+
 func (worker *ReportWorker) shouldUseChunks(run report.Run, definition report.Definition, projection report.ResultKind) bool {
 	if !worker.heavyChunkEnabled || !definition.ChunkSafe || len(worker.heavyChunkTargets) == 0 {
 		return false
@@ -318,7 +327,7 @@ func (worker *ReportWorker) executeChunked(ctx context.Context, run report.Run, 
 	if !ok {
 		return report.SummaryResult{}, &executionFailure{Code: "REPORT_CHUNK_STORE_UNAVAILABLE", Stage: failure.StageQueueExecution}
 	}
-	chunkCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	chunkCtx, cancel := context.WithTimeout(ctx, chunkExecutionTimeout)
 	defer cancel()
 	totalProgressSteps := 5
 	if report.ComparisonSupported(run.ReportKey, run.Period) {

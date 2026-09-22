@@ -325,6 +325,30 @@ func TestHeavySummarySharesOneFiveMinuteDeadlineAcrossCurrentAndComparison(t *te
 	}
 }
 
+func TestChunkedHeavySummaryUsesTenMinuteExecutionBudget(t *testing.T) {
+	tenantID := uuid.New()
+	definition, ok := report.DefinitionFor(report.StockBalance)
+	if !ok {
+		t.Fatal("stock balance definition is missing")
+	}
+	run := report.Run{
+		TenantID: tenantID, ReportKey: report.StockBalance,
+		Source: report.SourceSchedule, ResultKind: report.ResultSummary,
+		Period: report.Period{Preset: report.Yesterday, DateFrom: "2026-07-14", DateTo: "2026-07-14"},
+	}
+	worker := NewReportWorker(nil, nil, nil, "worker-a", time.Now).
+		ConfigureHeavyChunks(true, true, []string{tenantID.String() + "/stock_balance"})
+
+	if got := worker.executionTimeout(run, definition, report.ResultSummary); got != 10*time.Minute {
+		t.Fatalf("chunked heavy execution timeout = %v, want 10m", got)
+	}
+
+	worker.ConfigureHeavyChunks(false, false, nil)
+	if got := worker.executionTimeout(run, definition, report.ResultSummary); got != 5*time.Minute {
+		t.Fatalf("direct heavy execution timeout = %v, want 5m", got)
+	}
+}
+
 func TestReportWorkerRunsApprovedHeavyTargetInPersistedChunks(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 0, 0, 0, time.UTC)
 	tenantID := uuid.New()

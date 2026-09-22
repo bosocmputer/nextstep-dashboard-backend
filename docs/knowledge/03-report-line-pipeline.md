@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-09-20
+last_verified: 2026-09-22
 source_of_truth: [internal/worker/report_worker.go, internal/database/report_store.go, internal/database/schedule_execution_store.go, internal/notification/worker.go, internal/delivery/worker.go, internal/failure/catalog.go]
 tags: [backend, reports, queue, line]
 ---
@@ -52,6 +52,7 @@ that an old or test occurrence was a scheduled customer delivery.
 
 - Default priorities are Schedule 100, Viewer Dashboard 90, and Background FAST/STANDARD/HEAVY 30/25/20.
 - An active/recent compatible request may be joined where the store explicitly permits it; schedule occurrences retain their own materialization.
+- Allowlisted chunked heavy reports receive a ten-minute total execution window while every JavaWS query remains bounded by the report's per-query timeout. Direct heavy reports retain their five-minute total window.
 - A lease-lost worker cannot publish a result.
 - Recovery marks abandoned work with safe codes and protects incomplete notification sets.
 - Browser cancellation only stops tracking; only queued work is safely cancellable through the report API.
