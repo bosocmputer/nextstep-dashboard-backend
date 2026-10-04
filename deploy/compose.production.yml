@@ -118,6 +118,11 @@ services:
     command: ["/app/worker"]
     environment: *app-environment
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "${WORKER_LOG_MAX_SIZE:-20m}"
+        max-file: "${WORKER_LOG_MAX_FILES:-5}"
     depends_on:
       migrate:
         condition: service_completed_successfully

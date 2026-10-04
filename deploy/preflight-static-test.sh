@@ -34,6 +34,21 @@ for feature_key in \
   fi
 done
 
+worker_logging=$(awk '
+  /^  worker:/ { in_worker = 1; next }
+  in_worker && /^  [a-zA-Z0-9_-]+:/ { exit }
+  in_worker { print }
+' "$script_dir/compose.production.yml")
+for logging_contract in \
+  'driver: json-file' \
+  'max-size: "${WORKER_LOG_MAX_SIZE:-20m}"' \
+  'max-file: "${WORKER_LOG_MAX_FILES:-5}"'; do
+  if ! printf '%s\n' "$worker_logging" | grep -Fq "$logging_contract"; then
+    echo "Worker logging must include: $logging_contract" >&2
+    exit 1
+  fi
+done
+
 chmod_line=$(awk '/chmod 600 .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
 chown_line=$(awk '/chown .*server\.key/ { print NR; exit }' "$script_dir/generate-postgres-tls.sh")
 if [ -z "$chmod_line" ] || [ -z "$chown_line" ] || [ "$chmod_line" -ge "$chown_line" ]; then

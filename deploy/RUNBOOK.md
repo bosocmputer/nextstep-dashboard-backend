@@ -155,7 +155,15 @@ its credential remains a deploy-only root secret.
    executes only the approved report SQL and returns at most one sample row per
    step; logs contain status/count only, never customer row values.
 9. Watch JSON logs, failed report runs, delivery retries, quota responses, and
-   worker heartbeat freshness for at least 30 minutes.
+   worker heartbeat freshness for at least 30 minutes. Confirm the Worker was
+   recreated with `json-file` rotation by checking its Docker log configuration;
+   the production defaults are `WORKER_LOG_MAX_SIZE=20m` and
+   `WORKER_LOG_MAX_FILES=5` (about 100 MiB total). A plain restart does not apply
+   changed Docker logging options.
+
+   ```bash
+   docker inspect --format '{{json .HostConfig.LogConfig}}' nextstep-dashboard-worker-1
+   ```
 
 Do not activate a schedule until the tenant SML connection is READY, at least
 one verified recipient has permission for every selected report, and a manual
@@ -186,6 +194,11 @@ test delivery succeeds.
 - Start with one worker, `REPORT_WORKER_CONCURRENCY=4`, and
   `DELIVERY_WORKER_CONCURRENCY=4`. Increase only after measuring SML latency,
   worker memory, PostgreSQL wait time, LINE 429 responses, and queue age.
+- Unexpected Report, Schedule, Notification, and Delivery loop failures use a
+  context-cancellable exponential retry delay from one second up to 30 seconds.
+  The delay resets after successful work or an empty queue. Keep the Worker
+  container log rotation enabled even with this rate limit so a prolonged
+  dependency outage cannot consume the host disk.
 - Keep JavaWS admission at `REPORT_GLOBAL_QUERY_CONCURRENCY=4` and
   `REPORT_HOST_QUERY_CONCURRENCY=2`; the runtime additionally permits only one
   active SML query per tenant. Lower these limits before increasing worker
