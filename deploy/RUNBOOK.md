@@ -161,6 +161,10 @@ its credential remains a deploy-only root secret.
    `WORKER_LOG_MAX_FILES=5` (about 100 MiB total). A plain restart does not apply
    changed Docker logging options.
 
+   ```bash
+   docker inspect --format '{{json .HostConfig.LogConfig}}' nextstep-dashboard-worker-1
+   ```
+
 Do not activate a schedule until the tenant SML connection is READY, at least
 one verified recipient has permission for every selected report, and a manual
 test delivery succeeds.
