@@ -30,6 +30,51 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	workerIdlePollInterval    = 500 * time.Millisecond
+	workerErrorBackoffInitial = time.Second
+	workerErrorBackoffMaximum = 30 * time.Second
+)
+
+type workerErrorBackoff struct {
+	initial time.Duration
+	maximum time.Duration
+	current time.Duration
+}
+
+func newWorkerErrorBackoff(initial, maximum time.Duration) *workerErrorBackoff {
+	if maximum < initial {
+		maximum = initial
+	}
+	return &workerErrorBackoff{initial: initial, maximum: maximum}
+}
+
+func (b *workerErrorBackoff) Next() time.Duration {
+	if b.current == 0 {
+		b.current = b.initial
+	} else if b.current >= b.maximum/2 {
+		b.current = b.maximum
+	} else {
+		b.current *= 2
+	}
+	return b.current
+}
+
+func (b *workerErrorBackoff) Reset() {
+	b.current = 0
+}
+
+func waitForWorkerLoop(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load(os.LookupEnv)
@@ -194,91 +239,103 @@ func retentionLoop(ctx context.Context, logger *slog.Logger, retentionWorker *re
 }
 
 func deliveryLoop(ctx context.Context, logger *slog.Logger, deliveryWorker *delivery.Worker, lane int) {
+	backoff := newWorkerErrorBackoff(workerErrorBackoffInitial, workerErrorBackoffMaximum)
 	for ctx.Err() == nil {
 		err := deliveryWorker.ProcessOne(ctx)
 		switch {
 		case err == nil:
+			backoff.Reset()
 			continue
 		case errors.Is(err, delivery.ErrNoDeliveryReady):
-			timer := time.NewTimer(500 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			backoff.Reset()
+			if !waitForWorkerLoop(ctx, workerIdlePollInterval) {
 				return
-			case <-timer.C:
 			}
 		case errors.Is(err, context.Canceled):
 			return
 		default:
-			logger.Error("delivery worker error", "lane", lane, "error", err)
+			retryIn := backoff.Next()
+			logger.Error("delivery worker error", "lane", lane, "error", err, "retryInMs", retryIn.Milliseconds())
+			if !waitForWorkerLoop(ctx, retryIn) {
+				return
+			}
 		}
 	}
 }
 
 func notificationLoop(ctx context.Context, logger *slog.Logger, notificationWorker *notification.Worker) {
+	backoff := newWorkerErrorBackoff(workerErrorBackoffInitial, workerErrorBackoffMaximum)
 	for ctx.Err() == nil {
 		err := notificationWorker.ProcessOne(ctx)
 		switch {
 		case err == nil:
+			backoff.Reset()
 			continue
 		case errors.Is(err, notification.ErrNoExecutionReady):
-			timer := time.NewTimer(500 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			backoff.Reset()
+			if !waitForWorkerLoop(ctx, workerIdlePollInterval) {
 				return
-			case <-timer.C:
 			}
 		case errors.Is(err, context.Canceled):
 			return
 		default:
-			logger.Error("notification worker error", "error", err)
+			retryIn := backoff.Next()
+			logger.Error("notification worker error", "error", err, "retryInMs", retryIn.Milliseconds())
+			if !waitForWorkerLoop(ctx, retryIn) {
+				return
+			}
 		}
 	}
 }
 
 func dueScheduleLoop(ctx context.Context, logger *slog.Logger, dueWorker *schedule.DueWorker) {
+	backoff := newWorkerErrorBackoff(workerErrorBackoffInitial, workerErrorBackoffMaximum)
 	for ctx.Err() == nil {
 		execution, err := dueWorker.ProcessOne(ctx)
 		switch {
 		case err == nil:
+			backoff.Reset()
 			if execution.Status == schedule.ExecutionFailed {
 				logger.Warn("due schedule paused by readiness gate", "scheduleId", execution.ScheduleID, "safeErrorCode", execution.SafeErrorCode)
 			}
 		case errors.Is(err, schedule.ErrNoDueSchedule):
-			timer := time.NewTimer(500 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			backoff.Reset()
+			if !waitForWorkerLoop(ctx, workerIdlePollInterval) {
 				return
-			case <-timer.C:
 			}
 		case errors.Is(err, context.Canceled):
 			return
 		default:
-			logger.Error("schedule worker error", "error", err)
+			retryIn := backoff.Next()
+			logger.Error("schedule worker error", "error", err, "retryInMs", retryIn.Milliseconds())
+			if !waitForWorkerLoop(ctx, retryIn) {
+				return
+			}
 		}
 	}
 }
 
 func processLoop(ctx context.Context, logger *slog.Logger, reportWorker *worker.ReportWorker, lane int) {
+	backoff := newWorkerErrorBackoff(workerErrorBackoffInitial, workerErrorBackoffMaximum)
 	for ctx.Err() == nil {
 		err := reportWorker.ProcessOne(ctx)
 		switch {
 		case err == nil:
+			backoff.Reset()
 			continue
 		case errors.Is(err, report.ErrNoQueuedRun):
-			timer := time.NewTimer(500 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			backoff.Reset()
+			if !waitForWorkerLoop(ctx, workerIdlePollInterval) {
 				return
-			case <-timer.C:
 			}
 		case errors.Is(err, context.Canceled):
 			return
 		default:
-			logger.Error("report worker lane error", "lane", lane, "error", err)
+			retryIn := backoff.Next()
+			logger.Error("report worker lane error", "lane", lane, "error", err, "retryInMs", retryIn.Milliseconds())
+			if !waitForWorkerLoop(ctx, retryIn) {
+				return
+			}
 		}
 	}
 }

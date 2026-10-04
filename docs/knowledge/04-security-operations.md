@@ -1,6 +1,6 @@
 ---
 status: current
-last_verified: 2026-07-21
+last_verified: 2026-10-04
 source_of_truth: [internal/auth/session.go, internal/sml/endpoint.go, internal/sml/config_service.go, internal/database/sml_test_coordinator.go, internal/retention/worker.go, internal/sentinel/service.go, internal/database/sentinel_store.go, internal/database/sentinel_subject_store.go, internal/failure/catalog.go, deploy/RUNBOOK.md]
 tags: [backend, security, operations, retention]
 ---
@@ -49,6 +49,11 @@ tags: [backend, security, operations, retention]
 - Release maintenance opens the external window before application mutation,
   records the internal window by an exact UUID, and suppresses PostgreSQL
   command tags so successful inserts cannot be misclassified as failures.
+- Worker Report, Schedule, Notification, and Delivery loops exponentially back
+  off unexpected failures from one to 30 seconds and reset after recovery or an
+  empty queue. Production Compose independently bounds only the Nextstep
+  Dashboard Worker JSON logs to about 100 MiB by default; changing that logging
+  contract requires recreating the Worker container, not only restarting it.
 
 ## Nextstep Sentinel
 
